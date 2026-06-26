@@ -5,7 +5,6 @@ const OpenAI  = require("openai");
 const app = express();
 app.use(express.json());
 
-// ── Configuración ──
 const APP_SECRET      = process.env.APP_SECRET;
 const VERIFY_TOKEN    = process.env.VERIFY_TOKEN;
 const OPENAI_API_KEY  = process.env.OPENAI_API_KEY;
@@ -13,10 +12,8 @@ const AI_PROMPT       = process.env.AI_PROMPT || "Eres el asistente de Roberto, 
 const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN;
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-
 const yaRespondidos = new Set();
 
-// ── Verificación del webhook ──
 app.get("/webhook", (req, res) => {
   const mode      = req.query["hub.mode"];
   const token     = req.query["hub.verify_token"];
@@ -31,34 +28,55 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// ── Recibe mensajes nuevos de Instagram ──
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   const body = req.body;
-  if (body.object !== "instagram") return;
+  console.log("📩 Body completo:", JSON.stringify(body, null, 2));
+
+  if (body.object !== "instagram") {
+    console.log("⚠️ Ignorado, object es:", body.object);
+    return;
+  }
 
   for (const entry of body.entry || []) {
+    console.log("🔍 Entry:", JSON.stringify(entry, null, 2));
 
-    // Formato 1: entry.messaging (API antigua)
-    const eventos = entry.messaging || [];
+    const eventos = [];
 
-    // Formato 2: entry.changes (API nueva con inicio de sesión de Instagram)
     for (const change of entry.changes || []) {
+      console.log("🔍 Change field:", change.field, "value:", JSON.stringify(change.value));
       if (change.field === "messages" && change.value) {
         eventos.push(change.value);
       }
     }
 
+    for (const ev of entry.messaging || []) {
+      eventos.push(ev);
+    }
+
+    console.log("📋 Eventos a procesar:", eventos.length);
+
     for (const event of eventos) {
       const senderId = event.sender?.id;
       const mensaje  = event.message?.text;
 
-      if (!senderId || !mensaje) continue;
-      if (event.message?.is_echo) continue;
+      console.log(`👤 senderId: ${senderId}, mensaje: ${mensaje}`);
+
+      if (!senderId || !mensaje) {
+        console.log("⚠️ Sin senderId o mensaje, saltando");
+        continue;
+      }
+      if (event.message?.is_echo) {
+        console.log("⚠️ Es echo, saltando");
+        continue;
+      }
 
       const msgId = event.message?.mid;
-      if (msgId && yaRespondidos.has(msgId)) continue;
+      if (msgId && yaRespondidos.has(msgId)) {
+        console.log("⚠️ Ya respondido, saltando");
+        continue;
+      }
       if (msgId) yaRespondidos.add(msgId);
 
       console.log(`📨 Mensaje de ${senderId}: "${mensaje}"`);
@@ -98,7 +116,6 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ── Ruta de salud ──
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "Instagram AI Responder activo 🤖" });
 });
