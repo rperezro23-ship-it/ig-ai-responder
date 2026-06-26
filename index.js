@@ -5,19 +5,18 @@ const OpenAI  = require("openai");
 const app = express();
 app.use(express.json());
 
-// ── Configuración (se ponen como variables de entorno en Render) ──
+// ── Configuración ──
 const APP_SECRET      = process.env.APP_SECRET;
-const VERIFY_TOKEN    = process.env.VERIFY_TOKEN;    // tú lo inventas, ej: "roberto123"
+const VERIFY_TOKEN    = process.env.VERIFY_TOKEN;
 const OPENAI_API_KEY  = process.env.OPENAI_API_KEY;
 const AI_PROMPT       = process.env.AI_PROMPT || "Eres el asistente de Roberto, entrenador fitness. Responde de forma amigable y breve en español.";
-const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN; // se obtiene después del OAuth
+const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN;
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// Guarda los mensajes ya respondidos para no repetir
 const yaRespondidos = new Set();
 
-// ── Verificación del webhook (Meta lo llama una vez al configurar) ──
+// ── Verificación del webhook ──
 app.get("/webhook", (req, res) => {
   const mode      = req.query["hub.mode"];
   const token     = req.query["hub.verify_token"];
@@ -32,9 +31,12 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// ── Recibe mensajes nuevos de Instagram ──────────────────────
+// ── Recibe mensajes nuevos de Instagram ──
 app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // Responde inmediatamente a Meta
+  res.sendStatus(200);
+
+  // Log temporal para ver qué manda Meta
+  console.log("📩 Webhook recibido:", JSON.stringify(req.body, null, 2));
 
   const body = req.body;
   if (body.object !== "instagram") return;
@@ -45,11 +47,8 @@ app.post("/webhook", async (req, res) => {
       const mensaje  = event.message?.text;
 
       if (!senderId || !mensaje) continue;
-
-      // No responder mensajes enviados por nosotros mismos
       if (event.message?.is_echo) continue;
 
-      // No repetir respuestas
       const msgId = event.message?.mid;
       if (msgId && yaRespondidos.has(msgId)) continue;
       if (msgId) yaRespondidos.add(msgId);
@@ -57,7 +56,6 @@ app.post("/webhook", async (req, res) => {
       console.log(`📨 Mensaje de ${senderId}: "${mensaje}"`);
 
       try {
-        // Llama a OpenAI
         const completion = await openai.chat.completions.create({
           model: "gpt-4o-mini",
           messages: [
@@ -73,7 +71,6 @@ app.post("/webhook", async (req, res) => {
 
         console.log(`🤖 Respuesta IA: "${respuesta}"`);
 
-        // Envía la respuesta via API de Instagram
         await axios.post(
           `https://graph.facebook.com/v19.0/me/messages`,
           {
@@ -93,7 +90,7 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ── Ruta de salud para que Render sepa que el servidor está vivo ──
+// ── Ruta de salud ──
 app.get("/", (req, res) => {
   res.json({ status: "ok", message: "Instagram AI Responder activo 🤖" });
 });
