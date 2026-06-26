@@ -35,14 +35,22 @@ app.get("/webhook", (req, res) => {
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
-  // Log temporal para ver qué manda Meta
-  console.log("📩 Webhook recibido:", JSON.stringify(req.body, null, 2));
-
   const body = req.body;
   if (body.object !== "instagram") return;
 
   for (const entry of body.entry || []) {
-    for (const event of entry.messaging || []) {
+
+    // Formato 1: entry.messaging (API antigua)
+    const eventos = entry.messaging || [];
+
+    // Formato 2: entry.changes (API nueva con inicio de sesión de Instagram)
+    for (const change of entry.changes || []) {
+      if (change.field === "messages" && change.value) {
+        eventos.push(change.value);
+      }
+    }
+
+    for (const event of eventos) {
       const senderId = event.sender?.id;
       const mensaje  = event.message?.text;
 
