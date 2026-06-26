@@ -10,6 +10,7 @@ const VERIFY_TOKEN    = process.env.VERIFY_TOKEN;
 const OPENAI_API_KEY  = process.env.OPENAI_API_KEY;
 const AI_PROMPT       = process.env.AI_PROMPT || "Eres el asistente de Roberto, entrenador fitness. Responde de forma amigable y breve en español.";
 const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN;
+const IG_ACCOUNT_ID   = process.env.IG_ACCOUNT_ID; // ID de tu cuenta de Instagram
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 const yaRespondidos = new Set();
@@ -32,20 +33,12 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   const body = req.body;
-  console.log("📩 Body completo:", JSON.stringify(body, null, 2));
-
-  if (body.object !== "instagram") {
-    console.log("⚠️ Ignorado, object es:", body.object);
-    return;
-  }
+  if (body.object !== "instagram") return;
 
   for (const entry of body.entry || []) {
-    console.log("🔍 Entry:", JSON.stringify(entry, null, 2));
-
     const eventos = [];
 
     for (const change of entry.changes || []) {
-      console.log("🔍 Change field:", change.field, "value:", JSON.stringify(change.value));
       if (change.field === "messages" && change.value) {
         eventos.push(change.value);
       }
@@ -55,28 +48,15 @@ app.post("/webhook", async (req, res) => {
       eventos.push(ev);
     }
 
-    console.log("📋 Eventos a procesar:", eventos.length);
-
     for (const event of eventos) {
       const senderId = event.sender?.id;
       const mensaje  = event.message?.text;
 
-      console.log(`👤 senderId: ${senderId}, mensaje: ${mensaje}`);
-
-      if (!senderId || !mensaje) {
-        console.log("⚠️ Sin senderId o mensaje, saltando");
-        continue;
-      }
-      if (event.message?.is_echo) {
-        console.log("⚠️ Es echo, saltando");
-        continue;
-      }
+      if (!senderId || !mensaje) continue;
+      if (event.message?.is_echo) continue;
 
       const msgId = event.message?.mid;
-      if (msgId && yaRespondidos.has(msgId)) {
-        console.log("⚠️ Ya respondido, saltando");
-        continue;
-      }
+      if (msgId && yaRespondidos.has(msgId)) continue;
       if (msgId) yaRespondidos.add(msgId);
 
       console.log(`📨 Mensaje de ${senderId}: "${mensaje}"`);
@@ -97,14 +77,15 @@ app.post("/webhook", async (req, res) => {
 
         console.log(`🤖 Respuesta IA: "${respuesta}"`);
 
+        // Endpoint correcto para API de Instagram
         await axios.post(
-          `https://graph.facebook.com/v19.0/me/messages`,
+          `https://graph.facebook.com/v21.0/${IG_ACCOUNT_ID}/messages`,
           {
             recipient: { id: senderId },
             message:   { text: respuesta }
           },
           {
-            params: { access_token: IG_ACCESS_TOKEN }
+            headers: { "Authorization": `Bearer ${IG_ACCESS_TOKEN}` }
           }
         );
 
