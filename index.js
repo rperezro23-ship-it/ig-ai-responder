@@ -42,12 +42,20 @@ app.get("/webhook", (req, res) => {
 // ---------------------------------------------------------------
 function verifySignature(req) {
   const signature = req.get("x-hub-signature-256");
+
+  // --- LOGS TEMPORALES DE DEPURACIÓN, quitar después ---
+  console.log("🔍 Firma recibida:", signature);
+  console.log("🔍 APP_SECRET está definido:", !!APP_SECRET, "longitud:", APP_SECRET?.length);
+  // -------------------------------------------------------
+
   if (!signature || !APP_SECRET) return false;
 
   const expected = "sha256=" + crypto
     .createHmac("sha256", APP_SECRET)
     .update(req.rawBody)
     .digest("hex");
+
+  console.log("🔍 Firma esperada:", expected);
 
   try {
     return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
