@@ -1,20 +1,28 @@
 const express = require("express");
+const crypto  = require("crypto");
 const axios   = require("axios");
 const OpenAI  = require("openai");
 
 const app = express();
-app.use(express.json());
+
+// Necesitamos el body "crudo" para poder verificar la firma que manda Meta
+app.use(express.json({
+  verify: (req, res, buf) => { req.rawBody = buf; }
+}));
 
 const APP_SECRET      = process.env.APP_SECRET;
 const VERIFY_TOKEN    = process.env.VERIFY_TOKEN;
 const OPENAI_API_KEY  = process.env.OPENAI_API_KEY;
 const AI_PROMPT       = process.env.AI_PROMPT || "Eres el asistente de Roberto, entrenador fitness. Responde de forma amigable y breve en español.";
-const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN;
-const IG_ACCOUNT_ID   = process.env.IG_ACCOUNT_ID; // ID de tu cuenta de Instagram
+const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN; // Instagram User Access Token (Instagram Login)
+const IG_ACCOUNT_ID   = process.env.IG_ACCOUNT_ID;   // tu <IG_ID>
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 const yaRespondidos = new Set();
 
+// ---------------------------------------------------------------
+// Verificación del webhook (GET, lo hace Meta una sola vez al configurarlo)
+// ---------------------------------------------------------------
 app.get("/webhook", (req, res) => {
   const mode      = req.query["hub.mode"];
   const token     = req.query["hub.verify_token"];
@@ -29,26 +37,42 @@ app.get("/webhook", (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------
+// Verifica que el POST realmente venga de Meta (firma HMAC con tu App Secret)
+// ---------------------------------------------------------------
+function verifySignature(req) {
+  const signature = req.get("x-hub-signature-256");
+  if (!signature || !APP_SECRET) return false;
+
+  const expected = "sha256=" + crypto
+    .createHmac("sha256", APP_SECRET)
+    .update(req.rawBody)
+    .digest("hex");
+
+  try {
+    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------
+// Recepción de mensajes
+// ---------------------------------------------------------------
 app.post("/webhook", async (req, res) => {
-  res.sendStatus(200);
+  res.sendStatus(200); // Meta espera respuesta rápida (<5s)
+
+  if (!verifySignature(req)) {
+    console.warn("⚠️ Firma inválida, se ignora el request");
+    return;
+  }
 
   const body = req.body;
   if (body.object !== "instagram") return;
 
   for (const entry of body.entry || []) {
-    const eventos = [];
-
-    for (const change of entry.changes || []) {
-      if (change.field === "messages" && change.value) {
-        eventos.push(change.value);
-      }
-    }
-
-    for (const ev of entry.messaging || []) {
-      eventos.push(ev);
-    }
-
-    for (const event of eventos) {
+    // Los eventos de mensajería llegan aquí, en entry.messaging
+    for (const event of entry.messaging || []) {
       const senderId = event.sender?.id;
       const mensaje  = event.message?.text;
 
@@ -77,9 +101,9 @@ app.post("/webhook", async (req, res) => {
 
         console.log(`🤖 Respuesta IA: "${respuesta}"`);
 
-        // Endpoint correcto para API de Instagram
+        // Endpoint correcto para Instagram API con Instagram Login
         await axios.post(
-          `https://graph.facebook.com/v21.0/${IG_ACCOUNT_ID}/messages`,
+          `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/messages`,
           {
             recipient: { id: senderId },
             message:   { text: respuesta }
