@@ -71,8 +71,22 @@ app.post("/webhook", async (req, res) => {
   if (body.object !== "instagram") return;
 
   for (const entry of body.entry || []) {
-    // Los eventos de mensajería llegan aquí, en entry.messaging
+    const eventos = [];
+
+    // Formato real observado en el probador de webhooks de Meta:
+    // entry.changes[].field === "messages", con el evento en change.value
+    for (const change of entry.changes || []) {
+      if (change.field === "messages" && change.value) {
+        eventos.push(change.value);
+      }
+    }
+
+    // Por si acaso, también soportamos el formato entry.messaging (Messenger Platform clásico)
     for (const event of entry.messaging || []) {
+      eventos.push(event);
+    }
+
+    for (const event of eventos) {
       const senderId = event.sender?.id;
       const mensaje  = event.message?.text;
 
