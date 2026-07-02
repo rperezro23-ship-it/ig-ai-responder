@@ -17,8 +17,81 @@ const AI_PROMPT       = process.env.AI_PROMPT || "Eres el asistente de Roberto, 
 const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN; // Instagram User Access Token (Instagram Login)
 const IG_ACCOUNT_ID   = process.env.IG_ACCOUNT_ID;   // tu <IG_ID>
 
+// Retraso mínimo/máximo (en segundos) antes de responder, para darle tiempo
+// al lead de mandar varias líneas seguidas sin que el bot le conteste una por una.
+const MIN_DELAY_SECONDS = parseInt(process.env.MIN_DELAY_SECONDS || "8", 10);
+const MAX_DELAY_SECONDS = parseInt(process.env.MAX_DELAY_SECONDS || "15", 10);
+
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 const yaRespondidos = new Set();
+
+// Buffer de mensajes pendientes por usuario, para agrupar mensajes seguidos
+// antes de mandarlos a la IA. Estructura: { senderId: { mensajes: [], timer } }
+const buffers = new Map();
+
+function segundosAleatorios(min, max) {
+  return Math.floor(Math.random() * (max - min + 1) + min) * 1000;
+}
+
+async function procesarBuffer(senderId) {
+  const buffer = buffers.get(senderId);
+  if (!buffer) return;
+  buffers.delete(senderId);
+
+  const mensajeCompleto = buffer.mensajes.join("\n");
+  console.log(`📨 Mensaje agrupado de ${senderId}: "${mensajeCompleto}"`);
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: AI_PROMPT },
+        { role: "user",   content: mensajeCompleto }
+      ],
+      max_tokens: 300,
+      temperature: 0.7
+    });
+
+    const respuesta = completion.choices[0]?.message?.content?.trim();
+    if (!respuesta) return;
+
+    console.log(`🤖 Respuesta IA: "${respuesta}"`);
+
+    await axios.post(
+      `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/messages`,
+      {
+        recipient: { id: senderId },
+        message:   { text: respuesta }
+      },
+      {
+        headers: { "Authorization": `Bearer ${IG_ACCESS_TOKEN}` }
+      }
+    );
+
+    console.log(`✅ Respondido a ${senderId}`);
+  } catch (err) {
+    console.error(`❌ Error al responder:`, err.response?.data || err.message);
+  }
+}
+
+function encolarMensaje(senderId, mensaje) {
+  let buffer = buffers.get(senderId);
+
+  if (!buffer) {
+    buffer = { mensajes: [], timer: null };
+    buffers.set(senderId, buffer);
+  }
+
+  buffer.mensajes.push(mensaje);
+
+  // Cada mensaje nuevo reinicia el temporizador: solo respondemos cuando
+  // pasan MIN-MAX segundos SIN que llegue un mensaje nuevo del mismo usuario.
+  if (buffer.timer) clearTimeout(buffer.timer);
+
+  const delay = segundosAleatorios(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS);
+  buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
+}
+
 
 // ---------------------------------------------------------------
 // Verificación del webhook (GET, lo hace Meta una sola vez al configurarlo)
@@ -115,41 +188,14 @@ app.post("/webhook", async (req, res) => {
       if (msgId && yaRespondidos.has(msgId)) continue;
       if (msgId) yaRespondidos.add(msgId);
 
-      console.log(`📨 Mensaje de ${senderId}: "${mensaje}"`);
+      console.log(`📨 Mensaje recibido de ${senderId}: "${mensaje}" (esperando a ver si manda más líneas...)`);
 
-      try {
-        const completion = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: AI_PROMPT },
-            { role: "user",   content: mensaje }
-          ],
-          max_tokens: 300,
-          temperature: 0.7
-        });
-
-        const respuesta = completion.choices[0]?.message?.content?.trim();
-        if (!respuesta) continue;
-
-        console.log(`🤖 Respuesta IA: "${respuesta}"`);
-
-        // Endpoint correcto para Instagram API con Instagram Login
-        await axios.post(
-          `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/messages`,
-          {
-            recipient: { id: senderId },
-            message:   { text: respuesta }
-          },
-          {
-            headers: { "Authorization": `Bearer ${IG_ACCESS_TOKEN}` }
-          }
-        );
-
-        console.log(`✅ Respondido a ${senderId}`);
-      } catch (err) {
-        console.error(`❌ Error al responder:`, err.response?.data || err.message);
-      }
+      // En vez de responder de inmediato, lo metemos al buffer del usuario.
+      // Se responderá una sola vez, agrupando todo lo que mande, después de
+      // que pasen entre MIN_DELAY_SECONDS y MAX_DELAY_SECONDS sin mensajes nuevos.
+      encolarMensaje(senderId, mensaje);
     }
+
   }
 });
 
@@ -182,7 +228,7 @@ app.get("/privacy", (req, res) => {
         política de privacidad de OpenAI para más información sobre cómo procesan los datos
         que reciben.</p>
         <h2>Contacto</h2>
-        <p>Para dudas sobre esta política, contáctanos en: rperezro23@gmail.com</p>
+        <p>Para dudas sobre esta política, contáctanos en: [tu correo aquí]</p>
       </body>
     </html>
   `);
@@ -197,7 +243,7 @@ app.get("/data-deletion", (req, res) => {
         <p>Esta aplicación no almacena de forma permanente el contenido de los mensajes
         directos procesados. Si deseas solicitar la eliminación de cualquier dato asociado
         a tu cuenta de Instagram que haya sido procesado por esta app, envía tu solicitud a:
-        rperezro23@gmail.com, indicando tu nombre de usuario de Instagram. Procesaremos tu
+        [tu correo aquí], indicando tu nombre de usuario de Instagram. Procesaremos tu
         solicitud en un plazo máximo de 30 días.</p>
       </body>
     </html>
