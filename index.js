@@ -157,5 +157,38 @@ app.get("/", (req, res) => {
   res.json({ status: "ok", message: "Instagram AI Responder activo 🤖" });
 });
 
+// --- ENDPOINTS TEMPORALES DE DIAGNÓSTICO, quitar cuando todo funcione ---
+
+// Ver qué apps están suscritas actualmente a esta cuenta de Instagram
+app.get("/check-subscription", async (req, res) => {
+  try {
+    const response = await axios.get(
+      `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/subscribed_apps`,
+      { headers: { "Authorization": `Bearer ${IG_ACCESS_TOKEN}` } }
+    );
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json(err.response?.data || { error: err.message });
+  }
+});
+
+// Forzar la suscripción al campo "messages" para esta cuenta
+app.get("/force-subscribe", async (req, res) => {
+  try {
+    const response = await axios.post(
+      `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/subscribed_apps`,
+      null,
+      {
+        params: { subscribed_fields: "messages" },
+        headers: { "Authorization": `Bearer ${IG_ACCESS_TOKEN}` }
+      }
+    );
+    res.json(response.data);
+  } catch (err) {
+    res.status(500).json(err.response?.data || { error: err.message });
+  }
+});
+// -------------------------------------------------------------------------
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
