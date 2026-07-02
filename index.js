@@ -928,6 +928,18 @@ app.get("/panel", (req, res) => {
     </div>
 
     <div class="card">
+      <h2>Token de acceso</h2>
+      <p class="hint">Vida útil del token que mantiene conectada la cuenta de Instagram. Se renueva por 60 días cada vez que lo refrescas.</p>
+      <div id="tokenInfo" style="font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--muted); line-height:1.9;">Cargando…</div>
+      <button class="add-paso" id="btnRefreshToken" type="button" style="margin-top:12px;">Refrescar token ahora (+60 días)</button>
+      <div id="tokenNuevo" style="display:none; margin-top:14px; padding-top:14px; border-top:1px solid var(--border);">
+        <label>Token nuevo — cópialo y pégalo en IG_ACCESS_TOKEN en Render</label>
+        <textarea id="tokenNuevoValor" rows="3" readonly style="font-family:'JetBrains Mono',monospace; font-size:11.5px;"></textarea>
+        <button class="add-paso" id="btnCopiarToken" type="button" style="margin-top:8px;">Copiar token</button>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Mensaje del bot</h2>
       <p class="hint">Instrucciones que sigue la IA para responder a los clientes. Sé específico: tono, qué información dar, qué evitar.</p>
       <label for="prompt">Prompt del sistema</label>
@@ -1072,8 +1084,52 @@ app.get("/panel", (req, res) => {
     setTimeout(() => { msg.textContent = ""; }, 2500);
   });
 
+  // --- Token de acceso ---
+  function estadoColor(dias){
+    if (dias === null || dias === undefined) return "var(--muted)";
+    return dias <= 10 ? "var(--coral)" : "var(--lime)";
+  }
+
+  async function cargarTokenInfo(){
+    const cont = document.getElementById("tokenInfo");
+    const data = await llamarGET("/token-info");
+    if(!data || data.error){
+      cont.innerHTML = data && data.error
+        ? "Sin datos todavía — refresca el token una vez para registrar la fecha."
+        : "No se pudo cargar.";
+      return;
+    }
+    const fecha = new Date(data.expira_aproximadamente_en);
+    const fechaTexto = fecha.toLocaleDateString("es-MX", { day: "numeric", month: "long", year: "numeric" });
+    cont.innerHTML = \`
+      <div>Vence aprox.: <span style="color:var(--text)">\${fechaTexto}</span></div>
+      <div>Días restantes: <span style="color:\${estadoColor(data.dias_restantes)}; font-weight:600;">\${data.dias_restantes}</span></div>
+      <div style="color:var(--muted); font-size:12px;">Última renovación: \${new Date(data.obtenido_en).toLocaleDateString("es-MX")}</div>
+    \`;
+  }
+
+  document.getElementById("btnRefreshToken").addEventListener("click", async () => {
+    const btn = document.getElementById("btnRefreshToken");
+    btn.textContent = "Refrescando…"; btn.disabled = true;
+    const data = await llamarGET("/refresh-token");
+    btn.textContent = "Refrescar token ahora (+60 días)"; btn.disabled = false;
+    if(!data || !data.access_token){ alert("No se pudo refrescar el token. Revisa que tenga al menos 24h de generado."); return; }
+    document.getElementById("tokenNuevo").style.display = "block";
+    document.getElementById("tokenNuevoValor").value = data.access_token;
+    cargarTokenInfo();
+  });
+
+  document.getElementById("btnCopiarToken").addEventListener("click", () => {
+    const ta = document.getElementById("tokenNuevoValor");
+    ta.select();
+    navigator.clipboard.writeText(ta.value);
+    const b = document.getElementById("btnCopiarToken");
+    b.textContent = "✓ Copiado"; setTimeout(() => b.textContent = "Copiar token", 1800);
+  });
+
   actualizarEstado();
   cargarConfig();
+  cargarTokenInfo();
 </script>
 </body>
 </html>
