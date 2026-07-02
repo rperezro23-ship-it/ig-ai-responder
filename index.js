@@ -26,7 +26,8 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 const yaRespondidos = new Set();
 
 // Buffer de mensajes pendientes por usuario, para agrupar mensajes seguidos
-// antes de mandarlos a la IA. Estructura: { senderId: { mensajes: [], timer } }
+// y garantizar que solo se mande UNA respuesta por ráfaga de mensajes.
+// Estructura: { senderId: { mensajes: [], timer, enProceso } }
 const buffers = new Map();
 
 function segundosAleatorios(min, max) {
@@ -35,10 +36,17 @@ function segundosAleatorios(min, max) {
 
 async function procesarBuffer(senderId) {
   const buffer = buffers.get(senderId);
-  if (!buffer) return;
-  buffers.delete(senderId);
+  if (!buffer || buffer.mensajes.length === 0) return;
 
-  const mensajeCompleto = buffer.mensajes.join("\n");
+  // Tomamos una "foto" de los mensajes acumulados hasta ahora y la vaciamos,
+  // pero NO borramos el buffer del Map: si llegan mensajes nuevos mientras
+  // esperamos la respuesta de la IA, se van a acumular aquí mismo y se
+  // agruparán en la SIGUIENTE respuesta, nunca se manda una segunda en paralelo.
+  const mensajesAResponder = buffer.mensajes;
+  buffer.mensajes = [];
+  buffer.enProceso = true;
+
+  const mensajeCompleto = mensajesAResponder.join("\n");
   console.log(`📨 Mensaje agrupado de ${senderId}: "${mensajeCompleto}"`);
 
   try {
@@ -53,24 +61,35 @@ async function procesarBuffer(senderId) {
     });
 
     const respuesta = completion.choices[0]?.message?.content?.trim();
-    if (!respuesta) return;
+    if (respuesta) {
+      console.log(`🤖 Respuesta IA: "${respuesta}"`);
 
-    console.log(`🤖 Respuesta IA: "${respuesta}"`);
+      await axios.post(
+        `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/messages`,
+        {
+          recipient: { id: senderId },
+          message:   { text: respuesta }
+        },
+        {
+          headers: { "Authorization": `Bearer ${IG_ACCESS_TOKEN}` }
+        }
+      );
 
-    await axios.post(
-      `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/messages`,
-      {
-        recipient: { id: senderId },
-        message:   { text: respuesta }
-      },
-      {
-        headers: { "Authorization": `Bearer ${IG_ACCESS_TOKEN}` }
-      }
-    );
-
-    console.log(`✅ Respondido a ${senderId}`);
+      console.log(`✅ Respondido a ${senderId} (una sola respuesta por ${mensajesAResponder.length} línea(s))`);
+    }
   } catch (err) {
     console.error(`❌ Error al responder:`, err.response?.data || err.message);
+  }
+
+  buffer.enProceso = false;
+
+  // Si mientras respondíamos llegaron mensajes nuevos, programamos otra
+  // ronda de espera para responderlos juntos (una sola respuesta más).
+  if (buffer.mensajes.length > 0) {
+    const delay = segundosAleatorios(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS);
+    buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
+  } else {
+    buffers.delete(senderId);
   }
 }
 
@@ -78,11 +97,16 @@ function encolarMensaje(senderId, mensaje) {
   let buffer = buffers.get(senderId);
 
   if (!buffer) {
-    buffer = { mensajes: [], timer: null };
+    buffer = { mensajes: [], timer: null, enProceso: false };
     buffers.set(senderId, buffer);
   }
 
   buffer.mensajes.push(mensaje);
+
+  // Si ya estamos generando una respuesta para este usuario, no tocamos el
+  // timer: el mensaje quedó guardado y se incluirá en la siguiente ronda
+  // (procesarBuffer lo reprograma automáticamente al terminar).
+  if (buffer.enProceso) return;
 
   // Cada mensaje nuevo reinicia el temporizador: solo respondemos cuando
   // pasan MIN-MAX segundos SIN que llegue un mensaje nuevo del mismo usuario.
