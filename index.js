@@ -32,17 +32,32 @@ const MAX_DELAY_SECONDS = parseInt(process.env.MAX_DELAY_SECONDS || "15", 10);
 // esa ventana antes de programarse y antes de enviarse.
 //
 // Configúralo en Render con la variable de entorno SEGUIMIENTOS, en formato
-// JSON, como un arreglo de { "horas": X, "mensaje": "..." }. "horas" es
-// el tiempo de inactividad del usuario (desde su último mensaje) que debe
-// pasar para disparar ese seguimiento. Ejemplo:
+// JSON, como un arreglo de pasos: { "horas": X, "mensajes": ["...", "...", ...] }.
+// Puedes poner tantos pasos como quieras. "horas" es el tiempo de inactividad
+// del usuario (desde su último mensaje) que debe pasar para disparar ese paso.
+// "mensajes" es una LISTA de mensajes posibles para ese paso: cada vez que ese
+// paso se dispara para un usuario, se manda el siguiente de la lista (rotando,
+// sin repetir ninguno hasta haber usado todos). Ejemplo con 2 pasos, cada uno
+// con varios mensajes para variar:
 //
-// SEGUIMIENTOS=[{"horas":1,"mensaje":"Oye, ¿sigues por ahí? 😊"},{"horas":5,"mensaje":"Cualquier duda me dices, aquí ando 🙌"}]
+// SEGUIMIENTOS=[
+//   {"horas":1,"mensajes":["Oye, ¿sigues por ahí? 😊","¿Te quedaste pensando? Aquí ando 🙌","¿Alguna duda? Con gusto te ayudo"]},
+//   {"horas":5,"mensajes":["Cualquier cosa me dices","Aquí sigo si me necesitas","No hay prisa, aquí estoy cuando quieras"]}
+// ]
 //
-// Si no defines la variable, se usan estos valores por defecto:
+// Si no defines la variable, se usan estos valores por defecto (un solo paso
+// a la 1 hora, con 5 mensajes rotando):
 const SEGUIMIENTOS_DEFAULT = [
-  { horas: 1,  mensaje: "Hola de nuevo 👋 ¿sigues por ahí? Con gusto te sigo ayudando." },
-  { horas: 4,  mensaje: "Oye, cualquier duda que tengas aquí ando, no hay prisa 🙌" },
-  { horas: 20, mensaje: "Última señal antes de que se cierre esta conversación por hoy — si te interesa seguimos platicando 😊" }
+  {
+    horas: 1,
+    mensajes: [
+      "Hola de nuevo 👋 ¿sigues por ahí? Con gusto te sigo ayudando.",
+      "Oye, cualquier duda que tengas aquí ando, no hay prisa 🙌",
+      "¿Te quedaste pensando en algo? Aquí sigo si me necesitas 😊",
+      "¿Seguimos platicando? Con gusto te resuelvo lo que necesites.",
+      "Última señal antes de que se cierre esta conversación por hoy — si te interesa seguimos platicando 😊"
+    ]
+  }
 ];
 
 let SEGUIMIENTOS_CONFIG;
@@ -56,6 +71,23 @@ try {
 }
 // Ordenamos por tiempo ascendente, por si acaso el usuario los puso desordenados
 SEGUIMIENTOS_CONFIG = [...SEGUIMIENTOS_CONFIG].sort((a, b) => a.horas - b.horas);
+
+// Índice de rotación por usuario y por paso, para saber qué mensaje del pool
+// toca mandar la próxima vez que ese paso se dispare para ese usuario.
+// Estructura: { senderId: { [indicePaso]: proximoIndiceDeMensaje } }
+const rotacionSeguimientos = new Map();
+
+function obtenerSiguienteMensaje(senderId, indicePaso, mensajes) {
+  if (!rotacionSeguimientos.has(senderId)) rotacionSeguimientos.set(senderId, {});
+  const estado = rotacionSeguimientos.get(senderId);
+
+  const indiceActual = estado[indicePaso] || 0;
+  const mensaje = mensajes[indiceActual % mensajes.length];
+
+  estado[indicePaso] = (indiceActual + 1) % mensajes.length;
+
+  return mensaje;
+}
 
 const VENTANA_24H_MS = 24 * 60 * 60 * 1000;
 // Dejamos un pequeño colchón de seguridad para no arriesgarnos a que el envío
@@ -87,7 +119,10 @@ function programarSeguimientos(senderId) {
   const limiteVentana = ultimoMsg + VENTANA_24H_MS - COLCHON_SEGURIDAD_MS;
   const timers = [];
 
-  for (const { horas, mensaje } of SEGUIMIENTOS_CONFIG) {
+  for (let i = 0; i < SEGUIMIENTOS_CONFIG.length; i++) {
+    const { horas, mensajes } = SEGUIMIENTOS_CONFIG[i];
+    if (!Array.isArray(mensajes) || mensajes.length === 0) continue;
+
     const momentoDisparo = ultimoMsg + horas * 60 * 60 * 1000;
 
     if (momentoDisparo > limiteVentana) {
@@ -98,6 +133,7 @@ function programarSeguimientos(senderId) {
     const delay = momentoDisparo - Date.now();
     if (delay <= 0) continue; // ya pasó ese punto, no tiene caso programarlo
 
+    const indicePaso = i;
     const timer = setTimeout(async () => {
       // Verificación final por si acaso, justo antes de enviar
       const sigueVigente = Date.now() <= (ultimoMensajeUsuario.get(senderId) + VENTANA_24H_MS - COLCHON_SEGURIDAD_MS);
@@ -105,6 +141,7 @@ function programarSeguimientos(senderId) {
         console.log(`⏭️ Seguimiento de ${horas} h para ${senderId} cancelado al momento de enviar: ya se salió de la ventana de 24h.`);
         return;
       }
+      const mensaje = obtenerSiguienteMensaje(senderId, indicePaso, mensajes);
       console.log(`🔔 Enviando seguimiento (${horas} h) a ${senderId}: "${mensaje}"`);
       await enviarMensajeInstagram(senderId, mensaje);
       agregarAlHistorial(senderId, "assistant", mensaje);
@@ -459,6 +496,7 @@ app.get("/seguimientos/:senderId?", (req, res) => {
     info.senderId = req.params.senderId;
     info.ultimoMensajeUsuario = ultimo ? new Date(ultimo).toISOString() : null;
     info.seguimientosPendientes = (timersSeguimiento.get(req.params.senderId) || []).length;
+    info.rotacionPorPaso = rotacionSeguimientos.get(req.params.senderId) || {};
   }
   res.json(info);
 });
