@@ -277,12 +277,20 @@ app.get("/webhook", (req, res) => {
 // ---------------------------------------------------------------
 function verifySignature(req) {
   const signature = req.get("x-hub-signature-256");
+
+  // --- LOGS TEMPORALES DE DEPURACIÓN, quitar después ---
+  console.log("🔍 Firma recibida:", signature);
+  console.log("🔍 APP_SECRET longitud:", APP_SECRET?.length, "| primeros 4:", APP_SECRET?.slice(0, 4), "| últimos 4:", APP_SECRET?.slice(-4));
+  // -------------------------------------------------------
+
   if (!signature || !APP_SECRET) return false;
 
   const expected = "sha256=" + crypto
     .createHmac("sha256", APP_SECRET)
     .update(req.rawBody)
     .digest("hex");
+
+  console.log("🔍 Firma esperada:", expected);
 
   try {
     return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
@@ -537,6 +545,47 @@ app.get("/force-subscribe", requireAdminKey, async (req, res) => {
 app.get("/historial/:senderId", requireAdminKey, async (req, res) => {
   const conv = await obtenerConversacion(req.params.senderId);
   res.json(conv);
+});
+
+// Intercambia el token actual (corto) por uno de larga duración (60 días).
+// Úsalo UNA VEZ con tu token actual, copia el resultado y actualiza IG_ACCESS_TOKEN en Render.
+app.get("/get-long-lived-token", requireAdminKey, async (req, res) => {
+  try {
+    const response = await axios.get("https://graph.instagram.com/access_token", {
+      params: {
+        grant_type: "ig_exchange_token",
+        client_secret: APP_SECRET,
+        access_token: IG_ACCESS_TOKEN
+      }
+    });
+    res.json({
+      mensaje: "Copia access_token y actualiza IG_ACCESS_TOKEN en Render",
+      ...response.data,
+      expira_en_dias: response.data.expires_in ? Math.round(response.data.expires_in / 86400) : null
+    });
+  } catch (err) {
+    res.status(500).json(err.response?.data || { error: err.message });
+  }
+});
+
+// Refresca un token de larga duración ANTES de que expire (debe tener al menos 24h de generado).
+// Extiende la validez por 60 días más. Ejecútalo periódicamente (ej. cada 45-50 días).
+app.get("/refresh-token", requireAdminKey, async (req, res) => {
+  try {
+    const response = await axios.get("https://graph.instagram.com/refresh_access_token", {
+      params: {
+        grant_type: "ig_refresh_token",
+        access_token: IG_ACCESS_TOKEN
+      }
+    });
+    res.json({
+      mensaje: "Copia access_token y actualiza IG_ACCESS_TOKEN en Render",
+      ...response.data,
+      expira_en_dias: response.data.expires_in ? Math.round(response.data.expires_in / 86400) : null
+    });
+  } catch (err) {
+    res.status(500).json(err.response?.data || { error: err.message });
+  }
 });
 
 // Ver los seguimientos programados/pendientes para un usuario (debug)
