@@ -30,6 +30,30 @@ const yaRespondidos = new Set();
 // Estructura: { senderId: { mensajes: [], timer, enProceso } }
 const buffers = new Map();
 
+// Historial de conversación por usuario, para que el bot recuerde lo hablado
+// y continúe la conversación en vez de responder cada mensaje "desde cero".
+// Estructura: { senderId: [ { role: "user"|"assistant", content: "..." }, ... ] }
+// NOTA: esto vive en memoria (RAM). Si el servidor se reinicia o se duerme
+// (plan gratuito de Render), el historial se pierde. Para memoria permanente
+// habría que guardar esto en una base de datos externa.
+const historiales = new Map();
+
+// Cuántos mensajes (de ambos lados) mantenemos como máximo por usuario,
+// para no mandar un historial infinito a la IA (costo y límite de tokens).
+const MAX_HISTORIAL = parseInt(process.env.MAX_HISTORIAL || "20", 10);
+
+function obtenerHistorial(senderId) {
+  if (!historiales.has(senderId)) historiales.set(senderId, []);
+  return historiales.get(senderId);
+}
+
+function agregarAlHistorial(senderId, role, content) {
+  const historial = obtenerHistorial(senderId);
+  historial.push({ role, content });
+  // Recortamos por si se hace muy largo
+  while (historial.length > MAX_HISTORIAL) historial.shift();
+}
+
 function segundosAleatorios(min, max) {
   return Math.floor(Math.random() * (max - min + 1) + min) * 1000;
 }
@@ -50,11 +74,14 @@ async function procesarBuffer(senderId) {
   console.log(`📨 Mensaje agrupado de ${senderId}: "${mensajeCompleto}"`);
 
   try {
+    const historial = obtenerHistorial(senderId);
+
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: AI_PROMPT },
-        { role: "user",   content: mensajeCompleto }
+        ...historial,
+        { role: "user", content: mensajeCompleto }
       ],
       max_tokens: 300,
       temperature: 0.7
@@ -63,6 +90,10 @@ async function procesarBuffer(senderId) {
     const respuesta = completion.choices[0]?.message?.content?.trim();
     if (respuesta) {
       console.log(`🤖 Respuesta IA: "${respuesta}"`);
+
+      // Guardamos el intercambio en el historial para recordarlo después
+      agregarAlHistorial(senderId, "user", mensajeCompleto);
+      agregarAlHistorial(senderId, "assistant", respuesta);
 
       await axios.post(
         `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/messages`,
@@ -304,6 +335,12 @@ app.get("/force-subscribe", async (req, res) => {
   } catch (err) {
     res.status(500).json(err.response?.data || { error: err.message });
   }
+});
+
+// Ver el historial de conversación guardado en memoria para un usuario (debug)
+app.get("/historial/:senderId", (req, res) => {
+  const historial = historiales.get(req.params.senderId) || [];
+  res.json({ senderId: req.params.senderId, historial });
 });
 // -------------------------------------------------------------------------
 
