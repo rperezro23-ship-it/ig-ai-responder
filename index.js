@@ -17,7 +17,6 @@ const OPENAI_API_KEY  = process.env.OPENAI_API_KEY;
 const AI_PROMPT       = process.env.AI_PROMPT || "Eres el asistente de Roberto, entrenador fitness. Responde de forma amigable y breve en español.";
 const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN; // Instagram User Access Token (Instagram Login)
 const IG_ACCOUNT_ID   = process.env.IG_ACCOUNT_ID;   // tu <IG_ID>
-const INSTAGRAM_APP_ID = process.env.INSTAGRAM_APP_ID; // ID de la app (panel de Meta)
 
 const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -551,8 +550,9 @@ app.get("/get-long-lived-token", requireAdminKey, async (req, res) => {
         access_token: IG_ACCESS_TOKEN
       }
     });
+    await guardarFechaTokenDB(response.data.expires_in);
     res.json({
-      mensaje: "Copia access_token y actualiza IG_ACCESS_TOKEN en Render",
+      mensaje: "Copia access_token y actualiza IG_ACCESS_TOKEN en Render. Ya quedó registrada la fecha para /token-info.",
       ...response.data,
       expira_en_dias: response.data.expires_in ? Math.round(response.data.expires_in / 86400) : null
     });
@@ -571,8 +571,9 @@ app.get("/refresh-token", requireAdminKey, async (req, res) => {
         access_token: IG_ACCESS_TOKEN
       }
     });
+    await guardarFechaTokenDB(response.data.expires_in);
     res.json({
-      mensaje: "Copia access_token y actualiza IG_ACCESS_TOKEN en Render",
+      mensaje: "Copia access_token y actualiza IG_ACCESS_TOKEN en Render. Ya quedó registrada la fecha para /token-info.",
       ...response.data,
       expira_en_dias: response.data.expires_in ? Math.round(response.data.expires_in / 86400) : null
     });
@@ -581,53 +582,74 @@ app.get("/refresh-token", requireAdminKey, async (req, res) => {
   }
 });
 
-// Consulta directamente a Meta cuánto tiempo de vida le queda al token actual
-// (IG_ACCESS_TOKEN), usando el endpoint oficial debug_token de Graph API.
-// No requiere guardar nada nuevo: solo necesita INSTAGRAM_APP_ID + APP_SECRET
-// para armar el "app access token" (app_id|app_secret) que exige ese endpoint.
+// ---------------------------------------------------------------
+// Seguimiento de vencimiento del token (guardado nosotros mismos)
+// ---------------------------------------------------------------
+// Los tokens de "Instagram API con Instagram Login" (graph.instagram.com)
+// NO se pueden consultar con graph.facebook.com/debug_token (da error 190,
+// "Cannot get application info"): ese endpoint es solo para tokens de
+// Facebook Login. Meta no ofrece un endpoint de consulta directa para este
+// tipo de token, así que llevamos la cuenta nosotros: cada vez que se
+// genera o refresca el token (60 días de duración), guardamos la fecha
+// en Supabase, y calculamos desde ahí cuánto le queda.
+
+async function guardarFechaTokenDB(expiresInSeconds) {
+  const ahoraISO = new Date().toISOString();
+  const { error } = await supabase
+    .from("app_config")
+    .upsert({
+      key: "ig_token",
+      obtenido_en: ahoraISO,
+      expira_en_segundos: expiresInSeconds || 5184000, // 60 días por defecto
+      actualizado_en: ahoraISO
+    });
+  if (error) console.error("❌ Error guardando fecha del token en Supabase:", error.message);
+}
+
+async function obtenerInfoTokenDB() {
+  const { data, error } = await supabase
+    .from("app_config")
+    .select("*")
+    .eq("key", "ig_token")
+    .maybeSingle();
+
+  if (error) {
+    console.error("❌ Error leyendo info del token de Supabase:", error.message);
+    return null;
+  }
+  return data;
+}
+
+// Consulta cuánto tiempo de vida le queda al token actual, según la fecha
+// que guardamos la última vez que se generó o refrescó (ver /get-long-lived-token
+// y /refresh-token). Si nunca se ha usado ninguno de esos dos endpoints desde
+// que existe esta función, no habrá dato guardado todavía.
 app.get("/token-info", requireAdminKey, async (req, res) => {
   try {
-    if (!INSTAGRAM_APP_ID) {
-      return res.status(500).json({
-        error: "Falta la variable de entorno INSTAGRAM_APP_ID en Render."
+    const info = await obtenerInfoTokenDB();
+
+    if (!info) {
+      return res.status(404).json({
+        error: "Todavía no hay una fecha guardada para el token. " +
+          "Corre /get-long-lived-token o /refresh-token una vez (con este código ya desplegado) " +
+          "para que quede registrada, y después vuelve a consultar /token-info."
       });
     }
 
-    const appAccessToken = `${INSTAGRAM_APP_ID}|${APP_SECRET}`;
-
-    const response = await axios.get("https://graph.facebook.com/debug_token", {
-      params: {
-        input_token: IG_ACCESS_TOKEN,
-        access_token: appAccessToken
-      }
-    });
-
-    const info = response.data?.data || {};
-    const expiraEnTimestamp = info.expires_at || info.data_access_expires_at || null;
-    const ahoraSeg = Math.floor(Date.now() / 1000);
-
-    let diasRestantes = null;
-    let expiraFecha = null;
-
-    if (expiraEnTimestamp && expiraEnTimestamp > 0) {
-      diasRestantes = Math.round((expiraEnTimestamp - ahoraSeg) / 86400);
-      expiraFecha = new Date(expiraEnTimestamp * 1000).toISOString();
-    }
+    const obtenidoEn = new Date(info.obtenido_en).getTime();
+    const expiraEnMs = obtenidoEn + (info.expira_en_segundos * 1000);
+    const diasRestantes = Math.round((expiraEnMs - Date.now()) / 86400000);
 
     res.json({
-      valido: info.is_valid ?? null,
-      tipo: info.type || null,
-      app_id: info.app_id || null,
-      alcance_permisos: info.scopes || null,
-      expira_en_timestamp: expiraEnTimestamp,
-      expira_en_fecha: expiraFecha,
-      dias_restantes: expiraEnTimestamp === 0
-        ? "El token no expira (0 = indefinido, poco común en tokens de usuario)"
-        : diasRestantes,
-      crudo: info
+      obtenido_en: info.obtenido_en,
+      expira_aproximadamente_en: new Date(expiraEnMs).toISOString(),
+      dias_restantes: diasRestantes,
+      estado: diasRestantes <= 10
+        ? "⚠️ Quedan pocos días, corre /refresh-token pronto"
+        : "✅ OK"
     });
   } catch (err) {
-    res.status(500).json(err.response?.data || { error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
