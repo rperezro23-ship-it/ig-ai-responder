@@ -78,6 +78,10 @@ app.post("/webhook", async (req, res) => {
   const body = req.body;
   if (body.object !== "instagram") return;
 
+  // --- DIAGNÓSTICO TEMPORAL: log de TODO lo que llega, para ver la forma real del payload ---
+  console.log("📦 Payload completo:", JSON.stringify(body, null, 2));
+  // -------------------------------------------------------------------------------------------
+
   for (const entry of body.entry || []) {
     const eventos = [];
 
@@ -92,6 +96,12 @@ app.post("/webhook", async (req, res) => {
     // Por si acaso, también soportamos el formato entry.messaging (Messenger Platform clásico)
     for (const event of entry.messaging || []) {
       eventos.push(event);
+    }
+
+    // Si los mensajes están cayendo en "standby" (conflicto de Handover Protocol con otra app),
+    // esto lo va a mostrar en el log aunque no lo procesemos todavía.
+    if (entry.standby) {
+      console.log("⚠️ Evento recibido en STANDBY (otra app tiene el control principal):", JSON.stringify(entry.standby));
     }
 
     for (const event of eventos) {
