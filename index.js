@@ -22,6 +22,18 @@ const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
+// Clave para proteger los endpoints de diagnóstico/admin (historial, seguimientos, etc.)
+// Genera una clave larga y aleatoria y ponla en Render como ADMIN_API_KEY.
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
+
+function requireAdminKey(req, res, next) {
+  const key = req.get("x-admin-key") || req.query.key;
+  if (!ADMIN_API_KEY || key !== ADMIN_API_KEY) {
+    return res.status(401).json({ error: "No autorizado" });
+  }
+  next();
+}
+
 // Retraso mínimo/máximo (en segundos) antes de responder, para darle tiempo
 // al lead de mandar varias líneas seguidas sin que el bot le conteste una por una.
 const MIN_DELAY_SECONDS = parseInt(process.env.MIN_DELAY_SECONDS || "8", 10);
@@ -493,7 +505,7 @@ app.get("/data-deletion", (req, res) => {
 
 // --- ENDPOINTS DE DIAGNÓSTICO ---
 
-app.get("/check-subscription", async (req, res) => {
+app.get("/check-subscription", requireAdminKey, async (req, res) => {
   try {
     const response = await axios.get(
       `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/subscribed_apps`,
@@ -505,7 +517,7 @@ app.get("/check-subscription", async (req, res) => {
   }
 });
 
-app.get("/force-subscribe", async (req, res) => {
+app.get("/force-subscribe", requireAdminKey, async (req, res) => {
   try {
     const response = await axios.post(
       `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/subscribed_apps`,
@@ -522,13 +534,13 @@ app.get("/force-subscribe", async (req, res) => {
 });
 
 // Ver el historial y estado guardado en Supabase para un usuario (debug)
-app.get("/historial/:senderId", async (req, res) => {
+app.get("/historial/:senderId", requireAdminKey, async (req, res) => {
   const conv = await obtenerConversacion(req.params.senderId);
   res.json(conv);
 });
 
 // Ver los seguimientos programados/pendientes para un usuario (debug)
-app.get("/seguimientos/:senderId?", async (req, res) => {
+app.get("/seguimientos/:senderId?", requireAdminKey, async (req, res) => {
   if (!req.params.senderId) {
     return res.json({ configuracion: SEGUIMIENTOS_CONFIG });
   }
