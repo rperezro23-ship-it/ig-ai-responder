@@ -198,6 +198,12 @@ async function programarSeguimientosDB(senderId) {
 // Llamado periódicamente (por UptimeRobot pegándole a /cron/seguimientos)
 // para revisar qué seguimientos ya se deben mandar.
 async function procesarSeguimientosPendientesDB() {
+  const botActivo = await estaBotActivo();
+  if (!botActivo) {
+    console.log("⏸️ Bot apagado: se omite el envío de seguimientos programados.");
+    return { procesados: 0, bot_apagado: true };
+  }
+
   const ahoraISO = new Date().toISOString();
 
   const { data: pendientes, error } = await supabase
@@ -318,6 +324,19 @@ async function procesarBuffer(senderId) {
 
   const mensajeCompleto = mensajesAResponder.join("\n");
   console.log(`📨 Mensaje agrupado de ${senderId}: "${mensajeCompleto}"`);
+
+  const botActivo = await estaBotActivo();
+  if (!botActivo) {
+    console.log(`⏸️ Bot apagado: se ignora el mensaje de ${senderId} (no se genera ni envía respuesta).`);
+    buffer.enProceso = false;
+    if (buffer.mensajes.length > 0) {
+      const delay = segundosAleatorios(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS);
+      buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
+    } else {
+      buffers.delete(senderId);
+    }
+    return;
+  }
 
   try {
     const conv = await obtenerConversacion(senderId);
@@ -593,6 +612,41 @@ app.get("/refresh-token", requireAdminKey, async (req, res) => {
 // genera o refresca el token (60 días de duración), guardamos la fecha
 // en Supabase, y calculamos desde ahí cuánto le queda.
 
+// ---------------------------------------------------------------
+// Interruptor de encendido/apagado del bot
+// ---------------------------------------------------------------
+// Reutiliza la misma tabla app_config (clave/valor) que ya usamos para
+// la fecha del token. Mientras esté "off", el bot NO manda respuestas
+// automáticas ni seguimientos, pero el webhook sigue vivo (no se rompe
+// nada, solo se abstiene de contestar).
+
+async function estaBotActivo() {
+  const { data, error } = await supabase
+    .from("app_config")
+    .select("*")
+    .eq("key", "bot_status")
+    .maybeSingle();
+
+  if (error) {
+    console.error("❌ Error leyendo estado del bot, se asume ENCENDIDO por seguridad:", error.message);
+    return true;
+  }
+
+  // Si nunca se ha tocado el interruptor, por defecto está encendido.
+  if (!data) return true;
+
+  return data.estado !== "off";
+}
+
+async function ponerEstadoBot(estado) {
+  const ahoraISO = new Date().toISOString();
+  const { error } = await supabase
+    .from("app_config")
+    .upsert({ key: "bot_status", estado, actualizado_en: ahoraISO });
+
+  if (error) console.error("❌ Error guardando estado del bot:", error.message);
+}
+
 async function guardarFechaTokenDB(expiresInSeconds) {
   const ahoraISO = new Date().toISOString();
   const { error } = await supabase
@@ -651,6 +705,87 @@ app.get("/token-info", requireAdminKey, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Consultar/cambiar el estado del bot (encendido/apagado)
+app.get("/bot/estado", requireAdminKey, async (req, res) => {
+  const activo = await estaBotActivo();
+  res.json({ activo, estado: activo ? "on" : "off" });
+});
+
+app.get("/bot/encender", requireAdminKey, async (req, res) => {
+  await ponerEstadoBot("on");
+  res.json({ mensaje: "✅ Bot ENCENDIDO", estado: "on" });
+});
+
+app.get("/bot/apagar", requireAdminKey, async (req, res) => {
+  await ponerEstadoBot("off");
+  res.json({ mensaje: "⏸️ Bot APAGADO (no responderá mensajes ni mandará seguimientos)", estado: "off" });
+});
+
+// Página sencilla con dos botones para encender/apagar el bot sin tener
+// que escribir URLs a mano. Pide la clave de admin una sola vez y la
+// guarda en el navegador (localStorage) para no pedirla cada vez.
+app.get("/panel", (req, res) => {
+  res.type("html").send(`
+    <html>
+      <head>
+        <title>Panel del Bot - Instagram AI Responder</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+      </head>
+      <body style="font-family: sans-serif; max-width: 480px; margin: 60px auto; text-align: center; line-height: 1.6;">
+        <h1>Panel del Bot</h1>
+        <p id="estado" style="font-size: 20px; font-weight: bold;">Cargando estado...</p>
+        <button id="btnOn" style="padding: 14px 28px; font-size: 16px; margin: 8px; background: #2ecc71; color: white; border: none; border-radius: 8px; cursor: pointer;">✅ Encender</button>
+        <button id="btnOff" style="padding: 14px 28px; font-size: 16px; margin: 8px; background: #e74c3c; color: white; border: none; border-radius: 8px; cursor: pointer;">⏸️ Apagar</button>
+        <p id="mensaje" style="color: #666; margin-top: 20px;"></p>
+
+        <script>
+          function getKey() {
+            let key = localStorage.getItem("admin_key");
+            if (!key) {
+              key = prompt("Ingresa tu ADMIN_API_KEY:");
+              if (key) localStorage.setItem("admin_key", key);
+            }
+            return key;
+          }
+
+          async function llamar(endpoint) {
+            const key = getKey();
+            if (!key) return;
+            const res = await fetch(endpoint + "?key=" + encodeURIComponent(key));
+            if (res.status === 401) {
+              localStorage.removeItem("admin_key");
+              alert("Clave incorrecta, intenta de nuevo.");
+              return;
+            }
+            const data = await res.json();
+            return data;
+          }
+
+          async function actualizarEstado() {
+            const data = await llamar("/bot/estado");
+            if (!data) return;
+            document.getElementById("estado").textContent = data.activo ? "🟢 Bot ENCENDIDO" : "🔴 Bot APAGADO";
+          }
+
+          document.getElementById("btnOn").addEventListener("click", async () => {
+            const data = await llamar("/bot/encender");
+            if (data) document.getElementById("mensaje").textContent = data.mensaje;
+            actualizarEstado();
+          });
+
+          document.getElementById("btnOff").addEventListener("click", async () => {
+            const data = await llamar("/bot/apagar");
+            if (data) document.getElementById("mensaje").textContent = data.mensaje;
+            actualizarEstado();
+          });
+
+          actualizarEstado();
+        </script>
+      </body>
+    </html>
+  `);
 });
 
 // Ver los seguimientos programados/pendientes para un usuario (debug)
