@@ -144,7 +144,7 @@ async function guardarConversacion(senderId, campos) {
 async function agregarAlHistorialDB(senderId, role, content) {
   const conv = await obtenerConversacion(senderId);
   const historial = [...(conv.historial || []), { role, content }];
-  while (historial.length > MAX_HISTORIAL) historial.shift();
+  while (historial.length > configActual.max_historial) historial.shift();
   await guardarConversacion(senderId, { historial });
   return historial;
 }
@@ -173,8 +173,8 @@ async function programarSeguimientosDB(senderId) {
   const limiteVentana = ultimoMsg + VENTANA_24H_MS - COLCHON_SEGURIDAD_MS;
 
   const filas = [];
-  for (let i = 0; i < SEGUIMIENTOS_CONFIG.length; i++) {
-    const { horas, mensajes } = SEGUIMIENTOS_CONFIG[i];
+  for (let i = 0; i < configActual.seguimientos.length; i++) {
+    const { horas, mensajes } = configActual.seguimientos[i];
     if (!Array.isArray(mensajes) || mensajes.length === 0) continue;
 
     const momentoDisparo = ultimoMsg + horas * 60 * 60 * 1000;
@@ -234,7 +234,7 @@ async function procesarSeguimientosPendientesDB() {
       continue;
     }
 
-    const pasoConfig = SEGUIMIENTOS_CONFIG[pasoIndex];
+    const pasoConfig = configActual.seguimientos[pasoIndex];
     if (!pasoConfig) {
       await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
       continue;
@@ -330,7 +330,7 @@ async function procesarBuffer(senderId) {
     console.log(`⏸️ Bot apagado: se ignora el mensaje de ${senderId} (no se genera ni envía respuesta).`);
     buffer.enProceso = false;
     if (buffer.mensajes.length > 0) {
-      const delay = segundosAleatorios(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS);
+      const delay = segundosAleatorios(configActual.min_delay, configActual.max_delay);
       buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
     } else {
       buffers.delete(senderId);
@@ -345,7 +345,7 @@ async function procesarBuffer(senderId) {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: AI_PROMPT },
+        { role: "system", content: configActual.ai_prompt },
         ...historial,
         { role: "user", content: mensajeCompleto }
       ],
@@ -371,7 +371,7 @@ async function procesarBuffer(senderId) {
   buffer.enProceso = false;
 
   if (buffer.mensajes.length > 0) {
-    const delay = segundosAleatorios(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS);
+    const delay = segundosAleatorios(configActual.min_delay, configActual.max_delay);
     buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
   } else {
     buffers.delete(senderId);
@@ -395,7 +395,7 @@ function encolarMensaje(senderId, mensaje) {
 
   if (buffer.timer) clearTimeout(buffer.timer);
 
-  const delay = segundosAleatorios(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS);
+  const delay = segundosAleatorios(configActual.min_delay, configActual.max_delay);
   buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
 }
 
@@ -613,8 +613,61 @@ app.get("/refresh-token", requireAdminKey, async (req, res) => {
 // en Supabase, y calculamos desde ahí cuánto le queda.
 
 // ---------------------------------------------------------------
-// Interruptor de encendido/apagado del bot
+// Configuración dinámica editable desde /panel
 // ---------------------------------------------------------------
+// Guarda prompt, tiempos y seguimientos en Supabase (tabla app_config,
+// columna "valor" en formato JSON) para poder editarlos desde el panel
+// sin tener que tocar variables de entorno ni volver a desplegar.
+// Si no hay nada guardado todavía, se usan los valores de las variables
+// de entorno (.env) como default.
+
+let configActual = {
+  ai_prompt: AI_PROMPT,
+  min_delay: MIN_DELAY_SECONDS,
+  max_delay: MAX_DELAY_SECONDS,
+  max_historial: MAX_HISTORIAL,
+  seguimientos: SEGUIMIENTOS_CONFIG
+};
+
+async function cargarConfigDesdeDB() {
+  try {
+    const { data, error } = await supabase
+      .from("app_config")
+      .select("*")
+      .eq("key", "bot_config")
+      .maybeSingle();
+
+    if (error) {
+      console.error("❌ Error cargando configuración de Supabase, se usan los valores por defecto:", error.message);
+      return;
+    }
+    if (data && data.valor) {
+      configActual = { ...configActual, ...data.valor };
+      configActual.seguimientos = [...configActual.seguimientos].sort((a, b) => a.horas - b.horas);
+      console.log("✅ Configuración cargada desde Supabase.");
+    } else {
+      console.log("ℹ️ No hay configuración guardada todavía, se usan los valores por defecto (.env).");
+    }
+  } catch (err) {
+    console.error("❌ Error inesperado cargando configuración:", err.message);
+  }
+}
+
+async function guardarConfigDB(nuevaConfig) {
+  configActual = { ...configActual, ...nuevaConfig };
+  configActual.seguimientos = [...configActual.seguimientos].sort((a, b) => a.horas - b.horas);
+
+  const { error } = await supabase
+    .from("app_config")
+    .upsert({ key: "bot_config", valor: configActual, actualizado_en: new Date().toISOString() });
+
+  if (error) console.error("❌ Error guardando configuración en Supabase:", error.message);
+  return configActual;
+}
+
+cargarConfigDesdeDB();
+
+
 // Reutiliza la misma tabla app_config (clave/valor) que ya usamos para
 // la fecha del token. Mientras esté "off", el bot NO manda respuestas
 // automáticas ni seguimientos, pero el webhook sigue vivo (no se rompe
@@ -723,75 +776,314 @@ app.get("/bot/apagar", requireAdminKey, async (req, res) => {
   res.json({ mensaje: "⏸️ Bot APAGADO (no responderá mensajes ni mandará seguimientos)", estado: "off" });
 });
 
+// Leer y guardar la configuración editable (prompt, tiempos, seguimientos)
+app.get("/config", requireAdminKey, (req, res) => {
+  res.json(configActual);
+});
+
+app.post("/config", requireAdminKey, async (req, res) => {
+  try {
+    const { ai_prompt, min_delay, max_delay, max_historial, seguimientos } = req.body || {};
+
+    const nuevaConfig = {};
+    if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
+    if (Number.isFinite(min_delay) && min_delay >= 0) nuevaConfig.min_delay = min_delay;
+    if (Number.isFinite(max_delay) && max_delay >= 0) nuevaConfig.max_delay = max_delay;
+    if (Number.isFinite(max_historial) && max_historial > 0) nuevaConfig.max_historial = max_historial;
+    if (Array.isArray(seguimientos)) nuevaConfig.seguimientos = seguimientos;
+
+    const guardado = await guardarConfigDB(nuevaConfig);
+    res.json({ mensaje: "✅ Configuración guardada", config: guardado });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Página sencilla con dos botones para encender/apagar el bot sin tener
 // que escribir URLs a mano. Pide la clave de admin una sola vez y la
 // guarda en el navegador (localStorage) para no pedirla cada vez.
 app.get("/panel", (req, res) => {
   res.type("html").send(`
-    <html>
-      <head>
-        <title>Panel del Bot - Instagram AI Responder</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-      </head>
-      <body style="font-family: sans-serif; max-width: 480px; margin: 60px auto; text-align: center; line-height: 1.6;">
-        <h1>Panel del Bot</h1>
-        <p id="estado" style="font-size: 20px; font-weight: bold;">Cargando estado...</p>
-        <button id="btnOn" style="padding: 14px 28px; font-size: 16px; margin: 8px; background: #2ecc71; color: white; border: none; border-radius: 8px; cursor: pointer;">✅ Encender</button>
-        <button id="btnOff" style="padding: 14px 28px; font-size: 16px; margin: 8px; background: #e74c3c; color: white; border: none; border-radius: 8px; cursor: pointer;">⏸️ Apagar</button>
-        <p id="mensaje" style="color: #666; margin-top: 20px;"></p>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel — Instagram AI Responder</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#12141A; --surface:#1B1F27; --surface-2:#20242E; --border:#2A2F3A;
+    --text:#F3F5F7; --muted:#8A93A3; --lime:#C9FF3E; --coral:#FF5A5A;
+    --radius:14px;
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:'Inter',sans-serif; padding-bottom:120px;
+  }
+  .wrap{ max-width:640px; margin:0 auto; padding:28px 20px 40px; }
+  .eyebrow{ font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--lime); margin:0 0 6px; }
+  h1{ font-family:'Oswald',sans-serif; font-weight:700; font-size:30px; margin:0 0 4px;
+    letter-spacing:.01em; }
+  .sub{ color:var(--muted); font-size:14px; margin:0 0 22px; }
 
-        <script>
-          function getKey() {
-            let key = localStorage.getItem("admin_key");
-            if (!key) {
-              key = prompt("Ingresa tu ADMIN_API_KEY:");
-              if (key) localStorage.setItem("admin_key", key);
-            }
-            return key;
-          }
+  .statusbar{
+    display:flex; align-items:center; justify-content:space-between; gap:14px;
+    background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+    padding:16px 18px; margin-bottom:22px; position:relative; overflow:hidden;
+  }
+  .statusbar::after{
+    content:""; position:absolute; left:0; right:0; bottom:0; height:2px;
+    background:linear-gradient(90deg, transparent, var(--lime), transparent);
+    background-size:200% 100%; animation:sweep 2.8s linear infinite;
+  }
+  .statusbar.off::after{ background:linear-gradient(90deg, transparent, var(--coral), transparent); background-size:200% 100%; }
+  @keyframes sweep{ 0%{background-position:200% 0;} 100%{background-position:-200% 0;} }
+  .status-left{ display:flex; align-items:center; gap:12px; }
+  .dot{ width:11px; height:11px; border-radius:50%; background:var(--lime);
+    box-shadow:0 0 0 0 rgba(201,255,62,.5); animation:pulse 1.8s ease-out infinite; flex-shrink:0; }
+  .dot.off{ background:var(--coral); animation:none; box-shadow:none; }
+  @keyframes pulse{
+    0%{ box-shadow:0 0 0 0 rgba(201,255,62,.5); }
+    70%{ box-shadow:0 0 0 9px rgba(201,255,62,0); }
+    100%{ box-shadow:0 0 0 0 rgba(201,255,62,0); }
+  }
+  .status-text{ font-family:'Oswald',sans-serif; font-weight:600; font-size:17px; }
+  .status-text small{ display:block; font-family:'Inter',sans-serif; font-weight:400;
+    font-size:12.5px; color:var(--muted); margin-top:1px; }
+  .switch-row{ display:flex; gap:8px; }
+  .btn{
+    font-family:'Inter',sans-serif; font-weight:600; font-size:13.5px; border:none;
+    border-radius:9px; padding:10px 16px; cursor:pointer; transition:filter .15s, transform .1s;
+  }
+  .btn:active{ transform:scale(.97); }
+  .btn-on{ background:var(--lime); color:#12141A; }
+  .btn-off{ background:transparent; color:var(--coral); border:1px solid rgba(255,90,90,.4); }
+  .btn:hover{ filter:brightness(1.08); }
 
-          async function llamar(endpoint) {
-            const key = getKey();
-            if (!key) return;
-            const res = await fetch(endpoint + "?key=" + encodeURIComponent(key));
-            if (res.status === 401) {
-              localStorage.removeItem("admin_key");
-              alert("Clave incorrecta, intenta de nuevo.");
-              return;
-            }
-            const data = await res.json();
-            return data;
-          }
+  .card{
+    background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+    padding:20px; margin-bottom:16px;
+  }
+  .card h2{ font-family:'Oswald',sans-serif; font-size:16px; font-weight:600; margin:0 0 3px; }
+  .card .hint{ color:var(--muted); font-size:12.5px; margin:0 0 14px; line-height:1.5; }
+  label{ display:block; font-size:12.5px; color:var(--muted); margin:0 0 6px; font-weight:500; }
+  textarea, input[type=number], input[type=text]{
+    width:100%; background:var(--surface-2); border:1px solid var(--border); color:var(--text);
+    border-radius:9px; padding:10px 12px; font-family:'Inter',sans-serif; font-size:14px;
+    resize:vertical; outline:none;
+  }
+  textarea:focus, input:focus{ border-color:var(--lime); }
+  textarea{ min-height:90px; line-height:1.5; }
+  .row2{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .row2 + .hint{ margin-top:10px; }
 
-          async function actualizarEstado() {
-            const data = await llamar("/bot/estado");
-            if (!data) return;
-            document.getElementById("estado").textContent = data.activo ? "🟢 Bot ENCENDIDO" : "🔴 Bot APAGADO";
-          }
+  .paso{
+    border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:10px;
+    background:rgba(255,255,255,.015);
+  }
+  .paso-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; }
+  .paso-head .eyebrow-num{ font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--lime); }
+  .quitar{ background:none; border:none; color:var(--muted); font-size:12px; cursor:pointer; text-decoration:underline; }
+  .quitar:hover{ color:var(--coral); }
+  .add-paso{
+    width:100%; background:transparent; border:1px dashed var(--border); color:var(--muted);
+    border-radius:9px; padding:11px; font-size:13px; cursor:pointer; font-weight:500;
+  }
+  .add-paso:hover{ border-color:var(--lime); color:var(--lime); }
 
-          document.getElementById("btnOn").addEventListener("click", async () => {
-            const data = await llamar("/bot/encender");
-            if (data) document.getElementById("mensaje").textContent = data.mensaje;
-            actualizarEstado();
-          });
+  .savebar{
+    position:fixed; left:0; right:0; bottom:0; background:linear-gradient(0deg, var(--bg) 60%, transparent);
+    padding:22px 20px 20px;
+  }
+  .savebar-inner{ max-width:640px; margin:0 auto; display:flex; align-items:center; gap:12px; }
+  .save-btn{
+    flex:1; background:var(--lime); color:#12141A; font-family:'Oswald',sans-serif;
+    font-weight:600; font-size:15px; border:none; border-radius:11px; padding:14px; cursor:pointer;
+    letter-spacing:.02em;
+  }
+  .save-btn:active{ transform:scale(.985); }
+  .save-msg{ font-size:12.5px; color:var(--muted); white-space:nowrap; }
+  .save-msg.ok{ color:var(--lime); }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="eyebrow">Instagram AI Responder</p>
+    <h1>Panel del bot</h1>
+    <p class="sub">Robertoperez.coach — control y configuración</p>
 
-          document.getElementById("btnOff").addEventListener("click", async () => {
-            const data = await llamar("/bot/apagar");
-            if (data) document.getElementById("mensaje").textContent = data.mensaje;
-            actualizarEstado();
-          });
+    <div class="statusbar" id="statusbar">
+      <div class="status-left">
+        <div class="dot" id="dot"></div>
+        <div class="status-text" id="statusText">Cargando…<small>Consultando estado</small></div>
+      </div>
+      <div class="switch-row">
+        <button class="btn btn-on" id="btnOn">Encender</button>
+        <button class="btn btn-off" id="btnOff">Apagar</button>
+      </div>
+    </div>
 
-          actualizarEstado();
-        </script>
-      </body>
-    </html>
+    <div class="card">
+      <h2>Mensaje del bot</h2>
+      <p class="hint">Instrucciones que sigue la IA para responder a los clientes. Sé específico: tono, qué información dar, qué evitar.</p>
+      <label for="prompt">Prompt del sistema</label>
+      <textarea id="prompt" rows="5" placeholder="Eres el asistente de..."></textarea>
+    </div>
+
+    <div class="card">
+      <h2>Tiempos de respuesta</h2>
+      <p class="hint">Antes de contestar, el bot espera un rato aleatorio entre estos dos valores — así da tiempo a que el cliente termine de escribir varias líneas seguidas.</p>
+      <div class="row2">
+        <div>
+          <label for="minDelay">Espera mínima (segundos)</label>
+          <input type="number" id="minDelay" min="0">
+        </div>
+        <div>
+          <label for="maxDelay">Espera máxima (segundos)</label>
+          <input type="number" id="maxDelay" min="0">
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Memoria de conversación</h2>
+      <p class="hint">Cuántos mensajes recientes (tuyos y del cliente) recuerda el bot al responder. Más alto = más contexto, pero más costo por respuesta.</p>
+      <label for="maxHistorial">Mensajes a recordar</label>
+      <input type="number" id="maxHistorial" min="1">
+    </div>
+
+    <div class="card">
+      <h2>Seguimientos automáticos</h2>
+      <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo.</p>
+      <div id="pasos"></div>
+      <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
+    </div>
+  </div>
+
+  <div class="savebar">
+    <div class="savebar-inner">
+      <button class="save-btn" id="btnGuardar">Guardar cambios</button>
+      <span class="save-msg" id="saveMsg"></span>
+    </div>
+  </div>
+
+<script>
+  function getKey(){
+    let key = localStorage.getItem("admin_key");
+    if(!key){ key = prompt("Ingresa tu ADMIN_API_KEY:"); if(key) localStorage.setItem("admin_key", key); }
+    return key;
+  }
+  async function llamarGET(endpoint){
+    const key = getKey(); if(!key) return null;
+    const res = await fetch(endpoint + "?key=" + encodeURIComponent(key));
+    if(res.status === 401){ localStorage.removeItem("admin_key"); alert("Clave incorrecta."); return null; }
+    return res.json();
+  }
+  async function llamarPOST(endpoint, body){
+    const key = getKey(); if(!key) return null;
+    const res = await fetch(endpoint + "?key=" + encodeURIComponent(key), {
+      method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body)
+    });
+    if(res.status === 401){ localStorage.removeItem("admin_key"); alert("Clave incorrecta."); return null; }
+    return res.json();
+  }
+
+  function pintarEstado(activo){
+    document.getElementById("dot").className = "dot" + (activo ? "" : " off");
+    document.getElementById("statusbar").className = "statusbar" + (activo ? "" : " off");
+    document.getElementById("statusText").innerHTML = activo
+      ? "Bot encendido<small>Respondiendo mensajes automáticamente</small>"
+      : "Bot apagado<small>No responde ni manda seguimientos</small>";
+  }
+
+  async function actualizarEstado(){
+    const data = await llamarGET("/bot/estado");
+    if(data) pintarEstado(data.activo);
+  }
+  document.getElementById("btnOn").addEventListener("click", async () => { await llamarGET("/bot/encender"); actualizarEstado(); });
+  document.getElementById("btnOff").addEventListener("click", async () => { await llamarGET("/bot/apagar"); actualizarEstado(); });
+
+  // --- Seguimientos: editor dinámico ---
+  let pasos = [];
+
+  function renderPasos(){
+    const cont = document.getElementById("pasos");
+    cont.innerHTML = "";
+    pasos.forEach((paso, i) => {
+      const div = document.createElement("div");
+      div.className = "paso";
+      div.innerHTML = \`
+        <div class="paso-head">
+          <span class="eyebrow-num">PASO \${i + 1}</span>
+          <button type="button" class="quitar" data-i="\${i}">quitar</button>
+        </div>
+        <label>Horas de silencio antes de disparar</label>
+        <input type="number" step="0.1" min="0" class="paso-horas" data-i="\${i}" value="\${paso.horas}" style="margin-bottom:10px;">
+        <label>Mensajes (uno por línea, rotan entre ellos)</label>
+        <textarea class="paso-mensajes" data-i="\${i}" rows="3">\${(paso.mensajes || []).join("\\n")}</textarea>
+      \`;
+      cont.appendChild(div);
+    });
+    cont.querySelectorAll(".quitar").forEach(b => b.addEventListener("click", e => {
+      pasos.splice(+e.target.dataset.i, 1); renderPasos();
+    }));
+  }
+
+  document.getElementById("addPaso").addEventListener("click", () => {
+    pasos.push({ horas: 1, mensajes: ["Escribe aquí un mensaje de seguimiento..."] });
+    renderPasos();
+  });
+
+  function leerPasosDelDOM(){
+    document.querySelectorAll(".paso-horas").forEach((input, i) => { pasos[i].horas = parseFloat(input.value) || 0; });
+    document.querySelectorAll(".paso-mensajes").forEach((ta, i) => {
+      pasos[i].mensajes = ta.value.split("\\n").map(m => m.trim()).filter(Boolean);
+    });
+  }
+
+  async function cargarConfig(){
+    const cfg = await llamarGET("/config");
+    if(!cfg) return;
+    document.getElementById("prompt").value = cfg.ai_prompt || "";
+    document.getElementById("minDelay").value = cfg.min_delay ?? 8;
+    document.getElementById("maxDelay").value = cfg.max_delay ?? 15;
+    document.getElementById("maxHistorial").value = cfg.max_historial ?? 20;
+    pasos = Array.isArray(cfg.seguimientos) ? JSON.parse(JSON.stringify(cfg.seguimientos)) : [];
+    renderPasos();
+  }
+
+  document.getElementById("btnGuardar").addEventListener("click", async () => {
+    leerPasosDelDOM();
+    const body = {
+      ai_prompt: document.getElementById("prompt").value,
+      min_delay: parseInt(document.getElementById("minDelay").value, 10),
+      max_delay: parseInt(document.getElementById("maxDelay").value, 10),
+      max_historial: parseInt(document.getElementById("maxHistorial").value, 10),
+      seguimientos: pasos
+    };
+    const msg = document.getElementById("saveMsg");
+    msg.textContent = "Guardando…"; msg.className = "save-msg";
+    const data = await llamarPOST("/config", body);
+    if(data){ msg.textContent = "✓ Guardado"; msg.className = "save-msg ok"; }
+    setTimeout(() => { msg.textContent = ""; }, 2500);
+  });
+
+  actualizarEstado();
+  cargarConfig();
+</script>
+</body>
+</html>
   `);
 });
 
 // Ver los seguimientos programados/pendientes para un usuario (debug)
 app.get("/seguimientos/:senderId?", requireAdminKey, async (req, res) => {
   if (!req.params.senderId) {
-    return res.json({ configuracion: SEGUIMIENTOS_CONFIG });
+    return res.json({ configuracion: configActual.seguimientos });
   }
   const { data, error } = await supabase
     .from("seguimientos_programados")
@@ -800,7 +1092,7 @@ app.get("/seguimientos/:senderId?", requireAdminKey, async (req, res) => {
     .order("disparar_en", { ascending: true });
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json({ configuracion: SEGUIMIENTOS_CONFIG, seguimientos: data });
+  res.json({ configuracion: configActual.seguimientos, seguimientos: data });
 });
 
 const PORT = process.env.PORT || 3000;
