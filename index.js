@@ -277,20 +277,12 @@ app.get("/webhook", (req, res) => {
 // ---------------------------------------------------------------
 function verifySignature(req) {
   const signature = req.get("x-hub-signature-256");
-
-  // --- LOGS TEMPORALES DE DEPURACIÓN, quitar después ---
-  console.log("🔍 Firma recibida:", signature);
-  console.log("🔍 APP_SECRET longitud:", APP_SECRET?.length, "| primeros 4:", APP_SECRET?.slice(0, 4), "| últimos 4:", APP_SECRET?.slice(-4));
-  // -------------------------------------------------------
-
   if (!signature || !APP_SECRET) return false;
 
   const expected = "sha256=" + crypto
     .createHmac("sha256", APP_SECRET)
     .update(req.rawBody)
     .digest("hex");
-
-  console.log("🔍 Firma esperada:", expected);
 
   try {
     return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
@@ -489,7 +481,7 @@ app.get("/privacy", (req, res) => {
         segura. Consulta las políticas de privacidad de cada proveedor para más
         información sobre cómo procesan los datos que reciben.</p>
         <h2>Contacto</h2>
-        <p>Para dudas sobre esta política, contáctanos en: [tu correo aquí]</p>
+        <p>Para dudas sobre esta política, contáctanos en: rperezro23@gmail.com</p>
       </body>
     </html>
   `);
@@ -503,7 +495,7 @@ app.get("/data-deletion", (req, res) => {
         <h1>Instrucciones para Eliminación de Datos</h1>
         <p>Si deseas solicitar la eliminación de cualquier dato asociado a tu cuenta de
         Instagram que haya sido procesado por esta app (incluyendo el historial de
-        conversación guardado), envía tu solicitud a: [tu correo aquí], indicando tu
+        conversación guardado), envía tu solicitud a: rperezro23@gmail.com, indicando tu
         nombre de usuario de Instagram. Procesaremos tu solicitud en un plazo máximo
         de 30 días.</p>
       </body>
