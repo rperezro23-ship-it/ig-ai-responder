@@ -157,6 +157,53 @@ app.get("/", (req, res) => {
   res.json({ status: "ok", message: "Instagram AI Responder activo 🤖" });
 });
 
+// ---------------------------------------------------------------
+// Política de privacidad y eliminación de datos
+// (requeridas por Meta para poder publicar la app)
+// ---------------------------------------------------------------
+app.get("/privacy", (req, res) => {
+  res.type("html").send(`
+    <html>
+      <head><title>Política de Privacidad - Instagram AI Responder</title></head>
+      <body style="font-family: sans-serif; max-width: 700px; margin: 40px auto; line-height: 1.6;">
+        <h1>Política de Privacidad</h1>
+        <p>Última actualización: ${new Date().toLocaleDateString("es-MX")}</p>
+        <p>Esta aplicación ("Instagram AI Responder") es una herramienta de uso privado que
+        automatiza respuestas a mensajes directos (DM) recibidos en la cuenta de Instagram
+        conectada, utilizando inteligencia artificial (OpenAI).</p>
+        <h2>Datos que procesamos</h2>
+        <p>Procesamos el contenido de los mensajes directos recibidos y el identificador
+        de Instagram del remitente, únicamente con el fin de generar y enviar una respuesta
+        automática. No almacenamos el contenido de los mensajes de forma permanente ni lo
+        compartimos con terceros, salvo el envío del texto del mensaje al proveedor de IA
+        (OpenAI) para generar la respuesta.</p>
+        <h2>Uso de terceros</h2>
+        <p>Utilizamos la API de OpenAI para generar las respuestas automáticas. Consulta la
+        política de privacidad de OpenAI para más información sobre cómo procesan los datos
+        que reciben.</p>
+        <h2>Contacto</h2>
+        <p>Para dudas sobre esta política, contáctanos en: rperezro23@gmail.com</p>
+      </body>
+    </html>
+  `);
+});
+
+app.get("/data-deletion", (req, res) => {
+  res.type("html").send(`
+    <html>
+      <head><title>Eliminación de Datos - Instagram AI Responder</title></head>
+      <body style="font-family: sans-serif; max-width: 700px; margin: 40px auto; line-height: 1.6;">
+        <h1>Instrucciones para Eliminación de Datos</h1>
+        <p>Esta aplicación no almacena de forma permanente el contenido de los mensajes
+        directos procesados. Si deseas solicitar la eliminación de cualquier dato asociado
+        a tu cuenta de Instagram que haya sido procesado por esta app, envía tu solicitud a:
+        rperezro23@gmail.com, indicando tu nombre de usuario de Instagram. Procesaremos tu
+        solicitud en un plazo máximo de 30 días.</p>
+      </body>
+    </html>
+  `);
+});
+
 // --- ENDPOINTS TEMPORALES DE DIAGNÓSTICO, quitar cuando todo funcione ---
 
 // Ver qué apps están suscritas actualmente a esta cuenta de Instagram
