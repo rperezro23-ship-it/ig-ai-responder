@@ -723,11 +723,12 @@ app.get("/privacy", (req, res) => {
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 ${FUENTES_HTML}
 ${estilosBase()}
+<style>
+  .content-area.standalone{ margin-left:0; display:flex; justify-content:center; padding:60px 24px 90px; }
+</style>
 </head>
 <body>
-  <div class="app-shell">
-  ${sidebarHTML("privacy")}
-  <div class="content-area">
+  <div class="content-area standalone">
   <div class="main" style="max-width:760px;">
     <p class="page-eyebrow">Instagram AI Responder</p>
     <h1 class="page-title">Política de Privacidad</h1>
@@ -761,9 +762,6 @@ ${estilosBase()}
       <h2>Contacto</h2>
       <p>Para dudas sobre esta política, contáctanos en: <a href="mailto:rperezro23@gmail.com">rperezro23@gmail.com</a></p>
     </div>
-
-    <a class="volver" href="/panel">← Volver al panel</a>
-  </div>
   </div>
   </div>
 </body>
@@ -782,11 +780,12 @@ app.get("/data-deletion", (req, res) => {
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 ${FUENTES_HTML}
 ${estilosBase()}
+<style>
+  .content-area.standalone{ margin-left:0; display:flex; justify-content:center; padding:60px 24px 90px; }
+</style>
 </head>
 <body>
-  <div class="app-shell">
-  ${sidebarHTML("deletion")}
-  <div class="content-area">
+  <div class="content-area standalone">
   <div class="main" style="max-width:760px;">
     <p class="page-eyebrow">Instagram AI Responder</p>
     <h1 class="page-title">Eliminación de Datos</h1>
@@ -800,9 +799,6 @@ ${estilosBase()}
       nombre de usuario de Instagram. Procesaremos tu solicitud en un plazo máximo
       de 30 días.</p>
     </div>
-
-    <a class="volver" href="/panel">← Volver al panel</a>
-  </div>
   </div>
   </div>
 </body>
