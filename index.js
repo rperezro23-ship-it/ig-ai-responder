@@ -17,7 +17,7 @@ const OPENAI_API_KEY  = process.env.OPENAI_API_KEY;
 const AI_PROMPT       = process.env.AI_PROMPT || "Eres el asistente de Roberto, entrenador fitness. Responde de forma amigable y breve en español.";
 const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN; // Instagram User Access Token (Instagram Login) — legado, ver "cuenta conectada" en Supabase
 const IG_ACCOUNT_ID   = process.env.IG_ACCOUNT_ID;   // tu <IG_ID> — legado, ver "cuenta conectada" en Supabase
-const IG_APP_ID        = process.env.IG_APP_ID;       // App ID de Meta (Instagram API with Instagram Login)
+const IG_APP_ID        = process.env.IG_APP_ID;       // ID de "Instagram API with Instagram Login" (Instagram Business Login) — NO es el App ID general de Meta
 
 const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -1146,16 +1146,14 @@ app.get("/panel", (req, res) => {
 
   /* --- Conectar cuentas de Instagram --- */
   .conectar-header{ margin-bottom:16px; }
-  .conectar-botones{ display:flex; gap:10px; margin-bottom:18px; flex-wrap:wrap; }
+  .conectar-botones{ margin-bottom:18px; }
   .btn-conectar{
-    flex:1; min-width:180px; font-family:'Inter',sans-serif; font-weight:600; font-size:13.5px;
-    border:none; border-radius:10px; padding:13px 16px; cursor:pointer; text-align:center;
-    background:linear-gradient(90deg, #2ED8B6, #37B0E8); color:#0B1220;
+    width:100%; font-family:'Oswald',sans-serif; font-weight:600; font-size:14.5px;
+    letter-spacing:.02em; border:none; border-radius:10px; padding:13px 16px; cursor:pointer;
+    text-align:center; background:var(--lime); color:#12141A; transition:filter .15s, transform .1s;
   }
-  .btn-conectar:hover{ filter:brightness(1.06); }
-  .btn-conectar.disabled{
-    background:var(--surface-2); color:var(--muted); cursor:not-allowed; border:1px solid var(--border);
-  }
+  .btn-conectar:hover{ filter:brightness(1.08); }
+  .btn-conectar:active{ transform:scale(.985); }
   .cuentas-titulo{ font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:.12em;
     text-transform:uppercase; color:var(--lime); margin:0 0 4px; }
   .cuentas-subtitulo{ font-family:'Oswald',sans-serif; font-weight:600; font-size:15px; margin:0 0 12px; }
@@ -1207,7 +1205,6 @@ app.get("/panel", (req, res) => {
       </div>
       <div class="conectar-botones">
         <button class="btn-conectar" id="btnConectarInstagram">Instagram directo (token 60 días)</button>
-        <button class="btn-conectar disabled" id="btnConectarFacebook" title="Próximamente">Facebook / Meta (como antes)</button>
       </div>
 
       <p class="cuentas-titulo">Tus cuentas</p>
@@ -1299,9 +1296,6 @@ app.get("/panel", (req, res) => {
   document.getElementById("btnConectarInstagram").addEventListener("click", () => {
     const key = getKey(); if(!key) return;
     window.location.href = "/oauth/instagram/start?key=" + encodeURIComponent(key);
-  });
-  document.getElementById("btnConectarFacebook").addEventListener("click", () => {
-    alert("La conexión vía Facebook / Meta todavía no está disponible. Por ahora usa 'Instagram directo'.");
   });
 
   function iniciales(nombre){
