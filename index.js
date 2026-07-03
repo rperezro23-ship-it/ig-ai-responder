@@ -158,11 +158,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null };
   }
 
   return data;
@@ -635,6 +635,49 @@ async function enviarMensajeInstagram(senderId, texto) {
   );
 }
 
+// ---------------------------------------------------------------
+// Calificación automática de leads: además de responder, la IA revisa
+// si la conversación ya cumple con los criterios que definiste en
+// /panel (edad, objetivo, género, etc.) y marca la conversación como
+// "califica" la primera vez que se cumplen. Es una llamada aparte,
+// barata y sin afectar el mensaje que recibe el cliente.
+// ---------------------------------------------------------------
+async function evaluarCalificacion(historial, criterios) {
+  try {
+    const transcripcion = historial
+      .map(m => `${m.role === "user" ? "Cliente" : "Asistente"}: ${m.content}`)
+      .join("\n");
+
+    const resp = await openaiClient.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      max_tokens: 200,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "Eres un evaluador de leads para un negocio. Te doy una lista de criterios de " +
+            "calificación y el historial de una conversación de Instagram. Debes decidir si la " +
+            "persona cumple TODOS los criterios, según lo que ha quedado claro en la conversación " +
+            "(de forma explícita o razonablemente implícita). Si falta información para confirmar " +
+            "algún criterio, todavía NO califica. Responde ÚNICAMENTE un JSON con este formato " +
+            'exacto, sin texto adicional: {"califica": true o false, "razon": "explicación breve en español"}.\n\n' +
+            "Criterios de calificación:\n" + criterios
+        },
+        { role: "user", content: "Historial de la conversación:\n\n" + transcripcion }
+      ]
+    });
+
+    const texto = resp.choices[0]?.message?.content?.trim();
+    const parsed = JSON.parse(texto);
+    return { califica: Boolean(parsed.califica), razon: parsed.razon || "" };
+  } catch (err) {
+    console.error("⚠️ Error evaluando calificación de lead:", err.response?.data || err.message);
+    return null;
+  }
+}
+
 async function procesarBuffer(senderId) {
   const buffer = buffers.get(senderId);
   if (!buffer || buffer.mensajes.length === 0) return;
@@ -684,6 +727,30 @@ async function procesarBuffer(senderId) {
       await enviarMensajeInstagram(senderId, respuesta);
 
       console.log(`✅ Respondido a ${senderId} (una sola respuesta por ${mensajesAResponder.length} línea(s))`);
+
+      // Calificación automática: solo si está activada, hay criterios definidos,
+      // y esta conversación todavía no había calificado antes.
+      if (configActual.calificacion_activa && configActual.criterios_calificacion?.trim()) {
+        const convActualizada = await obtenerConversacion(senderId);
+        if (!convActualizada.califica) {
+          const evaluacion = await evaluarCalificacion(convActualizada.historial || [], configActual.criterios_calificacion);
+          if (evaluacion?.califica) {
+            console.log(`🏷️ ${senderId} CALIFICA: ${evaluacion.razon}`);
+            await guardarConversacion(senderId, {
+              califica: true,
+              calificado_en: new Date().toISOString(),
+              razon_calificacion: evaluacion.razon || null
+            });
+
+            if (configActual.mensaje_calificado?.trim()) {
+              const mensajeCalendario = configActual.mensaje_calificado.trim();
+              await enviarMensajeInstagram(senderId, mensajeCalendario);
+              await agregarAlHistorialDB(senderId, "assistant", mensajeCalendario);
+              console.log(`📅 Enlace de calendario enviado a ${senderId}`);
+            }
+          }
+        }
+      }
     }
   } catch (err) {
     console.error(`❌ Error al responder:`, err.response?.data || err.message);
@@ -936,7 +1003,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion")
       .order("actualizado_en", { ascending: false })
       .limit(200);
 
@@ -959,7 +1026,10 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         actualizado_en: c.actualizado_en,
         ultimo_texto: ultimo ? ultimo.content : null,
         ultimo_role: ultimo ? ultimo.role : null,
-        en_ventana_24h: enVentana24h
+        en_ventana_24h: enVentana24h,
+        califica: Boolean(c.califica),
+        calificado_en: c.calificado_en || null,
+        razon_calificacion: c.razon_calificacion || null
       };
     }));
 
@@ -1196,6 +1266,9 @@ let configActual = {
   max_delay: MAX_DELAY_SECONDS,
   max_historial: MAX_HISTORIAL,
   openai_api_key: OPENAI_API_KEY || "",
+  calificacion_activa: false,
+  criterios_calificacion: "",
+  mensaje_calificado: "",
   seguimientos: SEGUIMIENTOS_CONFIG
 };
 
@@ -1367,7 +1440,8 @@ app.get("/config", requireAdminKey, (req, res) => {
 
 app.post("/config", requireAdminKey, async (req, res) => {
   try {
-    const { ai_prompt, min_delay, max_delay, max_historial, seguimientos, openai_api_key } = req.body || {};
+    const { ai_prompt, min_delay, max_delay, max_historial, seguimientos, openai_api_key,
+            calificacion_activa, criterios_calificacion, mensaje_calificado } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -1377,6 +1451,9 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (Array.isArray(seguimientos)) nuevaConfig.seguimientos = seguimientos;
     // Solo se actualiza si mandaron una clave nueva; si viene vacío, se deja la que ya había.
     if (typeof openai_api_key === "string" && openai_api_key.trim()) nuevaConfig.openai_api_key = openai_api_key.trim();
+    if (typeof calificacion_activa === "boolean") nuevaConfig.calificacion_activa = calificacion_activa;
+    if (typeof criterios_calificacion === "string") nuevaConfig.criterios_calificacion = criterios_calificacion.trim();
+    if (typeof mensaje_calificado === "string") nuevaConfig.mensaje_calificado = mensaje_calificado.trim();
 
     const guardado = await guardarConfigDB(nuevaConfig);
     res.json({ mensaje: "✅ Configuración guardada", config: configParaFrontend(guardado) });
@@ -1758,6 +1835,22 @@ ${estilosBase()}
 
       <div class="col">
         <div class="card">
+          <h2>Calificación automática de leads</h2>
+          <p class="hint">Define los criterios que debe cumplir un lead para calificar (uno por línea o como quieras redactarlo). La IA revisa la conversación después de cada respuesta y, en cuanto se cumplen TODOS, marca la conversación como "califica" y le manda el mensaje con tu enlace de calendario, una sola vez.</p>
+
+          <label style="display:flex; align-items:center; gap:10px; cursor:pointer; margin-bottom:16px;">
+            <input type="checkbox" id="calificacionActiva" style="width:18px; height:18px; accent-color:var(--green); cursor:pointer;">
+            <span style="color:var(--text); font-size:14.5px; font-weight:500;">Activar calificación automática</span>
+          </label>
+
+          <label for="criteriosCalificacion">Criterios de calificación</label>
+          <textarea id="criteriosCalificacion" rows="5" placeholder="Ej: Tiene más de 40 años.&#10;Quiere perder más de 10 kg.&#10;Es hombre."></textarea>
+
+          <label for="mensajeCalificado" style="margin-top:14px;">Mensaje al calificar (incluye tu enlace de calendario)</label>
+          <textarea id="mensajeCalificado" rows="4" placeholder="¡Genial! Por lo que me cuentas encajas perfecto en el programa 💪 Agenda tu sesión aquí: https://tu-enlace-de-calendario.com"></textarea>
+        </div>
+
+        <div class="card">
           <h2>Seguimientos automáticos</h2>
           <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo.</p>
           <div id="pasos"></div>
@@ -1859,6 +1952,9 @@ ${estilosBase()}
     document.getElementById("minDelay").value = cfg.min_delay ?? 8;
     document.getElementById("maxDelay").value = cfg.max_delay ?? 15;
     document.getElementById("maxHistorial").value = cfg.max_historial ?? 20;
+    document.getElementById("calificacionActiva").checked = Boolean(cfg.calificacion_activa);
+    document.getElementById("criteriosCalificacion").value = cfg.criterios_calificacion || "";
+    document.getElementById("mensajeCalificado").value = cfg.mensaje_calificado || "";
     pintarEstadoClave(cfg);
     pasos = Array.isArray(cfg.seguimientos) ? JSON.parse(JSON.stringify(cfg.seguimientos)) : [];
     renderPasos();
@@ -1886,7 +1982,10 @@ ${estilosBase()}
       min_delay: parseInt(document.getElementById("minDelay").value, 10),
       max_delay: parseInt(document.getElementById("maxDelay").value, 10),
       max_historial: parseInt(document.getElementById("maxHistorial").value, 10),
-      seguimientos: pasos
+      seguimientos: pasos,
+      calificacion_activa: document.getElementById("calificacionActiva").checked,
+      criterios_calificacion: document.getElementById("criteriosCalificacion").value,
+      mensaje_calificado: document.getElementById("mensajeCalificado").value
     };
     const nuevaClave = document.getElementById("openaiKey").value.trim();
     if(nuevaClave) body.openai_api_key = nuevaClave;
@@ -1949,7 +2048,11 @@ ${estilosBase()}
   .chat-tab:hover{ color:var(--text); }
   .chat-tab.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.3); }
   .chat-tab.tab-handoff.active{ background:var(--red-soft); color:var(--red); border-color:rgba(255,93,93,.3); }
+  .chat-tab.tab-califica.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.4); }
   .chat-tab .count{ font-family:var(--mono); font-size:11.5px; opacity:.85; margin-left:4px; }
+  .califica-badge{
+    font-size:11px; margin-left:7px; flex-shrink:0;
+  }
   .handoff-dot{
     width:8px; height:8px; border-radius:50%; background:var(--red); flex-shrink:0;
     display:inline-block; margin-left:7px; box-shadow:0 0 0 2px rgba(255,93,93,.18);
@@ -1960,6 +2063,11 @@ ${estilosBase()}
     border-bottom:1px solid rgba(255,93,93,.25); display:none; align-items:center; gap:8px;
   }
   .handoff-banner.visible{ display:flex; }
+  .califica-banner{
+    background:var(--green-soft); color:var(--green); font-size:13px; padding:11px 20px;
+    border-bottom:1px solid rgba(49,217,124,.25); display:none; align-items:center; gap:8px;
+  }
+  .califica-banner.visible{ display:flex; }
   .chat-export{ padding:10px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
   .btn-exportar{
     display:block; text-align:center; background:var(--surface-3); color:var(--text);
@@ -2074,10 +2182,12 @@ ${estilosBase()}
         </div>
         <div class="chat-tabs">
           <div class="chat-tab active" id="tabTodas" data-filtro="todas">Todas <span class="count" id="countTodas"></span></div>
+          <div class="chat-tab tab-califica" id="tabCalifica" data-filtro="califica">✅ Califica <span class="count" id="countCalifica"></span></div>
           <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff">Handoff (+24h) <span class="count" id="countHandoff"></span></div>
         </div>
         <div class="chat-export">
-          <a id="btnExportarCSV" href="/exportar/handoff.csv" class="btn-exportar">⬇ Exportar CSV handoff <span id="exportCount">(0)</span></a>
+          <a id="btnExportarCSV" href="/exportar/handoff.csv" class="btn-exportar">⬇ Exportar handoff <span id="exportCount">(0)</span></a>
+          <a id="btnExportarCalificados" href="/exportar/calificados.csv" class="btn-exportar" style="margin-top:8px; border-color:rgba(49,217,124,.3); color:var(--green);">⬇ Exportar calificados <span id="exportCountCalifica">(0)</span></a>
         </div>
         <div class="chat-list" id="listaChats"><p class="vacio-lista">Cargando…</p></div>
       </div>
@@ -2089,6 +2199,7 @@ ${estilosBase()}
         <div class="handoff-banner" id="handoffBanner">
           ⏰ Esta conversación salió de la ventana de 24 horas de Instagram — el bot ya no puede mandar mensajes normales aquí, se requiere atención manual (o una plantilla aprobada).
         </div>
+        <div class="califica-banner" id="calificaBanner"></div>
         <div class="chat-messages" id="chatMensajes">
           <div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>
         </div>
@@ -2148,13 +2259,17 @@ ${estilosBase()}
 
   function actualizarContadores(){
     const totalHandoff = conversaciones.filter(c => !c.en_ventana_24h).length;
+    const totalCalifica = conversaciones.filter(c => c.califica).length;
     document.getElementById("countTodas").textContent = conversaciones.length;
     document.getElementById("countHandoff").textContent = totalHandoff;
+    document.getElementById("countCalifica").textContent = totalCalifica;
     document.getElementById("exportCount").textContent = "(" + totalHandoff + ")";
+    document.getElementById("exportCountCalifica").textContent = "(" + totalCalifica + ")";
   }
 
   function conversacionesFiltradas(){
     if(filtroActual === "handoff") return conversaciones.filter(c => !c.en_ventana_24h);
+    if(filtroActual === "califica") return conversaciones.filter(c => c.califica);
     return conversaciones;
   }
 
@@ -2164,9 +2279,10 @@ ${estilosBase()}
     const lista = conversacionesFiltradas();
 
     if(lista.length === 0){
-      cont.innerHTML = filtroActual === "handoff"
-        ? '<p class="vacio-lista">🎉 Ninguna conversación en handoff — todas están dentro de la ventana de 24h.</p>'
-        : '<p class="vacio-lista">Todavía no hay conversaciones.</p>';
+      let vacioTxt = '<p class="vacio-lista">Todavía no hay conversaciones.</p>';
+      if(filtroActual === "handoff") vacioTxt = '<p class="vacio-lista">🎉 Ninguna conversación en handoff — todas están dentro de la ventana de 24h.</p>';
+      if(filtroActual === "califica") vacioTxt = '<p class="vacio-lista">Todavía no hay leads calificados con los criterios actuales.</p>';
+      cont.innerHTML = vacioTxt;
       return;
     }
 
@@ -2176,6 +2292,7 @@ ${estilosBase()}
         <div class="chat-list-item-text">
           <div class="uname-row">
             <span class="uname">\${escapar(nombreMostrar(c))}</span>
+            \${c.califica ? '<span class="califica-badge" title="Califica">✅</span>' : ''}
             \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
           </div>
           <div class="preview">\${c.ultimo_role === "assistant" ? "🤖 " : ""}\${escapar(c.ultimo_texto) || "(sin mensajes)"}</div>
@@ -2192,20 +2309,29 @@ ${estilosBase()}
   function renderHead(){
     const head = document.getElementById("chatHead");
     const banner = document.getElementById("handoffBanner");
+    const bannerCalifica = document.getElementById("calificaBanner");
     if(!senderSeleccionado){
       head.innerHTML = '<span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>';
       banner.classList.remove("visible");
+      bannerCalifica.classList.remove("visible");
       return;
     }
     const conv = conversaciones.find(c => c.sender_id === senderSeleccionado) || { sender_id: senderSeleccionado, en_ventana_24h: true };
     head.innerHTML = \`
       \${avatarHTML(conv)}
       <div class="chat-window-head-text">
-        <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}</div>
+        <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}\${conv.califica ? ' <span title="Califica">✅</span>' : ''}</div>
         <div class="chat-window-head-id">\${conv.sender_id}</div>
       </div>
     \`;
     banner.classList.toggle("visible", conv.en_ventana_24h === false);
+
+    if(conv.califica){
+      bannerCalifica.textContent = "✅ Este lead califica" + (conv.razon_calificacion ? ": " + conv.razon_calificacion : ".");
+      bannerCalifica.classList.add("visible");
+    } else {
+      bannerCalifica.classList.remove("visible");
+    }
   }
 
   function actualizarInputBar(){
@@ -2275,12 +2401,21 @@ ${estilosBase()}
     filtroActual = "todas";
     document.getElementById("tabTodas").classList.add("active");
     document.getElementById("tabHandoff").classList.remove("active");
+    document.getElementById("tabCalifica").classList.remove("active");
     renderLista();
   });
   document.getElementById("tabHandoff").addEventListener("click", () => {
     filtroActual = "handoff";
     document.getElementById("tabHandoff").classList.add("active");
     document.getElementById("tabTodas").classList.remove("active");
+    document.getElementById("tabCalifica").classList.remove("active");
+    renderLista();
+  });
+  document.getElementById("tabCalifica").addEventListener("click", () => {
+    filtroActual = "califica";
+    document.getElementById("tabCalifica").classList.add("active");
+    document.getElementById("tabTodas").classList.remove("active");
+    document.getElementById("tabHandoff").classList.remove("active");
     renderLista();
   });
 
@@ -2392,6 +2527,57 @@ app.get("/exportar/handoff.csv", requireAdminKey, async (req, res) => {
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="handoff_${fechaArchivo}.csv"`);
+    res.send(csv);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Exporta a CSV los leads que ya calificaron según los criterios definidos en /panel.
+app.get("/exportar/calificados.csv", requireAdminKey, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("conversaciones")
+      .select("sender_id, historial, ultimo_mensaje_usuario, calificado_en, razon_calificacion")
+      .eq("califica", true)
+      .order("calificado_en", { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    const filas = await Promise.all((data || []).map(async (c) => {
+      const perfil = await obtenerPerfilInstagram(c.sender_id);
+      const historial = Array.isArray(c.historial) ? c.historial : [];
+      const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
+      const enVentana24h = c.ultimo_mensaje_usuario
+        ? (Date.now() - new Date(c.ultimo_mensaje_usuario).getTime()) < VENTANA_24H_MS
+        : false;
+
+      return {
+        username: perfil?.username ? "@" + perfil.username : "",
+        sender_id: c.sender_id,
+        calificado_en: c.calificado_en || "",
+        razon_calificacion: c.razon_calificacion || "",
+        en_ventana_24h: enVentana24h ? "sí" : "no (handoff)",
+        ultimo_mensaje: ultimo ? ultimo.content : ""
+      };
+    }));
+
+    const encabezados = ["username", "sender_id", "calificado_en", "razon_calificacion", "en_ventana_24h", "ultimo_mensaje"];
+    const escaparCSV = (valor) => {
+      const txt = String(valor ?? "");
+      return /[",\n]/.test(txt) ? '"' + txt.replace(/"/g, '""') + '"' : txt;
+    };
+
+    const lineas = [
+      encabezados.join(","),
+      ...filas.map((f) => encabezados.map((h) => escaparCSV(f[h])).join(","))
+    ];
+
+    const csv = "\uFEFF" + lineas.join("\r\n");
+    const fechaArchivo = new Date().toISOString().slice(0, 10);
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="calificados_${fechaArchivo}.csv"`);
     res.send(csv);
   } catch (err) {
     res.status(500).json({ error: err.message });
