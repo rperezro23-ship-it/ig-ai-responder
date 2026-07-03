@@ -346,6 +346,43 @@ async function eliminarCuentaConectada() {
   if (error) console.error("❌ Error eliminando cuenta conectada en Supabase:", error.message);
 }
 
+// ---------------------------------------------------------------
+// Perfil (username + foto) de cada persona que escribe por Instagram.
+// Se cachea en memoria para no pedirle su perfil a Meta en cada refresco
+// del chat en vivo (la pantalla de /chats hace polling cada pocos segundos).
+// ---------------------------------------------------------------
+const perfilesCache = new Map(); // senderId -> { username, profile_pic, name, obtenido_en }
+const PERFIL_CACHE_MS = 60 * 60 * 1000; // 1 hora
+
+async function obtenerPerfilInstagram(senderId) {
+  const cacheado = perfilesCache.get(senderId);
+  if (cacheado && (Date.now() - cacheado.obtenido_en) < PERFIL_CACHE_MS) {
+    return cacheado;
+  }
+
+  try {
+    const cuenta = await obtenerCuentaActiva();
+    if (!cuenta) return cacheado || null;
+
+    const resp = await axios.get(`https://graph.instagram.com/v25.0/${senderId}`, {
+      params: { fields: "name,username,profile_pic" },
+      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
+    });
+
+    const perfil = {
+      username: resp.data.username || null,
+      profile_pic: resp.data.profile_pic || null,
+      name: resp.data.name || null,
+      obtenido_en: Date.now()
+    };
+    perfilesCache.set(senderId, perfil);
+    return perfil;
+  } catch (err) {
+    console.error(`⚠️ No se pudo obtener el perfil de ${senderId}:`, err.response?.data || err.message);
+    return cacheado || null;
+  }
+}
+
 // "state" de OAuth: valor aleatorio de un solo uso para evitar que alguien
 // dispare el callback de conexión sin haber pasado por /oauth/instagram/start.
 // Alcanza con memoria (vive pocos minutos, mientras el usuario hace login en Meta).
@@ -536,9 +573,9 @@ function sidebarHTML(activo) {
     <div class="brand-name">IG AI Responder</div>
   </div>
   <nav class="side-nav">
-    ${link("/chats", "CHT", "Chats", "chats")}
     ${link("/cuentas", "CTA", "Cuentas", "cuentas")}
     ${link("/panel", "PNL", "Panel", "panel")}
+    ${link("/chats", "CHT", "Chats", "chats")}
   </nav>
   <div class="sidebar-footer">Robertoperez.coach<br>v1.0<br><a href="/logout" style="color:var(--muted-dim);">Cerrar sesión</a></div>
 </div>`;
@@ -904,17 +941,20 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
 
-    const resumen = (data || []).map((c) => {
+    const resumen = await Promise.all((data || []).map(async (c) => {
       const historial = Array.isArray(c.historial) ? c.historial : [];
       const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
+      const perfil = await obtenerPerfilInstagram(c.sender_id);
       return {
         sender_id: c.sender_id,
+        username: perfil?.username || null,
+        profile_pic: perfil?.profile_pic || null,
         ultimo_mensaje_usuario: c.ultimo_mensaje_usuario,
         actualizado_en: c.actualizado_en,
         ultimo_texto: ultimo ? ultimo.content : null,
         ultimo_role: ultimo ? ultimo.role : null
       };
-    });
+    }));
 
     res.json({ conversaciones: resumen });
   } catch (err) {
@@ -1796,17 +1836,26 @@ ${estilosBase()}
   }
   .chat-list{ flex:1; overflow-y:auto; }
   .chat-list-item{
-    padding:14px 18px; border-bottom:1px solid var(--border); cursor:pointer;
-    transition:background .12s;
+    display:flex; align-items:flex-start; gap:12px; padding:14px 18px;
+    border-bottom:1px solid var(--border); cursor:pointer; transition:background .12s;
   }
   .chat-list-item:hover{ background:var(--surface-2); }
   .chat-list-item.active{ background:var(--green-soft); }
-  .chat-list-item .sid{
-    font-family:var(--mono); font-size:11.5px; color:var(--muted); margin-bottom:5px;
-    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  .chat-list-item-text{ flex:1; min-width:0; }
+  .chat-avatar{
+    width:42px; height:42px; border-radius:50%; object-fit:cover; flex-shrink:0;
+    background:var(--surface-3);
+  }
+  .avatar-fallback{
+    display:flex; align-items:center; justify-content:center;
+    color:var(--muted); font-family:var(--display); font-weight:600; font-size:16px;
+  }
+  .chat-list-item .uname{
+    font-family:var(--display); font-weight:600; font-size:14.5px; color:var(--text);
+    margin-bottom:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   }
   .chat-list-item .preview{
-    font-size:14px; color:#C9D1DE; overflow:hidden; text-overflow:ellipsis;
+    font-size:13.5px; color:var(--muted); overflow:hidden; text-overflow:ellipsis;
     white-space:nowrap; margin-bottom:4px;
   }
   .chat-list-item .time{ font-size:11.5px; color:var(--muted-dim); font-family:var(--mono); }
@@ -1817,9 +1866,16 @@ ${estilosBase()}
     border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden; min-width:0;
   }
   .chat-window-head{
-    padding:16px 20px; border-bottom:1px solid var(--border); flex-shrink:0;
-    font-family:var(--mono); font-size:14px; color:var(--text); font-weight:500;
+    padding:14px 20px; border-bottom:1px solid var(--border); flex-shrink:0;
+    display:flex; align-items:center; gap:12px;
   }
+  .chat-window-head .chat-avatar{ width:38px; height:38px; }
+  .chat-window-head-text{ min-width:0; }
+  .chat-window-head-uname{
+    font-family:var(--display); font-weight:600; font-size:15px; color:var(--text);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .chat-window-head-id{ font-family:var(--mono); font-size:11px; color:var(--muted-dim); margin-top:1px; }
   .chat-messages{
     flex:1; overflow-y:auto; padding:22px; display:flex; flex-direction:column; gap:12px;
   }
@@ -1866,7 +1922,9 @@ ${estilosBase()}
       </div>
 
       <div class="chat-window">
-        <div class="chat-window-head" id="chatHead">Selecciona una conversación</div>
+        <div class="chat-window-head" id="chatHead">
+          <span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>
+        </div>
         <div class="chat-messages" id="chatMensajes">
           <div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>
         </div>
@@ -1898,6 +1956,26 @@ ${estilosBase()}
     return (txt || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   }
 
+  function inicialDe(c){
+    const base = c.username || c.sender_id || "?";
+    return base.charAt(0).toUpperCase();
+  }
+
+  // Genera el <img>; si la foto no carga (token vencido, permiso, etc.)
+  // se reemplaza sola por un círculo con la inicial del usuario.
+  function avatarHTML(c, claseExtra){
+    const inicial = inicialDe(c);
+    if (c.profile_pic) {
+      return \`<img class="chat-avatar\${claseExtra ? " " + claseExtra : ""}" src="\${c.profile_pic}" alt=""
+        onerror="this.outerHTML='<div class=\\'chat-avatar avatar-fallback\${claseExtra ? " " + claseExtra : ""}\\'>\${inicial}</div>'">\`;
+    }
+    return \`<div class="chat-avatar avatar-fallback\${claseExtra ? " " + claseExtra : ""}">\${inicial}</div>\`;
+  }
+
+  function nombreMostrar(c){
+    return c.username ? "@" + c.username : c.sender_id;
+  }
+
   function renderLista(){
     const cont = document.getElementById("listaChats");
     if(conversaciones.length === 0){
@@ -1906,9 +1984,12 @@ ${estilosBase()}
     }
     cont.innerHTML = conversaciones.map(c => \`
       <div class="chat-list-item\${senderSeleccionado === c.sender_id ? " active" : ""}" data-id="\${c.sender_id}">
-        <div class="sid">\${c.sender_id}</div>
-        <div class="preview">\${c.ultimo_role === "assistant" ? "🤖 " : ""}\${escapar(c.ultimo_texto) || "(sin mensajes)"}</div>
-        <div class="time">\${formatearFecha(c.actualizado_en)}</div>
+        \${avatarHTML(c)}
+        <div class="chat-list-item-text">
+          <div class="uname">\${escapar(nombreMostrar(c))}</div>
+          <div class="preview">\${c.ultimo_role === "assistant" ? "🤖 " : ""}\${escapar(c.ultimo_texto) || "(sin mensajes)"}</div>
+          <div class="time">\${formatearFecha(c.actualizado_en)}</div>
+        </div>
       </div>
     \`).join("");
 
@@ -1917,18 +1998,35 @@ ${estilosBase()}
     });
   }
 
+  function renderHead(){
+    const head = document.getElementById("chatHead");
+    if(!senderSeleccionado){
+      head.innerHTML = '<span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>';
+      return;
+    }
+    const conv = conversaciones.find(c => c.sender_id === senderSeleccionado) || { sender_id: senderSeleccionado };
+    head.innerHTML = \`
+      \${avatarHTML(conv)}
+      <div class="chat-window-head-text">
+        <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}</div>
+        <div class="chat-window-head-id">\${conv.sender_id}</div>
+      </div>
+    \`;
+  }
+
   async function cargarConversaciones(){
     const data = await llamarGET("/conversaciones");
     if(!data) return;
     conversaciones = data.conversaciones || [];
     renderLista();
+    if(senderSeleccionado) renderHead();
   }
 
   async function seleccionarChat(senderId){
     senderSeleccionado = senderId;
     ultimoHistorialJSON = null;
     renderLista();
-    document.getElementById("chatHead").textContent = senderId;
+    renderHead();
     document.getElementById("chatMensajes").innerHTML = '<div class="chat-empty">Cargando…</div>';
     await cargarHistorial();
   }
