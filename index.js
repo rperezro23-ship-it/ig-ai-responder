@@ -377,9 +377,10 @@ function estilosBase() {
   .sidebar-footer{ margin-top:auto; font-family:var(--mono); font-size:11px; color:var(--muted-dim);
     letter-spacing:.03em; padding:0 4px; line-height:1.6; }
 
-  /* El área a la derecha de la sidebar aloja el contenido, alineado a la izquierda */
+  /* El área a la derecha de la sidebar centra el bloque de contenido
+     (mismo margen izquierdo y derecho dentro del espacio disponible) */
   .content-area{
-    margin-left:236px; flex:1;
+    margin-left:236px; flex:1; display:flex; justify-content:center;
     padding:44px 46px 100px;
   }
   .main{ width:100%; max-width:1360px; }
@@ -391,7 +392,7 @@ function estilosBase() {
       overflow-x:auto; gap:20px; }
     .sidebar-footer{ display:none; }
     nav.side-nav{ flex-direction:row; }
-    .content-area{ margin-left:0; padding:26px 18px 100px; }
+    .content-area{ margin-left:0; padding:26px 18px 100px; justify-content:center; }
     .main{ max-width:none; }
   }
 
