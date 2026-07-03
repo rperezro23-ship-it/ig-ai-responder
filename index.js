@@ -15,8 +15,9 @@ const APP_SECRET      = process.env.APP_SECRET;
 const VERIFY_TOKEN    = process.env.VERIFY_TOKEN;
 const OPENAI_API_KEY  = process.env.OPENAI_API_KEY;
 const AI_PROMPT       = process.env.AI_PROMPT || "Eres el asistente de Roberto, entrenador fitness. Responde de forma amigable y breve en español.";
-const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN; // Instagram User Access Token (Instagram Login)
-const IG_ACCOUNT_ID   = process.env.IG_ACCOUNT_ID;   // tu <IG_ID>
+const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN; // Instagram User Access Token (Instagram Login) — legado, ver "cuenta conectada" en Supabase
+const IG_ACCOUNT_ID   = process.env.IG_ACCOUNT_ID;   // tu <IG_ID> — legado, ver "cuenta conectada" en Supabase
+const IG_APP_ID        = process.env.IG_APP_ID;       // App ID de Meta (Instagram API with Instagram Login)
 
 const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -46,22 +47,6 @@ const MAX_HISTORIAL = parseInt(process.env.MAX_HISTORIAL || "20", 10);
 // ---------------------------------------------------------------
 // Seguimientos automáticos (follow-ups) — CONFIGURACIÓN
 // ---------------------------------------------------------------
-// Meta solo permite mandar mensajes a un usuario dentro de las 24 horas
-// posteriores a SU ÚLTIMO mensaje. Pasado ese tiempo, el envío se rechaza
-// (a menos que se tenga el permiso especial "human_agent", que es otro
-// proceso de aprobación aparte, y solo para mensajes mandados por una
-// persona real, no por el bot).
-//
-// Configúralo en Render con la variable de entorno SEGUIMIENTOS, en formato
-// JSON, como un arreglo de pasos: { "horas": X, "mensajes": ["...", "...", ...] }.
-// Puedes poner tantos pasos como quieras. "horas" es el tiempo de inactividad
-// del usuario (desde su último mensaje) que debe pasar para disparar ese paso.
-// "mensajes" es una LISTA de mensajes posibles para ese paso: cada vez que ese
-// paso se dispara para un usuario, se manda el siguiente de la lista (rotando,
-// sin repetir ninguno hasta haber usado todos).
-//
-// Ejemplo:
-// SEGUIMIENTOS=[{"horas":0.3,"mensajes":["...","...","..."]},{"horas":3,"mensajes":["...","..."]},{"horas":20,"mensajes":["..."]}]
 const SEGUIMIENTOS_DEFAULT = [
   {
     horas: 0.3,
@@ -105,8 +90,6 @@ const COLCHON_SEGURIDAD_MS = 2 * 60 * 1000; // 2 minutos de margen de seguridad
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// Estos dos SÍ pueden quedarse en memoria: solo importan mientras dura una
-// ráfaga de mensajes de pocos segundos, con el servidor ya despierto y activo.
 const buffers = new Map();       // { senderId: { mensajes: [], timer, enProceso } }
 const yaRespondidos = new Set(); // dedupe de message IDs recientes
 
@@ -195,8 +178,6 @@ async function programarSeguimientosDB(senderId) {
   if (error) console.error("❌ Error programando seguimientos en Supabase:", error.message);
 }
 
-// Llamado periódicamente (por UptimeRobot pegándole a /cron/seguimientos)
-// para revisar qué seguimientos ya se deben mandar.
 async function procesarSeguimientosPendientesDB() {
   const botActivo = await estaBotActivo();
   if (!botActivo) {
@@ -226,8 +207,6 @@ async function procesarSeguimientosPendientesDB() {
     const ultimoMsg = conv.ultimo_mensaje_usuario ? new Date(conv.ultimo_mensaje_usuario).getTime() : 0;
     const sigueVigente = Date.now() <= (ultimoMsg + VENTANA_24H_MS - COLCHON_SEGURIDAD_MS);
 
-    // Siempre marcamos como procesado (enviado=true) para no reintentar en bucle,
-    // ya sea que se mande el mensaje o que se descarte por estar fuera de ventana.
     if (!sigueVigente) {
       console.log(`⏭️ Seguimiento (paso ${pasoIndex}) para ${senderId} descartado: fuera de la ventana de 24h.`);
       await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
@@ -254,11 +233,86 @@ async function procesarSeguimientosPendientesDB() {
       procesados++;
     } catch (err) {
       console.error(`❌ Error enviando seguimiento a ${senderId}:`, err.response?.data || err.message);
-      // No lo marcamos como enviado para reintentarlo en el siguiente ciclo del cron
     }
   }
 
   return { procesados };
+}
+
+// ---------------------------------------------------------------
+// Cuenta de Instagram conectada (guardada en Supabase, tabla app_config,
+// key "ig_cuenta_conectada"). Reemplaza las variables de entorno fijas
+// IG_ACCESS_TOKEN / IG_ACCOUNT_ID, para poder conectar/desconectar cuentas
+// desde el panel sin tocar Render. Por ahora solo se soporta 1 cuenta activa
+// a la vez (conectar una nueva sobrescribe a la anterior).
+// ---------------------------------------------------------------
+
+async function obtenerCuentaActiva() {
+  const { data, error } = await supabase
+    .from("app_config")
+    .select("*")
+    .eq("key", "ig_cuenta_conectada")
+    .maybeSingle();
+
+  if (error) {
+    console.error("❌ Error leyendo cuenta conectada de Supabase:", error.message);
+  }
+
+  if (data && data.valor && data.valor.access_token) {
+    return data.valor;
+  }
+
+  // Fallback de compatibilidad: si nunca se ha conectado nada desde el
+  // panel nuevo, se sigue usando lo que haya en las variables de entorno.
+  if (IG_ACCESS_TOKEN && IG_ACCOUNT_ID) {
+    return {
+      ig_id: IG_ACCOUNT_ID,
+      access_token: IG_ACCESS_TOKEN,
+      username: null,
+      account_type: null,
+      metodo: "env_legacy",
+      conectada_en: null
+    };
+  }
+
+  return null;
+}
+
+async function guardarCuentaConectada(cuenta) {
+  const { error } = await supabase
+    .from("app_config")
+    .upsert({ key: "ig_cuenta_conectada", valor: cuenta, actualizado_en: new Date().toISOString() });
+
+  if (error) console.error("❌ Error guardando cuenta conectada en Supabase:", error.message);
+}
+
+async function eliminarCuentaConectada() {
+  const { error } = await supabase
+    .from("app_config")
+    .delete()
+    .eq("key", "ig_cuenta_conectada");
+
+  if (error) console.error("❌ Error eliminando cuenta conectada en Supabase:", error.message);
+}
+
+// "state" de OAuth: valor aleatorio de un solo uso para evitar que alguien
+// dispare el callback de conexión sin haber pasado por /oauth/instagram/start.
+// Alcanza con memoria (vive pocos minutos, mientras el usuario hace login en Meta).
+const oauthEstados = new Map(); // state -> timestamp de creación
+
+function generarOauthState() {
+  const state = crypto.randomBytes(16).toString("hex");
+  oauthEstados.set(state, Date.now());
+  for (const [s, creadoEn] of oauthEstados) {
+    if (Date.now() - creadoEn > 10 * 60 * 1000) oauthEstados.delete(s); // limpieza, 10 min de vida
+  }
+  return state;
+}
+
+function validarOauthState(state) {
+  if (!state || !oauthEstados.has(state)) return false;
+  oauthEstados.delete(state);
+  return true;
 }
 
 // ---------------------------------------------------------------
@@ -278,9 +332,6 @@ app.get("/webhook", (req, res) => {
   }
 });
 
-// ---------------------------------------------------------------
-// Verifica que el POST realmente venga de Meta (firma HMAC con tu App Secret)
-// ---------------------------------------------------------------
 function verifySignature(req) {
   const signature = req.get("x-hub-signature-256");
   if (!signature || !APP_SECRET) return false;
@@ -302,14 +353,17 @@ function segundosAleatorios(min, max) {
 }
 
 async function enviarMensajeInstagram(senderId, texto) {
+  const cuenta = await obtenerCuentaActiva();
+  if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
+
   await axios.post(
-    `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/messages`,
+    `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
     {
       recipient: { id: senderId },
       message:   { text: texto }
     },
     {
-      headers: { "Authorization": `Bearer ${IG_ACCESS_TOKEN}` }
+      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
     }
   );
 }
@@ -375,8 +429,6 @@ async function procesarBuffer(senderId) {
     buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
   } else {
     buffers.delete(senderId);
-    // Ya no hay más mensajes pendientes: a partir de aquí empieza a contar
-    // el tiempo de inactividad para los seguimientos (persistidos en DB).
     await programarSeguimientosDB(senderId);
   }
 }
@@ -443,9 +495,6 @@ app.post("/webhook", async (req, res) => {
 
       console.log(`📨 Mensaje recibido de ${senderId}: "${mensaje}" (esperando a ver si manda más líneas...)`);
 
-      // El usuario volvió a escribir: reiniciamos la ventana de 24h de Meta
-      // desde este momento, y cancelamos cualquier seguimiento pendiente
-      // (la conversación está activa de nuevo).
       await registrarMensajeUsuario(senderId);
       await cancelarSeguimientosPendientesDB(senderId);
 
@@ -458,11 +507,19 @@ app.get("/", (req, res) => {
   res.json({ status: "ok", message: "Instagram AI Responder activo 🤖" });
 });
 
-// ---------------------------------------------------------------
-// Endpoint de "cron": UptimeRobot le pega aquí cada 5-10 minutos.
-// Esto cumple DOS funciones a la vez: mantiene el servidor despierto
-// (evita que Render lo duerma) Y procesa los seguimientos pendientes.
-// ---------------------------------------------------------------
+// Ícono de la app (aparece en la pestaña del navegador, ej. en /panel)
+app.get("/favicon.svg", (req, res) => {
+  res.type("image/svg+xml").send(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#12141A"/>
+  <path fill="#C9FF3E" d="M16 18h32a6 6 0 0 1 6 6v14a6 6 0 0 1-6 6H30l-10 8v-8h-4a6 6 0 0 1-6-6V24a6 6 0 0 1 6-6z"/>
+  <circle cx="26" cy="31" r="2.6" fill="#12141A"/>
+  <circle cx="34" cy="31" r="2.6" fill="#12141A"/>
+  <circle cx="42" cy="31" r="2.6" fill="#12141A"/>
+</svg>
+  `.trim());
+});
+
 app.get("/cron/seguimientos", async (req, res) => {
   try {
     const resultado = await procesarSeguimientosPendientesDB();
@@ -473,52 +530,130 @@ app.get("/cron/seguimientos", async (req, res) => {
   }
 });
 
-// ---------------------------------------------------------------
-// Política de privacidad y eliminación de datos
-// (requeridas por Meta para poder publicar la app)
-// ---------------------------------------------------------------
 app.get("/privacy", (req, res) => {
   res.type("html").send(`
-    <html>
-      <head><title>Política de Privacidad - Instagram AI Responder</title></head>
-      <body style="font-family: sans-serif; max-width: 700px; margin: 40px auto; line-height: 1.6;">
-        <h1>Política de Privacidad</h1>
-        <p>Última actualización: ${new Date().toLocaleDateString("es-MX")}</p>
-        <p>Esta aplicación ("Instagram AI Responder") es una herramienta de uso privado que
-        automatiza respuestas a mensajes directos (DM) recibidos en la cuenta de Instagram
-        conectada, utilizando inteligencia artificial (OpenAI).</p>
-        <h2>Datos que procesamos</h2>
-        <p>Procesamos el contenido de los mensajes directos recibidos, el identificador
-        de Instagram del remitente, y el historial de la conversación (guardado en una
-        base de datos para poder dar seguimiento y continuidad a la conversación),
-        únicamente con el fin de generar y enviar respuestas automáticas relevantes.
-        No compartimos esta información con terceros, salvo el envío del texto del
-        mensaje al proveedor de IA (OpenAI) para generar la respuesta.</p>
-        <h2>Uso de terceros</h2>
-        <p>Utilizamos la API de OpenAI para generar las respuestas automáticas, y una
-        base de datos (Supabase) para almacenar el historial de conversación de forma
-        segura. Consulta las políticas de privacidad de cada proveedor para más
-        información sobre cómo procesan los datos que reciben.</p>
-        <h2>Contacto</h2>
-        <p>Para dudas sobre esta política, contáctanos en: rperezro23@gmail.com</p>
-      </body>
-    </html>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Política de Privacidad — Instagram AI Responder</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#12141A; --surface:#1B1F27; --surface-2:#20242E; --border:#2A2F3A;
+    --text:#F3F5F7; --muted:#8A93A3; --lime:#C9FF3E; --radius:14px;
+  }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:'Inter',sans-serif; padding-bottom:60px; }
+  .wrap{ max-width:640px; margin:0 auto; padding:28px 20px 40px; }
+  .eyebrow{ font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--lime); margin:0 0 6px; }
+  h1{ font-family:'Oswald',sans-serif; font-weight:700; font-size:28px; margin:0 0 4px; letter-spacing:.01em; }
+  .sub{ color:var(--muted); font-size:13.5px; margin:0 0 24px; }
+  .card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:22px 24px; margin-bottom:16px; }
+  .card h2{ font-family:'Oswald',sans-serif; font-size:16px; font-weight:600; margin:0 0 10px; color:var(--lime); }
+  .card p{ color:#C9D1DE; font-size:14px; line-height:1.7; margin:0 0 6px; }
+  .card p:last-child{ margin-bottom:0; }
+  a{ color:var(--lime); }
+  .volver{ display:inline-block; margin-top:8px; color:var(--muted); font-size:13px; text-decoration:none; }
+  .volver:hover{ color:var(--lime); }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="eyebrow">Instagram AI Responder</p>
+    <h1>Política de Privacidad</h1>
+    <p class="sub">Última actualización: ${new Date().toLocaleDateString("es-MX")}</p>
+
+    <div class="card">
+      <p>Esta aplicación ("Instagram AI Responder") es una herramienta de uso privado que
+      automatiza respuestas a mensajes directos (DM) recibidos en la cuenta de Instagram
+      conectada, utilizando inteligencia artificial (OpenAI).</p>
+    </div>
+
+    <div class="card">
+      <h2>Datos que procesamos</h2>
+      <p>Procesamos el contenido de los mensajes directos recibidos, el identificador
+      de Instagram del remitente, y el historial de la conversación (guardado en una
+      base de datos para poder dar seguimiento y continuidad a la conversación),
+      únicamente con el fin de generar y enviar respuestas automáticas relevantes.
+      No compartimos esta información con terceros, salvo el envío del texto del
+      mensaje al proveedor de IA (OpenAI) para generar la respuesta.</p>
+    </div>
+
+    <div class="card">
+      <h2>Uso de terceros</h2>
+      <p>Utilizamos la API de OpenAI para generar las respuestas automáticas, y una
+      base de datos (Supabase) para almacenar el historial de conversación de forma
+      segura. Consulta las políticas de privacidad de cada proveedor para más
+      información sobre cómo procesan los datos que reciben.</p>
+    </div>
+
+    <div class="card">
+      <h2>Contacto</h2>
+      <p>Para dudas sobre esta política, contáctanos en: <a href="mailto:rperezro23@gmail.com">rperezro23@gmail.com</a></p>
+    </div>
+
+    <a class="volver" href="/panel">&larr; Volver al panel</a>
+  </div>
+</body>
+</html>
   `);
 });
 
 app.get("/data-deletion", (req, res) => {
   res.type("html").send(`
-    <html>
-      <head><title>Eliminación de Datos - Instagram AI Responder</title></head>
-      <body style="font-family: sans-serif; max-width: 700px; margin: 40px auto; line-height: 1.6;">
-        <h1>Instrucciones para Eliminación de Datos</h1>
-        <p>Si deseas solicitar la eliminación de cualquier dato asociado a tu cuenta de
-        Instagram que haya sido procesado por esta app (incluyendo el historial de
-        conversación guardado), envía tu solicitud a: rperezro23@gmail.com, indicando tu
-        nombre de usuario de Instagram. Procesaremos tu solicitud en un plazo máximo
-        de 30 días.</p>
-      </body>
-    </html>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eliminación de Datos — Instagram AI Responder</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#12141A; --surface:#1B1F27; --surface-2:#20242E; --border:#2A2F3A;
+    --text:#F3F5F7; --muted:#8A93A3; --lime:#C9FF3E; --radius:14px;
+  }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:'Inter',sans-serif; padding-bottom:60px; }
+  .wrap{ max-width:640px; margin:0 auto; padding:28px 20px 40px; }
+  .eyebrow{ font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--lime); margin:0 0 6px; }
+  h1{ font-family:'Oswald',sans-serif; font-weight:700; font-size:28px; margin:0 0 4px; letter-spacing:.01em; }
+  .sub{ color:var(--muted); font-size:13.5px; margin:0 0 24px; }
+  .card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:22px 24px; margin-bottom:16px; }
+  .card p{ color:#C9D1DE; font-size:14px; line-height:1.7; margin:0 0 6px; }
+  .card p:last-child{ margin-bottom:0; }
+  a{ color:var(--lime); }
+  .volver{ display:inline-block; margin-top:8px; color:var(--muted); font-size:13px; text-decoration:none; }
+  .volver:hover{ color:var(--lime); }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="eyebrow">Instagram AI Responder</p>
+    <h1>Eliminación de Datos</h1>
+    <p class="sub">Instrucciones para solicitar la eliminación de tus datos</p>
+
+    <div class="card">
+      <p>Si deseas solicitar la eliminación de cualquier dato asociado a tu cuenta de
+      Instagram que haya sido procesado por esta app (incluyendo el historial de
+      conversación guardado), envía tu solicitud a:
+      <a href="mailto:rperezro23@gmail.com">rperezro23@gmail.com</a>, indicando tu
+      nombre de usuario de Instagram. Procesaremos tu solicitud en un plazo máximo
+      de 30 días.</p>
+    </div>
+
+    <a class="volver" href="/panel">&larr; Volver al panel</a>
+  </div>
+</body>
+</html>
   `);
 });
 
@@ -526,9 +661,11 @@ app.get("/data-deletion", (req, res) => {
 
 app.get("/check-subscription", requireAdminKey, async (req, res) => {
   try {
+    const cuenta = await obtenerCuentaActiva();
+    if (!cuenta) return res.status(404).json({ error: "No hay cuenta conectada" });
     const response = await axios.get(
-      `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/subscribed_apps`,
-      { headers: { "Authorization": `Bearer ${IG_ACCESS_TOKEN}` } }
+      `https://graph.instagram.com/v25.0/${cuenta.ig_id}/subscribed_apps`,
+      { headers: { "Authorization": `Bearer ${cuenta.access_token}` } }
     );
     res.json(response.data);
   } catch (err) {
@@ -538,12 +675,14 @@ app.get("/check-subscription", requireAdminKey, async (req, res) => {
 
 app.get("/force-subscribe", requireAdminKey, async (req, res) => {
   try {
+    const cuenta = await obtenerCuentaActiva();
+    if (!cuenta) return res.status(404).json({ error: "No hay cuenta conectada" });
     const response = await axios.post(
-      `https://graph.instagram.com/v25.0/${IG_ACCOUNT_ID}/subscribed_apps`,
+      `https://graph.instagram.com/v25.0/${cuenta.ig_id}/subscribed_apps`,
       null,
       {
         params: { subscribed_fields: "messages" },
-        headers: { "Authorization": `Bearer ${IG_ACCESS_TOKEN}` }
+        headers: { "Authorization": `Bearer ${cuenta.access_token}` }
       }
     );
     res.json(response.data);
@@ -552,14 +691,11 @@ app.get("/force-subscribe", requireAdminKey, async (req, res) => {
   }
 });
 
-// Ver el historial y estado guardado en Supabase para un usuario (debug)
 app.get("/historial/:senderId", requireAdminKey, async (req, res) => {
   const conv = await obtenerConversacion(req.params.senderId);
   res.json(conv);
 });
 
-// Intercambia el token actual (corto) por uno de larga duración (60 días).
-// Úsalo UNA VEZ con tu token actual, copia el resultado y actualiza IG_ACCESS_TOKEN en Render.
 app.get("/get-long-lived-token", requireAdminKey, async (req, res) => {
   try {
     const response = await axios.get("https://graph.instagram.com/access_token", {
@@ -580,19 +716,30 @@ app.get("/get-long-lived-token", requireAdminKey, async (req, res) => {
   }
 });
 
-// Refresca un token de larga duración ANTES de que expire (debe tener al menos 24h de generado).
-// Extiende la validez por 60 días más. Ejecútalo periódicamente (ej. cada 45-50 días).
 app.get("/refresh-token", requireAdminKey, async (req, res) => {
   try {
+    const cuenta = await obtenerCuentaActiva();
+    const tokenActual = cuenta ? cuenta.access_token : IG_ACCESS_TOKEN;
+
     const response = await axios.get("https://graph.instagram.com/refresh_access_token", {
       params: {
         grant_type: "ig_refresh_token",
-        access_token: IG_ACCESS_TOKEN
+        access_token: tokenActual
       }
     });
+
+    if (cuenta) {
+      await guardarCuentaConectada({
+        ...cuenta,
+        access_token: response.data.access_token,
+        token_expira_en_segundos: response.data.expires_in || 5184000,
+        ultimo_oauth_en: new Date().toISOString()
+      });
+    }
     await guardarFechaTokenDB(response.data.expires_in);
+
     res.json({
-      mensaje: "Copia access_token y actualiza IG_ACCESS_TOKEN en Render. Ya quedó registrada la fecha para /token-info.",
+      mensaje: "Token refrescado y guardado. Si sigues usando IG_ACCESS_TOKEN en Render, actualízalo también manualmente.",
       ...response.data,
       expira_en_dias: response.data.expires_in ? Math.round(response.data.expires_in / 86400) : null
     });
@@ -602,24 +749,127 @@ app.get("/refresh-token", requireAdminKey, async (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// Seguimiento de vencimiento del token (guardado nosotros mismos)
+// Conectar cuenta de Instagram — "Instagram directo" (Instagram API
+// with Instagram Login / Business Login for Instagram). Flujo:
+// 1) /oauth/instagram/start  -> redirige a Meta a autorizar
+// 2) el usuario aprueba en instagram.com
+// 3) Meta redirige a /oauth/instagram/callback con ?code=...
+// 4) intercambiamos code -> token corto -> token largo (60 días)
+// 5) guardamos todo en Supabase como la cuenta activa
 // ---------------------------------------------------------------
-// Los tokens de "Instagram API con Instagram Login" (graph.instagram.com)
-// NO se pueden consultar con graph.facebook.com/debug_token (da error 190,
-// "Cannot get application info"): ese endpoint es solo para tokens de
-// Facebook Login. Meta no ofrece un endpoint de consulta directa para este
-// tipo de token, así que llevamos la cuenta nosotros: cada vez que se
-// genera o refresca el token (60 días de duración), guardamos la fecha
-// en Supabase, y calculamos desde ahí cuánto le queda.
+
+app.get("/oauth/instagram/start", requireAdminKey, (req, res) => {
+  if (!IG_APP_ID) {
+    return res.status(500).send("Falta configurar IG_APP_ID en las variables de entorno de Render.");
+  }
+
+  const redirectUri = `${req.protocol}://${req.get("host")}/oauth/instagram/callback`;
+  const state = generarOauthState();
+  const scopes = "instagram_business_basic,instagram_business_manage_messages";
+
+  const url = "https://www.instagram.com/oauth/authorize"
+    + `?client_id=${encodeURIComponent(IG_APP_ID)}`
+    + `&redirect_uri=${encodeURIComponent(redirectUri)}`
+    + `&response_type=code`
+    + `&scope=${encodeURIComponent(scopes)}`
+    + `&state=${encodeURIComponent(state)}`;
+
+  res.redirect(url);
+});
+
+app.get("/oauth/instagram/callback", async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+
+  const paginaError = (titulo, detalle) => res.status(400).type("html").send(`
+    <html><body style="font-family:sans-serif; max-width:600px; margin:60px auto; line-height:1.6;">
+      <h2>❌ ${titulo}</h2>
+      <p>${detalle || ""}</p>
+      <p><a href="/panel">Volver al panel</a></p>
+    </body></html>
+  `);
+
+  if (error) return paginaError("No se pudo conectar la cuenta", error_description || error);
+  if (!validarOauthState(state)) return paginaError("El enlace de conexión expiró o ya se usó", "Vuelve a intentar desde el panel.");
+  if (!code) return paginaError("Falta el código de autorización de Meta");
+
+  try {
+    const redirectUri = `${req.protocol}://${req.get("host")}/oauth/instagram/callback`;
+
+    // 1) Código -> token corto
+    const formData = new URLSearchParams();
+    formData.append("client_id", IG_APP_ID);
+    formData.append("client_secret", APP_SECRET);
+    formData.append("grant_type", "authorization_code");
+    formData.append("redirect_uri", redirectUri);
+    formData.append("code", code);
+
+    const shortResp = await axios.post("https://api.instagram.com/oauth/access_token", formData);
+    const shortToken = shortResp.data.access_token;
+
+    // 2) Token corto -> token largo (60 días)
+    const longResp = await axios.get("https://graph.instagram.com/access_token", {
+      params: {
+        grant_type: "ig_exchange_token",
+        client_secret: APP_SECRET,
+        access_token: shortToken
+      }
+    });
+    const longToken = longResp.data.access_token;
+    const expiresIn = longResp.data.expires_in || 5184000;
+
+    // 3) Datos del perfil conectado
+    const perfilResp = await axios.get("https://graph.instagram.com/v25.0/me", {
+      params: { fields: "id,username,account_type", access_token: longToken }
+    });
+    const perfil = perfilResp.data;
+
+    const cuenta = {
+      ig_id: perfil.id,
+      username: perfil.username,
+      account_type: perfil.account_type,
+      access_token: longToken,
+      token_expira_en_segundos: expiresIn,
+      conectada_en: new Date().toISOString(),
+      metodo: "instagram_directo",
+      ultimo_oauth_en: new Date().toISOString()
+    };
+
+    await guardarCuentaConectada(cuenta);
+    await guardarFechaTokenDB(expiresIn); // mantiene compatibilidad con /token-info
+
+    res.redirect("/panel");
+  } catch (err) {
+    console.error("❌ Error en callback de OAuth de Instagram:", err.response?.data || err.message);
+    paginaError("Error conectando la cuenta", `<pre>${JSON.stringify(err.response?.data || err.message, null, 2)}</pre>`);
+  }
+});
+
+// Placeholder: flujo de Facebook/Meta (vía Página vinculada) — pendiente de implementar.
+app.get("/oauth/facebook/start", requireAdminKey, (req, res) => {
+  res.status(501).type("html").send(`
+    <html><body style="font-family:sans-serif; max-width:600px; margin:60px auto; line-height:1.6;">
+      <h2>🚧 Próximamente</h2>
+      <p>La conexión vía Facebook / Página de Meta todavía no está implementada.</p>
+      <p><a href="/panel">Volver al panel</a></p>
+    </body></html>
+  `);
+});
+
+app.get("/cuenta/actual", requireAdminKey, async (req, res) => {
+  const cuenta = await obtenerCuentaActiva();
+  if (!cuenta) return res.json({ conectada: false });
+  const { access_token, ...datosPublicos } = cuenta;
+  res.json({ conectada: true, ...datosPublicos });
+});
+
+app.post("/cuenta/eliminar", requireAdminKey, async (req, res) => {
+  await eliminarCuentaConectada();
+  res.json({ mensaje: "Cuenta desconectada. El bot dejará de responder hasta que conectes otra." });
+});
 
 // ---------------------------------------------------------------
 // Configuración dinámica editable desde /panel
 // ---------------------------------------------------------------
-// Guarda prompt, tiempos y seguimientos en Supabase (tabla app_config,
-// columna "valor" en formato JSON) para poder editarlos desde el panel
-// sin tener que tocar variables de entorno ni volver a desplegar.
-// Si no hay nada guardado todavía, se usan los valores de las variables
-// de entorno (.env) como default.
 
 let configActual = {
   ai_prompt: AI_PROMPT,
@@ -667,12 +917,6 @@ async function guardarConfigDB(nuevaConfig) {
 
 cargarConfigDesdeDB();
 
-
-// Reutiliza la misma tabla app_config (clave/valor) que ya usamos para
-// la fecha del token. Mientras esté "off", el bot NO manda respuestas
-// automáticas ni seguimientos, pero el webhook sigue vivo (no se rompe
-// nada, solo se abstiene de contestar).
-
 async function estaBotActivo() {
   const { data, error } = await supabase
     .from("app_config")
@@ -685,7 +929,6 @@ async function estaBotActivo() {
     return true;
   }
 
-  // Si nunca se ha tocado el interruptor, por defecto está encendido.
   if (!data) return true;
 
   return data.estado !== "off";
@@ -727,10 +970,6 @@ async function obtenerInfoTokenDB() {
   return data;
 }
 
-// Consulta cuánto tiempo de vida le queda al token actual, según la fecha
-// que guardamos la última vez que se generó o refrescó (ver /get-long-lived-token
-// y /refresh-token). Si nunca se ha usado ninguno de esos dos endpoints desde
-// que existe esta función, no habrá dato guardado todavía.
 app.get("/token-info", requireAdminKey, async (req, res) => {
   try {
     const info = await obtenerInfoTokenDB();
@@ -760,7 +999,6 @@ app.get("/token-info", requireAdminKey, async (req, res) => {
   }
 });
 
-// Consultar/cambiar el estado del bot (encendido/apagado)
 app.get("/bot/estado", requireAdminKey, async (req, res) => {
   const activo = await estaBotActivo();
   res.json({ activo, estado: activo ? "on" : "off" });
@@ -776,7 +1014,6 @@ app.get("/bot/apagar", requireAdminKey, async (req, res) => {
   res.json({ mensaje: "⏸️ Bot APAGADO (no responderá mensajes ni mandará seguimientos)", estado: "off" });
 });
 
-// Leer y guardar la configuración editable (prompt, tiempos, seguimientos)
 app.get("/config", requireAdminKey, (req, res) => {
   res.json(configActual);
 });
@@ -799,9 +1036,6 @@ app.post("/config", requireAdminKey, async (req, res) => {
   }
 });
 
-// Página sencilla con dos botones para encender/apagar el bot sin tener
-// que escribir URLs a mano. Pide la clave de admin una sola vez y la
-// guarda en el navegador (localStorage) para no pedirla cada vez.
 app.get("/panel", (req, res) => {
   res.type("html").send(`
 <!DOCTYPE html>
@@ -810,6 +1044,7 @@ app.get("/panel", (req, res) => {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Panel — Instagram AI Responder</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -908,6 +1143,44 @@ app.get("/panel", (req, res) => {
   .save-btn:active{ transform:scale(.985); }
   .save-msg{ font-size:12.5px; color:var(--muted); white-space:nowrap; }
   .save-msg.ok{ color:var(--lime); }
+
+  /* --- Conectar cuentas de Instagram --- */
+  .conectar-header{ margin-bottom:16px; }
+  .conectar-botones{ display:flex; gap:10px; margin-bottom:18px; flex-wrap:wrap; }
+  .btn-conectar{
+    flex:1; min-width:180px; font-family:'Inter',sans-serif; font-weight:600; font-size:13.5px;
+    border:none; border-radius:10px; padding:13px 16px; cursor:pointer; text-align:center;
+    background:linear-gradient(90deg, #2ED8B6, #37B0E8); color:#0B1220;
+  }
+  .btn-conectar:hover{ filter:brightness(1.06); }
+  .btn-conectar.disabled{
+    background:var(--surface-2); color:var(--muted); cursor:not-allowed; border:1px solid var(--border);
+  }
+  .cuentas-titulo{ font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--lime); margin:0 0 4px; }
+  .cuentas-subtitulo{ font-family:'Oswald',sans-serif; font-weight:600; font-size:15px; margin:0 0 12px; }
+  .cuenta-item{
+    display:flex; align-items:center; gap:14px; background:var(--surface-2); border:1px solid var(--border);
+    border-radius:12px; padding:14px 16px;
+  }
+  .cuenta-avatar{
+    width:42px; height:42px; border-radius:10px; background:#1F3B2E; color:var(--lime);
+    display:flex; align-items:center; justify-content:center; font-family:'Oswald',sans-serif;
+    font-weight:700; font-size:17px; flex-shrink:0;
+  }
+  .cuenta-info{ flex:1; min-width:0; }
+  .cuenta-info .nombre{ font-weight:600; font-size:14.5px; margin-bottom:2px; }
+  .cuenta-info .detalle{ color:var(--muted); font-size:12px; line-height:1.6; font-family:'JetBrains Mono',monospace; }
+  .cuenta-info .detalle b{ color:#C9D1DE; font-weight:500; }
+  .cuenta-lado{ display:flex; flex-direction:column; align-items:flex-end; gap:8px; flex-shrink:0; }
+  .badge{ font-size:11px; font-family:'JetBrains Mono',monospace; padding:4px 9px; border-radius:20px;
+    background:rgba(201,255,62,.12); color:var(--lime); border:1px solid rgba(201,255,62,.25); white-space:nowrap; }
+  .btn-eliminar{
+    background:rgba(255,90,90,.1); color:var(--coral); border:1px solid rgba(255,90,90,.3);
+    border-radius:8px; padding:7px 12px; font-size:12px; font-weight:600; cursor:pointer;
+  }
+  .btn-eliminar:hover{ background:rgba(255,90,90,.18); }
+  .sin-cuenta{ color:var(--muted); font-size:13px; padding:8px 2px; }
 </style>
 </head>
 <body>
@@ -928,15 +1201,18 @@ app.get("/panel", (req, res) => {
     </div>
 
     <div class="card">
-      <h2>Token de acceso</h2>
-      <p class="hint">Vida útil del token que mantiene conectada la cuenta de Instagram. Se renueva por 60 días cada vez que lo refrescas.</p>
-      <div id="tokenInfo" style="font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--muted); line-height:1.9;">Cargando…</div>
-      <button class="add-paso" id="btnRefreshToken" type="button" style="margin-top:12px;">Refrescar token ahora (+60 días)</button>
-      <div id="tokenNuevo" style="display:none; margin-top:14px; padding-top:14px; border-top:1px solid var(--border);">
-        <label>Token nuevo — cópialo y pégalo en IG_ACCESS_TOKEN en Render</label>
-        <textarea id="tokenNuevoValor" rows="3" readonly style="font-family:'JetBrains Mono',monospace; font-size:11.5px;"></textarea>
-        <button class="add-paso" id="btnCopiarToken" type="button" style="margin-top:8px;">Copiar token</button>
+      <div class="conectar-header">
+        <h2>Conectar cuentas de Instagram</h2>
+        <p class="hint">Conecta una cuenta directo desde Instagram y el sistema intenta guardar token long-lived (60 días) sin depender de Facebook Page. Por ahora solo se puede tener una cuenta activa a la vez: conectar una nueva reemplaza a la anterior.</p>
       </div>
+      <div class="conectar-botones">
+        <button class="btn-conectar" id="btnConectarInstagram">Instagram directo (token 60 días)</button>
+        <button class="btn-conectar disabled" id="btnConectarFacebook" title="Próximamente">Facebook / Meta (como antes)</button>
+      </div>
+
+      <p class="cuentas-titulo">Tus cuentas</p>
+      <p class="cuentas-subtitulo">Estado actual</p>
+      <div id="cuentaActual"><p class="sin-cuenta">Cargando…</p></div>
     </div>
 
     <div class="card">
@@ -998,7 +1274,7 @@ app.get("/panel", (req, res) => {
   async function llamarPOST(endpoint, body){
     const key = getKey(); if(!key) return null;
     const res = await fetch(endpoint + "?key=" + encodeURIComponent(key), {
-      method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body)
+      method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body || {})
     });
     if(res.status === 401){ localStorage.removeItem("admin_key"); alert("Clave incorrecta."); return null; }
     return res.json();
@@ -1018,6 +1294,76 @@ app.get("/panel", (req, res) => {
   }
   document.getElementById("btnOn").addEventListener("click", async () => { await llamarGET("/bot/encender"); actualizarEstado(); });
   document.getElementById("btnOff").addEventListener("click", async () => { await llamarGET("/bot/apagar"); actualizarEstado(); });
+
+  // --- Conectar cuentas de Instagram ---
+  document.getElementById("btnConectarInstagram").addEventListener("click", () => {
+    const key = getKey(); if(!key) return;
+    window.location.href = "/oauth/instagram/start?key=" + encodeURIComponent(key);
+  });
+  document.getElementById("btnConectarFacebook").addEventListener("click", () => {
+    alert("La conexión vía Facebook / Meta todavía no está disponible. Por ahora usa 'Instagram directo'.");
+  });
+
+  function iniciales(nombre){
+    if(!nombre) return "?";
+    return nombre.slice(0,1).toUpperCase();
+  }
+  function formatearFecha(iso){
+    if(!iso) return "fecha desconocida";
+    const d = new Date(iso);
+    return d.toLocaleDateString("es-MX", { day:"2-digit", month:"short" }) + ", " +
+      d.toLocaleTimeString("es-MX", { hour:"2-digit", minute:"2-digit" });
+  }
+  function diasDesde(iso){
+    if(!iso) return null;
+    return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+  }
+
+  async function cargarCuentaActual(){
+    const cont = document.getElementById("cuentaActual");
+    const data = await llamarGET("/cuenta/actual");
+    if(!data || !data.conectada){
+      cont.innerHTML = '<p class="sin-cuenta">No hay ninguna cuenta conectada todavía. Usa el botón de arriba para conectar una.</p>';
+      return;
+    }
+
+    let tokenInfo = await llamarGET("/token-info");
+    let diasRestantesTxt = "";
+    if(tokenInfo && !tokenInfo.error){
+      const fecha = new Date(tokenInfo.expira_aproximadamente_en);
+      diasRestantesTxt = \`Token vence en \${tokenInfo.dias_restantes} día(s) (\${fecha.toLocaleDateString("es-MX",{day:"2-digit",month:"short"})})\`;
+    }
+
+    const dias = diasDesde(data.ultimo_oauth_en);
+    const metodoTexto = data.metodo === "instagram_directo" ? "oauth_long_lived"
+      : data.metodo === "env_legacy" ? "variables de entorno (legado)"
+      : (data.metodo || "desconocido");
+
+    cont.innerHTML = \`
+      <div class="cuenta-item">
+        <div class="cuenta-avatar">\${iniciales(data.username)}</div>
+        <div class="cuenta-info">
+          <div class="nombre">@\${data.username || "sin_usuario"}</div>
+          <div class="detalle">
+            ID de Instagram: <b>\${data.ig_id}</b><br>
+            Tipo: <b>\${data.account_type || "desconocido"}</b><br>
+            Conectada: <b>\${formatearFecha(data.conectada_en)}</b>\${diasRestantesTxt ? " · " + diasRestantesTxt : ""}<br>
+            Método: <b>\${metodoTexto}</b>\${dias !== null ? " · último OAuth hace " + dias + " día(s)" : ""}
+          </div>
+        </div>
+        <div class="cuenta-lado">
+          <span class="badge">Conectada</span>
+          <button class="btn-eliminar" id="btnEliminarCuenta">Eliminar cuenta</button>
+        </div>
+      </div>
+    \`;
+
+    document.getElementById("btnEliminarCuenta").addEventListener("click", async () => {
+      if(!confirm("¿Seguro que quieres desconectar esta cuenta? El bot dejará de responder hasta que conectes otra.")) return;
+      await llamarPOST("/cuenta/eliminar");
+      cargarCuentaActual();
+    });
+  }
 
   // --- Seguimientos: editor dinámico ---
   let pasos = [];
@@ -1084,59 +1430,15 @@ app.get("/panel", (req, res) => {
     setTimeout(() => { msg.textContent = ""; }, 2500);
   });
 
-  // --- Token de acceso ---
-  function estadoColor(dias){
-    if (dias === null || dias === undefined) return "var(--muted)";
-    return dias <= 10 ? "var(--coral)" : "var(--lime)";
-  }
-
-  async function cargarTokenInfo(){
-    const cont = document.getElementById("tokenInfo");
-    const data = await llamarGET("/token-info");
-    if(!data || data.error){
-      cont.innerHTML = data && data.error
-        ? "Sin datos todavía — refresca el token una vez para registrar la fecha."
-        : "No se pudo cargar.";
-      return;
-    }
-    const fecha = new Date(data.expira_aproximadamente_en);
-    const fechaTexto = fecha.toLocaleDateString("es-MX", { day: "numeric", month: "long", year: "numeric" });
-    cont.innerHTML = \`
-      <div>Vence aprox.: <span style="color:var(--text)">\${fechaTexto}</span></div>
-      <div>Días restantes: <span style="color:\${estadoColor(data.dias_restantes)}; font-weight:600;">\${data.dias_restantes}</span></div>
-      <div style="color:var(--muted); font-size:12px;">Última renovación: \${new Date(data.obtenido_en).toLocaleDateString("es-MX")}</div>
-    \`;
-  }
-
-  document.getElementById("btnRefreshToken").addEventListener("click", async () => {
-    const btn = document.getElementById("btnRefreshToken");
-    btn.textContent = "Refrescando…"; btn.disabled = true;
-    const data = await llamarGET("/refresh-token");
-    btn.textContent = "Refrescar token ahora (+60 días)"; btn.disabled = false;
-    if(!data || !data.access_token){ alert("No se pudo refrescar el token. Revisa que tenga al menos 24h de generado."); return; }
-    document.getElementById("tokenNuevo").style.display = "block";
-    document.getElementById("tokenNuevoValor").value = data.access_token;
-    cargarTokenInfo();
-  });
-
-  document.getElementById("btnCopiarToken").addEventListener("click", () => {
-    const ta = document.getElementById("tokenNuevoValor");
-    ta.select();
-    navigator.clipboard.writeText(ta.value);
-    const b = document.getElementById("btnCopiarToken");
-    b.textContent = "✓ Copiado"; setTimeout(() => b.textContent = "Copiar token", 1800);
-  });
-
   actualizarEstado();
   cargarConfig();
-  cargarTokenInfo();
+  cargarCuentaActual();
 </script>
 </body>
 </html>
   `);
 });
 
-// Ver los seguimientos programados/pendientes para un usuario (debug)
 app.get("/seguimientos/:senderId?", requireAdminKey, async (req, res) => {
   if (!req.params.senderId) {
     return res.json({ configuracion: configActual.seguimientos });
