@@ -139,7 +139,8 @@ SEGUIMIENTOS_CONFIG = [...SEGUIMIENTOS_CONFIG].sort((a, b) => a.horas - b.horas)
 const VENTANA_24H_MS      = 24 * 60 * 60 * 1000;
 const COLCHON_SEGURIDAD_MS = 2 * 60 * 1000; // 2 minutos de margen de seguridad
 
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+// El cliente de OpenAI se crea más abajo, después de cargar la configuración
+// (así puede usar la clave guardada en Supabase en vez de solo la de Render).
 
 const buffers = new Map();       // { senderId: { mensajes: [], timer, enProceso } }
 const yaRespondidos = new Set(); // dedupe de message IDs recientes
@@ -662,7 +663,7 @@ async function procesarBuffer(senderId) {
     const conv = await obtenerConversacion(senderId);
     const historial = conv.historial || [];
 
-    const completion = await openai.chat.completions.create({
+    const completion = await openaiClient.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: configActual.ai_prompt },
@@ -1194,8 +1195,34 @@ let configActual = {
   min_delay: MIN_DELAY_SECONDS,
   max_delay: MAX_DELAY_SECONDS,
   max_historial: MAX_HISTORIAL,
+  openai_api_key: OPENAI_API_KEY || "",
   seguimientos: SEGUIMIENTOS_CONFIG
 };
+
+// Cliente de OpenAI: se reconstruye cada vez que cambia configActual.openai_api_key
+// (al cargar desde Supabase al arrancar, o al guardar una nueva desde /panel).
+let openaiClient = new OpenAI({ apiKey: configActual.openai_api_key || undefined });
+
+function actualizarClienteOpenAI() {
+  openaiClient = new OpenAI({ apiKey: configActual.openai_api_key || undefined });
+}
+
+// Nunca mandamos la clave completa al navegador: solo si está configurada
+// y sus últimos 4 caracteres, para que el admin identifique cuál está activa.
+function enmascararClave(clave) {
+  if (!clave) return "";
+  const limpio = String(clave);
+  return limpio.length <= 4 ? "••••" : "••••" + limpio.slice(-4);
+}
+
+function configParaFrontend(cfg) {
+  const { openai_api_key, ...resto } = cfg;
+  return {
+    ...resto,
+    openai_api_key_configurada: Boolean(openai_api_key),
+    openai_api_key_mascara: enmascararClave(openai_api_key)
+  };
+}
 
 async function cargarConfigDesdeDB() {
   try {
@@ -1212,6 +1239,7 @@ async function cargarConfigDesdeDB() {
     if (data && data.valor) {
       configActual = { ...configActual, ...data.valor };
       configActual.seguimientos = [...configActual.seguimientos].sort((a, b) => a.horas - b.horas);
+      actualizarClienteOpenAI();
       console.log("✅ Configuración cargada desde Supabase.");
     } else {
       console.log("ℹ️ No hay configuración guardada todavía, se usan los valores por defecto (.env).");
@@ -1224,6 +1252,7 @@ async function cargarConfigDesdeDB() {
 async function guardarConfigDB(nuevaConfig) {
   configActual = { ...configActual, ...nuevaConfig };
   configActual.seguimientos = [...configActual.seguimientos].sort((a, b) => a.horas - b.horas);
+  actualizarClienteOpenAI();
 
   const { error } = await supabase
     .from("app_config")
@@ -1333,12 +1362,12 @@ app.get("/bot/apagar", requireAdminKey, async (req, res) => {
 });
 
 app.get("/config", requireAdminKey, (req, res) => {
-  res.json(configActual);
+  res.json(configParaFrontend(configActual));
 });
 
 app.post("/config", requireAdminKey, async (req, res) => {
   try {
-    const { ai_prompt, min_delay, max_delay, max_historial, seguimientos } = req.body || {};
+    const { ai_prompt, min_delay, max_delay, max_historial, seguimientos, openai_api_key } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -1346,9 +1375,11 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (Number.isFinite(max_delay) && max_delay >= 0) nuevaConfig.max_delay = max_delay;
     if (Number.isFinite(max_historial) && max_historial > 0) nuevaConfig.max_historial = max_historial;
     if (Array.isArray(seguimientos)) nuevaConfig.seguimientos = seguimientos;
+    // Solo se actualiza si mandaron una clave nueva; si viene vacío, se deja la que ya había.
+    if (typeof openai_api_key === "string" && openai_api_key.trim()) nuevaConfig.openai_api_key = openai_api_key.trim();
 
     const guardado = await guardarConfigDB(nuevaConfig);
-    res.json({ mensaje: "✅ Configuración guardada", config: guardado });
+    res.json({ mensaje: "✅ Configuración guardada", config: configParaFrontend(guardado) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1648,6 +1679,14 @@ ${estilosBase()}
   .save-msg{ font-size:13.5px; color:var(--muted); white-space:nowrap; }
   .save-msg.ok{ color:var(--green); }
   .content-area{ padding-bottom:120px; }
+  .key-input-row{ display:flex; gap:8px; }
+  .key-input-row input{ flex:1; }
+  .btn-ojo{
+    background:var(--surface-3); border:1px solid var(--border); border-radius:10px;
+    padding:0 15px; cursor:pointer; color:var(--muted); font-size:16px; flex-shrink:0;
+  }
+  .btn-ojo:hover{ color:var(--text); border-color:var(--green); }
+  .key-actual{ font-family:var(--mono); font-size:12.5px; color:var(--muted); margin:10px 0 0; }
   @media (max-width:860px){ .savebar{ left:0; padding:18px 18px 20px; } .save-btn{ flex:1; } }
 </style>
 </head>
@@ -1704,6 +1743,17 @@ ${estilosBase()}
           <label for="maxHistorial">Mensajes a recordar</label>
           <input type="number" id="maxHistorial" min="1">
         </div>
+
+        <div class="card">
+          <h2>Clave de API (OpenAI)</h2>
+          <p class="hint">La clave se guarda en la base de datos y nunca se muestra completa aquí, solo sus últimos 4 caracteres. Escribe una nueva únicamente si quieres reemplazarla.</p>
+          <label for="openaiKey">Nueva clave</label>
+          <div class="key-input-row">
+            <input type="password" id="openaiKey" placeholder="sk-..." autocomplete="off">
+            <button type="button" class="btn-ojo" id="btnVerClave" title="Mostrar/ocultar">👁</button>
+          </div>
+          <p class="key-actual" id="keyActual">Cargando estado…</p>
+        </div>
       </div>
 
       <div class="col">
@@ -1752,6 +1802,11 @@ ${estilosBase()}
   }
   document.getElementById("btnOn").addEventListener("click", async () => { await llamarGET("/bot/encender"); actualizarEstado(); });
   document.getElementById("btnOff").addEventListener("click", async () => { await llamarGET("/bot/apagar"); actualizarEstado(); });
+
+  document.getElementById("btnVerClave").addEventListener("click", () => {
+    const input = document.getElementById("openaiKey");
+    input.type = input.type === "password" ? "text" : "password";
+  });
 
   // --- Seguimientos: editor dinámico ---
   let pasos = [];
@@ -1804,9 +1859,21 @@ ${estilosBase()}
     document.getElementById("minDelay").value = cfg.min_delay ?? 8;
     document.getElementById("maxDelay").value = cfg.max_delay ?? 15;
     document.getElementById("maxHistorial").value = cfg.max_historial ?? 20;
+    pintarEstadoClave(cfg);
     pasos = Array.isArray(cfg.seguimientos) ? JSON.parse(JSON.stringify(cfg.seguimientos)) : [];
     renderPasos();
     document.getElementById("btnGuardar").disabled = false;
+  }
+
+  function pintarEstadoClave(cfg){
+    const estadoKey = document.getElementById("keyActual");
+    if(cfg.openai_api_key_configurada){
+      estadoKey.textContent = "Clave actual: " + cfg.openai_api_key_mascara;
+      estadoKey.style.color = "";
+    } else {
+      estadoKey.textContent = "⚠️ No hay ninguna clave configurada todavía.";
+      estadoKey.style.color = "var(--red)";
+    }
   }
 
   document.getElementById("btnGuardar").addEventListener("click", async () => {
@@ -1821,11 +1888,18 @@ ${estilosBase()}
       max_historial: parseInt(document.getElementById("maxHistorial").value, 10),
       seguimientos: pasos
     };
+    const nuevaClave = document.getElementById("openaiKey").value.trim();
+    if(nuevaClave) body.openai_api_key = nuevaClave;
+
     const msg = document.getElementById("saveMsg");
     msg.style.color = "";
     msg.textContent = "Guardando…"; msg.className = "save-msg";
     const data = await llamarPOST("/config", body);
-    if(data){ msg.textContent = "✓ Guardado"; msg.className = "save-msg ok"; }
+    if(data){
+      msg.textContent = "✓ Guardado"; msg.className = "save-msg ok";
+      document.getElementById("openaiKey").value = "";
+      if(data.config) pintarEstadoClave(data.config);
+    }
     setTimeout(() => { msg.textContent = ""; }, 2500);
   });
 
