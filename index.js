@@ -574,7 +574,7 @@ function sidebarHTML(activo) {
   </div>
   <nav class="side-nav">
     ${link("/cuentas", "CTA", "Cuentas", "cuentas")}
-    ${link("/panel", "PNL", "Panel", "panel")}
+    ${link("/panel", "CFG", "Configuración", "panel")}
     ${link("/chats", "CHT", "Chats", "chats")}
   </nav>
   <div class="sidebar-footer">Robertoperez.coach<br>v1.0<br><a href="/logout" style="color:var(--muted-dim);">Cerrar sesión</a></div>
@@ -945,6 +945,11 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
       const historial = Array.isArray(c.historial) ? c.historial : [];
       const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
       const perfil = await obtenerPerfilInstagram(c.sender_id);
+
+      const enVentana24h = c.ultimo_mensaje_usuario
+        ? (Date.now() - new Date(c.ultimo_mensaje_usuario).getTime()) < VENTANA_24H_MS
+        : false;
+
       return {
         sender_id: c.sender_id,
         username: perfil?.username || null,
@@ -952,7 +957,8 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         ultimo_mensaje_usuario: c.ultimo_mensaje_usuario,
         actualizado_en: c.actualizado_en,
         ultimo_texto: ultimo ? ultimo.content : null,
-        ultimo_role: ultimo ? ultimo.role : null
+        ultimo_role: ultimo ? ultimo.role : null,
+        en_ventana_24h: enVentana24h
       };
     }));
 
@@ -1571,7 +1577,7 @@ app.get("/panel", requireAdminSesion, (req, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Panel — Instagram AI Responder</title>
+<title>Configuración — Instagram AI Responder</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 ${FUENTES_HTML}
 ${estilosBase()}
@@ -1626,8 +1632,8 @@ ${estilosBase()}
   <div class="main">
     <div class="page-header">
       <div class="page-header-left">
-        <p class="page-eyebrow">Automatizaciones</p>
-        <h1 class="page-title">Automatizaciones en respuestas y followup</h1>
+        <p class="page-eyebrow">Configuración</p>
+        <h1 class="page-title">Configuración del bot</h1>
       </div>
       <div class="header-status">
         <div class="header-status-text">
@@ -1834,6 +1840,26 @@ ${estilosBase()}
     display:flex; align-items:center; gap:6px; font-family:var(--mono); font-size:11px;
     color:var(--muted-dim); letter-spacing:.03em;
   }
+  .chat-tabs{ display:flex; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
+  .chat-tab{
+    flex:1; text-align:center; padding:9px 8px; border-radius:9px; font-size:13px;
+    font-weight:600; cursor:pointer; color:var(--muted); background:var(--surface-3);
+    border:1px solid transparent; transition:background .12s, color .12s;
+  }
+  .chat-tab:hover{ color:var(--text); }
+  .chat-tab.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.3); }
+  .chat-tab.tab-handoff.active{ background:var(--red-soft); color:var(--red); border-color:rgba(255,93,93,.3); }
+  .chat-tab .count{ font-family:var(--mono); font-size:11.5px; opacity:.85; margin-left:4px; }
+  .handoff-dot{
+    width:8px; height:8px; border-radius:50%; background:var(--red); flex-shrink:0;
+    display:inline-block; margin-left:7px; box-shadow:0 0 0 2px rgba(255,93,93,.18);
+  }
+  .uname-row{ display:flex; align-items:center; }
+  .handoff-banner{
+    background:var(--red-soft); color:var(--red); font-size:13px; padding:11px 20px;
+    border-bottom:1px solid rgba(255,93,93,.25); display:none; align-items:center; gap:8px;
+  }
+  .handoff-banner.visible{ display:flex; }
   .chat-list{ flex:1; overflow-y:auto; }
   .chat-list-item{
     display:flex; align-items:flex-start; gap:12px; padding:14px 18px;
@@ -1918,12 +1944,19 @@ ${estilosBase()}
           <span class="chat-list-head-title">Conversaciones</span>
           <span class="live-tag"><span class="status-dot"></span>en vivo</span>
         </div>
+        <div class="chat-tabs">
+          <div class="chat-tab active" id="tabTodas" data-filtro="todas">Todas <span class="count" id="countTodas"></span></div>
+          <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff">Handoff (+24h) <span class="count" id="countHandoff"></span></div>
+        </div>
         <div class="chat-list" id="listaChats"><p class="vacio-lista">Cargando…</p></div>
       </div>
 
       <div class="chat-window">
         <div class="chat-window-head" id="chatHead">
           <span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>
+        </div>
+        <div class="handoff-banner" id="handoffBanner">
+          ⏰ Esta conversación salió de la ventana de 24 horas de Instagram — el bot ya no puede mandar mensajes normales aquí, se requiere atención manual (o una plantilla aprobada).
         </div>
         <div class="chat-messages" id="chatMensajes">
           <div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>
@@ -1944,6 +1977,7 @@ ${estilosBase()}
   let conversaciones = [];
   let senderSeleccionado = null;
   let ultimoHistorialJSON = null;
+  let filtroActual = "todas";
 
   function formatearFecha(iso){
     if(!iso) return "";
@@ -1976,17 +2010,36 @@ ${estilosBase()}
     return c.username ? "@" + c.username : c.sender_id;
   }
 
+  function actualizarContadores(){
+    document.getElementById("countTodas").textContent = conversaciones.length;
+    document.getElementById("countHandoff").textContent = conversaciones.filter(c => !c.en_ventana_24h).length;
+  }
+
+  function conversacionesFiltradas(){
+    if(filtroActual === "handoff") return conversaciones.filter(c => !c.en_ventana_24h);
+    return conversaciones;
+  }
+
   function renderLista(){
     const cont = document.getElementById("listaChats");
-    if(conversaciones.length === 0){
-      cont.innerHTML = '<p class="vacio-lista">Todavía no hay conversaciones.</p>';
+    actualizarContadores();
+    const lista = conversacionesFiltradas();
+
+    if(lista.length === 0){
+      cont.innerHTML = filtroActual === "handoff"
+        ? '<p class="vacio-lista">🎉 Ninguna conversación en handoff — todas están dentro de la ventana de 24h.</p>'
+        : '<p class="vacio-lista">Todavía no hay conversaciones.</p>';
       return;
     }
-    cont.innerHTML = conversaciones.map(c => \`
+
+    cont.innerHTML = lista.map(c => \`
       <div class="chat-list-item\${senderSeleccionado === c.sender_id ? " active" : ""}" data-id="\${c.sender_id}">
         \${avatarHTML(c)}
         <div class="chat-list-item-text">
-          <div class="uname">\${escapar(nombreMostrar(c))}</div>
+          <div class="uname-row">
+            <span class="uname">\${escapar(nombreMostrar(c))}</span>
+            \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
+          </div>
           <div class="preview">\${c.ultimo_role === "assistant" ? "🤖 " : ""}\${escapar(c.ultimo_texto) || "(sin mensajes)"}</div>
           <div class="time">\${formatearFecha(c.actualizado_en)}</div>
         </div>
@@ -2000,11 +2053,13 @@ ${estilosBase()}
 
   function renderHead(){
     const head = document.getElementById("chatHead");
+    const banner = document.getElementById("handoffBanner");
     if(!senderSeleccionado){
       head.innerHTML = '<span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>';
+      banner.classList.remove("visible");
       return;
     }
-    const conv = conversaciones.find(c => c.sender_id === senderSeleccionado) || { sender_id: senderSeleccionado };
+    const conv = conversaciones.find(c => c.sender_id === senderSeleccionado) || { sender_id: senderSeleccionado, en_ventana_24h: true };
     head.innerHTML = \`
       \${avatarHTML(conv)}
       <div class="chat-window-head-text">
@@ -2012,7 +2067,21 @@ ${estilosBase()}
         <div class="chat-window-head-id">\${conv.sender_id}</div>
       </div>
     \`;
+    banner.classList.toggle("visible", conv.en_ventana_24h === false);
   }
+
+  document.getElementById("tabTodas").addEventListener("click", () => {
+    filtroActual = "todas";
+    document.getElementById("tabTodas").classList.add("active");
+    document.getElementById("tabHandoff").classList.remove("active");
+    renderLista();
+  });
+  document.getElementById("tabHandoff").addEventListener("click", () => {
+    filtroActual = "handoff";
+    document.getElementById("tabHandoff").classList.add("active");
+    document.getElementById("tabTodas").classList.remove("active");
+    renderLista();
+  });
 
   async function cargarConversaciones(){
     const data = await llamarGET("/conversaciones");
