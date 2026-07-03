@@ -1618,7 +1618,7 @@ ${estilosBase()}
 
   <div class="savebar">
     <div class="savebar-inner">
-      <button class="save-btn" id="btnGuardar">Guardar cambios</button>
+      <button class="save-btn" id="btnGuardar" disabled>Guardar cambios</button>
       <span class="save-msg" id="saveMsg"></span>
     </div>
   </div>
@@ -1691,17 +1691,27 @@ ${estilosBase()}
 
   async function cargarConfig(){
     const cfg = await llamarGET("/config");
-    if(!cfg) return;
+    const msg = document.getElementById("saveMsg");
+    if(!cfg){
+      msg.textContent = "⚠️ No se pudo cargar la configuración — no toques 'Guardar' todavía.";
+      msg.className = "save-msg";
+      msg.style.color = "var(--red)";
+      return;
+    }
     document.getElementById("prompt").value = cfg.ai_prompt || "";
     document.getElementById("minDelay").value = cfg.min_delay ?? 8;
     document.getElementById("maxDelay").value = cfg.max_delay ?? 15;
     document.getElementById("maxHistorial").value = cfg.max_historial ?? 20;
     pasos = Array.isArray(cfg.seguimientos) ? JSON.parse(JSON.stringify(cfg.seguimientos)) : [];
     renderPasos();
+    document.getElementById("btnGuardar").disabled = false;
   }
 
   document.getElementById("btnGuardar").addEventListener("click", async () => {
     leerPasosDelDOM();
+    if(pasos.length === 0){
+      if(!confirm("No hay ningún paso de seguimiento configurado. ¿Seguro que quieres guardar así (se quedará sin seguimientos automáticos)?")) return;
+    }
     const body = {
       ai_prompt: document.getElementById("prompt").value,
       min_delay: parseInt(document.getElementById("minDelay").value, 10),
@@ -1710,6 +1720,7 @@ ${estilosBase()}
       seguimientos: pasos
     };
     const msg = document.getElementById("saveMsg");
+    msg.style.color = "";
     msg.textContent = "Guardando…"; msg.className = "save-msg";
     const data = await llamarPOST("/config", body);
     if(data){ msg.textContent = "✓ Guardado"; msg.className = "save-msg ok"; }
