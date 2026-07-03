@@ -863,6 +863,26 @@ app.get("/oauth/facebook/start", requireAdminKey, (req, res) => {
 app.get("/cuenta/actual", requireAdminKey, async (req, res) => {
   const cuenta = await obtenerCuentaActiva();
   if (!cuenta) return res.json({ conectada: false });
+
+  // La cuenta legada (variables de entorno) no trae username ni fecha de
+  // conexión guardados: los completamos aquí sin necesidad de tocar Render.
+  if (cuenta.metodo === "env_legacy") {
+    if (!cuenta.username) {
+      try {
+        const perfilResp = await axios.get("https://graph.instagram.com/v25.0/me", {
+          params: { fields: "username", access_token: cuenta.access_token }
+        });
+        cuenta.username = perfilResp.data.username;
+      } catch (err) {
+        console.error("❌ Error obteniendo username de la cuenta legada:", err.response?.data || err.message);
+      }
+    }
+    if (!cuenta.conectada_en) {
+      const infoToken = await obtenerInfoTokenDB();
+      if (infoToken?.obtenido_en) cuenta.conectada_en = infoToken.obtenido_en;
+    }
+  }
+
   const { access_token, ...datosPublicos } = cuenta;
   res.json({ conectada: true, ...datosPublicos });
 });
@@ -1166,13 +1186,8 @@ app.get("/panel", (req, res) => {
     display:flex; align-items:center; gap:14px; background:var(--surface-2); border:1px solid var(--border);
     border-radius:12px; padding:14px 16px;
   }
-  .cuenta-avatar{
-    width:42px; height:42px; border-radius:10px; background:#1F3B2E; color:var(--lime);
-    display:flex; align-items:center; justify-content:center; font-family:'Oswald',sans-serif;
-    font-weight:700; font-size:17px; flex-shrink:0;
-  }
   .cuenta-info{ flex:1; min-width:0; }
-  .cuenta-info .nombre{ font-weight:600; font-size:14.5px; margin-bottom:2px; }
+  .cuenta-info .nombre{ font-family:'Oswald',sans-serif; font-weight:600; font-size:17px; margin-bottom:4px; }
   .cuenta-info .detalle{ color:var(--muted); font-size:12px; line-height:1.6; font-family:'JetBrains Mono',monospace; }
   .cuenta-info .detalle b{ color:#C9D1DE; font-weight:500; }
   .cuenta-lado{ display:flex; flex-direction:column; align-items:flex-end; gap:8px; flex-shrink:0; }
@@ -1303,19 +1318,11 @@ app.get("/panel", (req, res) => {
     window.location.href = "/oauth/instagram/start?key=" + encodeURIComponent(key);
   });
 
-  function iniciales(nombre){
-    if(!nombre) return "?";
-    return nombre.slice(0,1).toUpperCase();
-  }
   function formatearFecha(iso){
     if(!iso) return "fecha desconocida";
     const d = new Date(iso);
     return d.toLocaleDateString("es-MX", { day:"2-digit", month:"short" }) + ", " +
       d.toLocaleTimeString("es-MX", { hour:"2-digit", minute:"2-digit" });
-  }
-  function diasDesde(iso){
-    if(!iso) return null;
-    return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
   }
 
   async function cargarCuentaActual(){
@@ -1333,21 +1340,12 @@ app.get("/panel", (req, res) => {
       diasRestantesTxt = \`Token vence en \${tokenInfo.dias_restantes} día(s) (\${fecha.toLocaleDateString("es-MX",{day:"2-digit",month:"short"})})\`;
     }
 
-    const dias = diasDesde(data.ultimo_oauth_en);
-    const metodoTexto = data.metodo === "instagram_directo" ? "oauth_long_lived"
-      : data.metodo === "env_legacy" ? "variables de entorno (legado)"
-      : (data.metodo || "desconocido");
-
     cont.innerHTML = \`
       <div class="cuenta-item">
-        <div class="cuenta-avatar">\${iniciales(data.username)}</div>
         <div class="cuenta-info">
           <div class="nombre">@\${data.username || "sin_usuario"}</div>
           <div class="detalle">
-            ID de Instagram: <b>\${data.ig_id}</b><br>
-            Tipo: <b>\${data.account_type || "desconocido"}</b><br>
-            Conectada: <b>\${formatearFecha(data.conectada_en)}</b>\${diasRestantesTxt ? " · " + diasRestantesTxt : ""}<br>
-            Método: <b>\${metodoTexto}</b>\${dias !== null ? " · último OAuth hace " + dias + " día(s)" : ""}
+            Conectada: <b>\${formatearFecha(data.conectada_en)}</b>\${diasRestantesTxt ? " · " + diasRestantesTxt : ""}
           </div>
         </div>
         <div class="cuenta-lado">
