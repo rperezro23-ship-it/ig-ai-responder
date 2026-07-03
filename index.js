@@ -536,6 +536,7 @@ function sidebarHTML(activo) {
     <div class="brand-name">IG AI Responder</div>
   </div>
   <nav class="side-nav">
+    ${link("/chats", "CHT", "Chats", "chats")}
     ${link("/cuentas", "CTA", "Cuentas", "cuentas")}
     ${link("/panel", "PNL", "Panel", "panel")}
   </nav>
@@ -889,6 +890,36 @@ app.get("/force-subscribe", requireAdminKey, async (req, res) => {
 app.get("/historial/:senderId", requireAdminKey, async (req, res) => {
   const conv = await obtenerConversacion(req.params.senderId);
   res.json(conv);
+});
+
+// Resumen de todas las conversaciones (usado por /chats para la lista de la izquierda).
+// Solo trae lo necesario para pintar la lista: último mensaje, quién lo mandó y cuándo.
+app.get("/conversaciones", requireAdminKey, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("conversaciones")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en")
+      .order("actualizado_en", { ascending: false })
+      .limit(200);
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    const resumen = (data || []).map((c) => {
+      const historial = Array.isArray(c.historial) ? c.historial : [];
+      const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
+      return {
+        sender_id: c.sender_id,
+        ultimo_mensaje_usuario: c.ultimo_mensaje_usuario,
+        actualizado_en: c.actualizado_en,
+        ultimo_texto: ultimo ? ultimo.content : null,
+        ultimo_role: ultimo ? ultimo.role : null
+      };
+    });
+
+    res.json({ conversaciones: resumen });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/get-long-lived-token", requireAdminKey, async (req, res) => {
@@ -1728,6 +1759,215 @@ ${estilosBase()}
 
   actualizarEstado();
   cargarConfig();
+</script>
+</body>
+</html>
+  `);
+});
+
+app.get("/chats", requireAdminSesion, (req, res) => {
+  res.type("html").send(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chats — Instagram AI Responder</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+${FUENTES_HTML}
+${estilosBase()}
+<style>
+  .chat-shell{
+    display:flex; gap:18px; height:calc(100vh - 230px); min-height:460px;
+  }
+
+  .chat-list-panel{
+    width:320px; flex-shrink:0; background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius-lg); display:flex; flex-direction:column; overflow:hidden;
+  }
+  .chat-list-head{
+    padding:16px 18px; border-bottom:1px solid var(--border); display:flex;
+    align-items:center; justify-content:space-between; flex-shrink:0;
+  }
+  .chat-list-head-title{ font-family:var(--display); font-weight:600; font-size:15.5px; }
+  .live-tag{
+    display:flex; align-items:center; gap:6px; font-family:var(--mono); font-size:11px;
+    color:var(--muted-dim); letter-spacing:.03em;
+  }
+  .chat-list{ flex:1; overflow-y:auto; }
+  .chat-list-item{
+    padding:14px 18px; border-bottom:1px solid var(--border); cursor:pointer;
+    transition:background .12s;
+  }
+  .chat-list-item:hover{ background:var(--surface-2); }
+  .chat-list-item.active{ background:var(--green-soft); }
+  .chat-list-item .sid{
+    font-family:var(--mono); font-size:11.5px; color:var(--muted); margin-bottom:5px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .chat-list-item .preview{
+    font-size:14px; color:#C9D1DE; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; margin-bottom:4px;
+  }
+  .chat-list-item .time{ font-size:11.5px; color:var(--muted-dim); font-family:var(--mono); }
+  .vacio-lista{ color:var(--muted); font-size:14.5px; padding:20px 18px; }
+
+  .chat-window{
+    flex:1; display:flex; flex-direction:column; background:var(--surface);
+    border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden; min-width:0;
+  }
+  .chat-window-head{
+    padding:16px 20px; border-bottom:1px solid var(--border); flex-shrink:0;
+    font-family:var(--mono); font-size:14px; color:var(--text); font-weight:500;
+  }
+  .chat-messages{
+    flex:1; overflow-y:auto; padding:22px; display:flex; flex-direction:column; gap:12px;
+  }
+  .bubble-row{ display:flex; flex-direction:column; max-width:70%; }
+  .bubble-row.user{ align-self:flex-start; align-items:flex-start; }
+  .bubble-row.assistant{ align-self:flex-end; align-items:flex-end; }
+  .bubble{
+    padding:11px 15px; border-radius:15px; font-size:14.5px; line-height:1.55;
+    white-space:pre-wrap; word-break:break-word;
+  }
+  .bubble-row.user .bubble{ background:var(--surface-3); color:var(--text); border-bottom-left-radius:4px; }
+  .bubble-row.assistant .bubble{ background:var(--green); color:#04140D; border-bottom-right-radius:4px; }
+  .bubble-time{ font-size:11px; color:var(--muted-dim); margin-top:4px; font-family:var(--mono); padding:0 3px; }
+  .chat-empty{
+    flex:1; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:15px;
+  }
+  @media (max-width:860px){
+    .chat-shell{ flex-direction:column; height:auto; }
+    .chat-list-panel{ width:100%; max-height:280px; }
+    .chat-window{ min-height:420px; }
+  }
+</style>
+</head>
+<body>
+  <div class="app-shell">
+  ${sidebarHTML("chats")}
+  <div class="content-area">
+  <div class="main">
+    <div class="page-header">
+      <div class="page-header-left">
+        <p class="page-eyebrow">Instagram</p>
+        <h1 class="page-title">Chats en vivo</h1>
+      </div>
+    </div>
+    <p class="page-sub">Conversaciones de la cuenta de Instagram conectada. La lista y el chat abierto se actualizan solos cada pocos segundos.</p>
+
+    <div class="chat-shell">
+      <div class="chat-list-panel">
+        <div class="chat-list-head">
+          <span class="chat-list-head-title">Conversaciones</span>
+          <span class="live-tag"><span class="status-dot"></span>en vivo</span>
+        </div>
+        <div class="chat-list" id="listaChats"><p class="vacio-lista">Cargando…</p></div>
+      </div>
+
+      <div class="chat-window">
+        <div class="chat-window-head" id="chatHead">Selecciona una conversación</div>
+        <div class="chat-messages" id="chatMensajes">
+          <div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  </div>
+  </div>
+
+<script>
+  async function llamarGET(endpoint){
+    const res = await fetch(endpoint);
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
+    return res.json();
+  }
+
+  let conversaciones = [];
+  let senderSeleccionado = null;
+  let ultimoHistorialJSON = null;
+
+  function formatearFecha(iso){
+    if(!iso) return "";
+    const d = new Date(iso);
+    return d.toLocaleDateString("es-MX", { day:"2-digit", month:"short" }) + ", " +
+      d.toLocaleTimeString("es-MX", { hour:"2-digit", minute:"2-digit" });
+  }
+
+  function escapar(txt){
+    return (txt || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+
+  function renderLista(){
+    const cont = document.getElementById("listaChats");
+    if(conversaciones.length === 0){
+      cont.innerHTML = '<p class="vacio-lista">Todavía no hay conversaciones.</p>';
+      return;
+    }
+    cont.innerHTML = conversaciones.map(c => \`
+      <div class="chat-list-item\${senderSeleccionado === c.sender_id ? " active" : ""}" data-id="\${c.sender_id}">
+        <div class="sid">\${c.sender_id}</div>
+        <div class="preview">\${c.ultimo_role === "assistant" ? "🤖 " : ""}\${escapar(c.ultimo_texto) || "(sin mensajes)"}</div>
+        <div class="time">\${formatearFecha(c.actualizado_en)}</div>
+      </div>
+    \`).join("");
+
+    cont.querySelectorAll(".chat-list-item").forEach(el => {
+      el.addEventListener("click", () => seleccionarChat(el.dataset.id));
+    });
+  }
+
+  async function cargarConversaciones(){
+    const data = await llamarGET("/conversaciones");
+    if(!data) return;
+    conversaciones = data.conversaciones || [];
+    renderLista();
+  }
+
+  async function seleccionarChat(senderId){
+    senderSeleccionado = senderId;
+    ultimoHistorialJSON = null;
+    renderLista();
+    document.getElementById("chatHead").textContent = senderId;
+    document.getElementById("chatMensajes").innerHTML = '<div class="chat-empty">Cargando…</div>';
+    await cargarHistorial();
+  }
+
+  function renderMensajes(historial){
+    const cont = document.getElementById("chatMensajes");
+    if(!historial || historial.length === 0){
+      cont.innerHTML = '<div class="chat-empty">Sin mensajes todavía en esta conversación.</div>';
+      return;
+    }
+    const estabaAbajo = cont.scrollTop + cont.clientHeight >= cont.scrollHeight - 60;
+    cont.innerHTML = historial.map(m => \`
+      <div class="bubble-row \${m.role === "assistant" ? "assistant" : "user"}">
+        <div class="bubble">\${escapar(m.content)}</div>
+      </div>
+    \`).join("");
+    if(estabaAbajo || cont.dataset.primeraVez !== "hecho"){
+      cont.scrollTop = cont.scrollHeight;
+      cont.dataset.primeraVez = "hecho";
+    }
+  }
+
+  async function cargarHistorial(){
+    if(!senderSeleccionado) return;
+    const data = await llamarGET("/historial/" + encodeURIComponent(senderSeleccionado));
+    if(!data) return;
+    const json = JSON.stringify(data.historial || []);
+    if(json === ultimoHistorialJSON) return;
+    ultimoHistorialJSON = json;
+    document.getElementById("chatMensajes").dataset.primeraVez = "";
+    renderMensajes(data.historial || []);
+  }
+
+  setInterval(() => {
+    cargarConversaciones();
+    if(senderSeleccionado) cargarHistorial();
+  }, 4000);
+
+  cargarConversaciones();
 </script>
 </body>
 </html>
