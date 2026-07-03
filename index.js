@@ -125,6 +125,19 @@ const SEGUIMIENTOS_DEFAULT = [
   }
 ];
 
+// Seguimientos especiales para cuando ya se envió el enlace de calificación
+// (calendario / formulario). Por defecto está vacío: el admin lo configura
+// desde /panel una vez que sepa qué mensaje quiere mandar.
+const SEGUIMIENTOS_ENLACE_DEFAULT = [
+  {
+    horas: 4,
+    mensajes: [
+      "Ey, ¿cómo vas? ¿Pudiste encontrar un espacio que te quede bien? 😊",
+      "Oye, ¿alcanzaste a agendar? Cualquier duda con el enlace, aquí ando 🙌"
+    ]
+  }
+];
+
 let SEGUIMIENTOS_CONFIG;
 try {
   SEGUIMIENTOS_CONFIG = process.env.SEGUIMIENTOS
@@ -158,11 +171,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null };
   }
 
   return data;
@@ -188,6 +201,18 @@ async function registrarMensajeUsuario(senderId) {
   await guardarConversacion(senderId, { ultimo_mensaje_usuario: new Date().toISOString() });
 }
 
+// Si el lead ya había recibido el enlace de calificación (calendario/formulario)
+// y ahora vuelve a escribir, ya no tiene sentido seguir con el "seguimiento
+// especial" de ese enlace: se apaga la etiqueta para que, si vuelve a quedarse
+// callado más adelante, reciba de nuevo los seguimientos normales (a menos que
+// el bot le reenvíe el enlace, en cuyo caso se vuelve a activar).
+async function reiniciarSeguimientoEnlaceSiAplica(senderId) {
+  const conv = await obtenerConversacion(senderId);
+  if (conv.enlace_enviado) {
+    await guardarConversacion(senderId, { enlace_enviado: false, enlace_enviado_en: null });
+  }
+}
+
 async function cancelarSeguimientosPendientesDB(senderId) {
   const { error } = await supabase
     .from("seguimientos_programados")
@@ -198,6 +223,12 @@ async function cancelarSeguimientosPendientesDB(senderId) {
   if (error) console.error("❌ Error cancelando seguimientos en Supabase:", error.message);
 }
 
+// Programa el siguiente seguimiento automático para un usuario. Si ya se le
+// mandó el enlace de calificación (conv.enlace_enviado), usa la lista de
+// "seguimientos_enlace" contando las horas desde que se mandó el enlace; si
+// no, usa los "seguimientos" normales contando desde el último mensaje del
+// usuario. En ambos casos la ventana límite de 24h de Instagram se calcula
+// siempre a partir del último mensaje del usuario (así lo exige Meta).
 async function programarSeguimientosDB(senderId) {
   await cancelarSeguimientosPendientesDB(senderId);
 
@@ -207,18 +238,26 @@ async function programarSeguimientosDB(senderId) {
   const ultimoMsg = new Date(conv.ultimo_mensaje_usuario).getTime();
   const limiteVentana = ultimoMsg + VENTANA_24H_MS - COLCHON_SEGURIDAD_MS;
 
+  const esSeguimientoEnlace = Boolean(conv.enlace_enviado);
+  const pasos = esSeguimientoEnlace ? (configActual.seguimientos_enlace || []) : (configActual.seguimientos || []);
+  const tipo = esSeguimientoEnlace ? "enlace" : "normal";
+  const referencia = (esSeguimientoEnlace && conv.enlace_enviado_en)
+    ? new Date(conv.enlace_enviado_en).getTime()
+    : ultimoMsg;
+
   const filas = [];
-  for (let i = 0; i < configActual.seguimientos.length; i++) {
-    const { horas, mensajes } = configActual.seguimientos[i];
+  for (let i = 0; i < pasos.length; i++) {
+    const { horas, mensajes } = pasos[i];
     if (!Array.isArray(mensajes) || mensajes.length === 0) continue;
 
-    const momentoDisparo = ultimoMsg + horas * 60 * 60 * 1000;
+    const momentoDisparo = referencia + horas * 60 * 60 * 1000;
     if (momentoDisparo > limiteVentana) continue; // se saldría de la ventana de 24h
     if (momentoDisparo <= Date.now()) continue;    // ya pasó ese punto
 
     filas.push({
       sender_id: senderId,
       paso_index: i,
+      tipo,
       disparar_en: new Date(momentoDisparo).toISOString(),
       enviado: false
     });
@@ -253,31 +292,36 @@ async function procesarSeguimientosPendientesDB() {
   let procesados = 0;
 
   for (const fila of pendientes || []) {
-    const { id, sender_id: senderId, paso_index: pasoIndex } = fila;
+    const { id, sender_id: senderId, paso_index: pasoIndex, tipo } = fila;
+    const esEnlace = tipo === "enlace";
 
     const conv = await obtenerConversacion(senderId);
     const ultimoMsg = conv.ultimo_mensaje_usuario ? new Date(conv.ultimo_mensaje_usuario).getTime() : 0;
     const sigueVigente = Date.now() <= (ultimoMsg + VENTANA_24H_MS - COLCHON_SEGURIDAD_MS);
 
     if (!sigueVigente) {
-      console.log(`⏭️ Seguimiento (paso ${pasoIndex}) para ${senderId} descartado: fuera de la ventana de 24h.`);
+      console.log(`⏭️ Seguimiento (${tipo}, paso ${pasoIndex}) para ${senderId} descartado: fuera de la ventana de 24h.`);
       await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
       continue;
     }
 
-    const pasoConfig = configActual.seguimientos[pasoIndex];
+    const listaPasos = esEnlace ? configActual.seguimientos_enlace : configActual.seguimientos;
+    const pasoConfig = listaPasos ? listaPasos[pasoIndex] : null;
     if (!pasoConfig) {
       await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
       continue;
     }
 
+    // Se namespacea la clave de rotación por tipo, para que el paso 0 normal
+    // y el paso 0 del enlace no compartan el mismo contador de rotación.
+    const claveRotacion = `${tipo}_${pasoIndex}`;
     const rotacion = conv.rotacion || {};
-    const indiceActual = rotacion[pasoIndex] || 0;
+    const indiceActual = rotacion[claveRotacion] || 0;
     const mensaje = pasoConfig.mensajes[indiceActual % pasoConfig.mensajes.length];
-    rotacion[pasoIndex] = (indiceActual + 1) % pasoConfig.mensajes.length;
+    rotacion[claveRotacion] = (indiceActual + 1) % pasoConfig.mensajes.length;
 
     try {
-      console.log(`🔔 Enviando seguimiento (paso ${pasoIndex}, ${pasoConfig.horas} h) a ${senderId}: "${mensaje}"`);
+      console.log(`🔔 Enviando seguimiento (${tipo}, paso ${pasoIndex}, ${pasoConfig.horas} h) a ${senderId}: "${mensaje}"`);
       await enviarMensajeInstagram(senderId, mensaje);
       await agregarAlHistorialDB(senderId, "assistant", mensaje);
       await guardarConversacion(senderId, { rotacion });
@@ -728,11 +772,23 @@ async function procesarBuffer(senderId) {
 
       console.log(`✅ Respondido a ${senderId} (una sola respuesta por ${mensajesAResponder.length} línea(s))`);
 
+      // Detección del enlace de calificación (calendario/formulario): el propio
+      // prompt es el que decide mandarlo cuando el lead ya cumplió las etapas.
+      // Aquí solo lo detectamos dentro de la respuesta que se acaba de enviar,
+      // le ponemos la etiqueta "enlace_enviado" y con eso, al terminar el buffer,
+      // se programará el seguimiento ESPECIAL en vez del seguimiento normal.
+      if (configActual.enlace_calificacion?.trim() && respuesta.includes(configActual.enlace_calificacion.trim())) {
+        console.log(`🔗 Enlace de calificación detectado en la respuesta a ${senderId}. Se marca y se activará el seguimiento especial.`);
+        await guardarConversacion(senderId, {
+          enlace_enviado: true,
+          enlace_enviado_en: new Date().toISOString()
+        });
+      }
+
       // Calificación automática: solo si está activada, hay criterios definidos,
-      // y esta conversación todavía no había calificado antes. El mensaje de
-      // calendario es OPCIONAL: si tu ai_prompt ya se encarga de mandar el
-      // formulario/enlace por su cuenta, deja "mensaje_calificado" vacío en
-      // /panel y aquí solo se pondrá la etiqueta, sin mandar nada duplicado.
+      // y esta conversación todavía no había calificado antes. Esto solo pone
+      // la etiqueta "califica" para poder filtrar/exportar leads en /chats — el
+      // envío del enlace/formulario lo hace el propio prompt, no este bloque.
       if (configActual.calificacion_activa && configActual.criterios_calificacion?.trim()) {
         const convActualizada = await obtenerConversacion(senderId);
         if (!convActualizada.califica) {
@@ -744,13 +800,6 @@ async function procesarBuffer(senderId) {
               calificado_en: new Date().toISOString(),
               razon_calificacion: evaluacion.razon || null
             });
-
-            if (configActual.mensaje_calificado?.trim()) {
-              const mensajeCalendario = configActual.mensaje_calificado.trim();
-              await enviarMensajeInstagram(senderId, mensajeCalendario);
-              await agregarAlHistorialDB(senderId, "assistant", mensajeCalendario);
-              console.log(`📅 Enlace de calendario enviado a ${senderId}`);
-            }
           }
         }
       }
@@ -834,6 +883,10 @@ app.post("/webhook", async (req, res) => {
 
       await registrarMensajeUsuario(senderId);
       await cancelarSeguimientosPendientesDB(senderId);
+      // El lead volvió a escribir: si ya se le había mandado el enlace de
+      // calificación, se apaga esa etiqueta para volver al seguimiento normal
+      // (a menos que el bot le reenvíe el enlace más adelante).
+      await reiniciarSeguimientoEnlaceSiAplica(senderId);
 
       encolarMensaje(senderId, mensaje);
     }
@@ -1006,7 +1059,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, enlace_enviado, enlace_enviado_en")
       .order("actualizado_en", { ascending: false })
       .limit(200);
 
@@ -1032,7 +1085,9 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         en_ventana_24h: enVentana24h,
         califica: Boolean(c.califica),
         calificado_en: c.calificado_en || null,
-        razon_calificacion: c.razon_calificacion || null
+        razon_calificacion: c.razon_calificacion || null,
+        enlace_enviado: Boolean(c.enlace_enviado),
+        enlace_enviado_en: c.enlace_enviado_en || null
       };
     }));
 
@@ -1271,8 +1326,9 @@ let configActual = {
   openai_api_key: OPENAI_API_KEY || "",
   calificacion_activa: false,
   criterios_calificacion: "",
-  mensaje_calificado: "",
-  seguimientos: SEGUIMIENTOS_CONFIG
+  enlace_calificacion: "",
+  seguimientos: SEGUIMIENTOS_CONFIG,
+  seguimientos_enlace: SEGUIMIENTOS_ENLACE_DEFAULT
 };
 
 // Cliente de OpenAI: se reconstruye cada vez que cambia configActual.openai_api_key
@@ -1314,7 +1370,8 @@ async function cargarConfigDesdeDB() {
     }
     if (data && data.valor) {
       configActual = { ...configActual, ...data.valor };
-      configActual.seguimientos = [...configActual.seguimientos].sort((a, b) => a.horas - b.horas);
+      configActual.seguimientos = [...(configActual.seguimientos || [])].sort((a, b) => a.horas - b.horas);
+      configActual.seguimientos_enlace = [...(configActual.seguimientos_enlace || [])].sort((a, b) => a.horas - b.horas);
       actualizarClienteOpenAI();
       console.log("✅ Configuración cargada desde Supabase.");
     } else {
@@ -1327,7 +1384,8 @@ async function cargarConfigDesdeDB() {
 
 async function guardarConfigDB(nuevaConfig) {
   configActual = { ...configActual, ...nuevaConfig };
-  configActual.seguimientos = [...configActual.seguimientos].sort((a, b) => a.horas - b.horas);
+  configActual.seguimientos = [...(configActual.seguimientos || [])].sort((a, b) => a.horas - b.horas);
+  configActual.seguimientos_enlace = [...(configActual.seguimientos_enlace || [])].sort((a, b) => a.horas - b.horas);
   actualizarClienteOpenAI();
 
   const { error } = await supabase
@@ -1443,8 +1501,8 @@ app.get("/config", requireAdminKey, (req, res) => {
 
 app.post("/config", requireAdminKey, async (req, res) => {
   try {
-    const { ai_prompt, min_delay, max_delay, max_historial, seguimientos, openai_api_key,
-            calificacion_activa, criterios_calificacion, mensaje_calificado } = req.body || {};
+    const { ai_prompt, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
+            calificacion_activa, criterios_calificacion, enlace_calificacion } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -1452,11 +1510,12 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (Number.isFinite(max_delay) && max_delay >= 0) nuevaConfig.max_delay = max_delay;
     if (Number.isFinite(max_historial) && max_historial > 0) nuevaConfig.max_historial = max_historial;
     if (Array.isArray(seguimientos)) nuevaConfig.seguimientos = seguimientos;
+    if (Array.isArray(seguimientos_enlace)) nuevaConfig.seguimientos_enlace = seguimientos_enlace;
     // Solo se actualiza si mandaron una clave nueva; si viene vacío, se deja la que ya había.
     if (typeof openai_api_key === "string" && openai_api_key.trim()) nuevaConfig.openai_api_key = openai_api_key.trim();
     if (typeof calificacion_activa === "boolean") nuevaConfig.calificacion_activa = calificacion_activa;
     if (typeof criterios_calificacion === "string") nuevaConfig.criterios_calificacion = criterios_calificacion.trim();
-    if (typeof mensaje_calificado === "string") nuevaConfig.mensaje_calificado = mensaje_calificado.trim();
+    if (typeof enlace_calificacion === "string") nuevaConfig.enlace_calificacion = enlace_calificacion.trim();
 
     const guardado = await guardarConfigDB(nuevaConfig);
     res.json({ mensaje: "✅ Configuración guardada", config: configParaFrontend(guardado) });
@@ -1767,6 +1826,12 @@ ${estilosBase()}
   }
   .btn-ojo:hover{ color:var(--text); border-color:var(--green); }
   .key-actual{ font-family:var(--mono); font-size:12.5px; color:var(--muted); margin:10px 0 0; }
+  .card.card-destacada{ border-color:rgba(49,217,124,.35); }
+  .enlace-tag{
+    display:inline-block; font-family:var(--mono); font-size:11.5px; color:#3FC7E8;
+    background:rgba(63,199,232,.1); border:1px solid rgba(63,199,232,.28); border-radius:6px;
+    padding:3px 8px; margin-top:8px;
+  }
   @media (max-width:860px){ .savebar{ left:0; padding:18px 18px 20px; } .save-btn{ flex:1; } }
 </style>
 </head>
@@ -1795,9 +1860,20 @@ ${estilosBase()}
 
     <div class="grid-2col">
       <div class="col">
+        <div class="card card-destacada">
+          <h2>1. Clave de API (OpenAI)</h2>
+          <p class="hint">Lo primero que hay que configurar: sin una clave válida el bot no puede generar respuestas. Se guarda en la base de datos y nunca se muestra completa aquí, solo sus últimos 4 caracteres. Escribe una nueva únicamente si quieres reemplazarla.</p>
+          <label for="openaiKey">Nueva clave</label>
+          <div class="key-input-row">
+            <input type="password" id="openaiKey" placeholder="sk-..." autocomplete="off">
+            <button type="button" class="btn-ojo" id="btnVerClave" title="Mostrar/ocultar">👁</button>
+          </div>
+          <p class="key-actual" id="keyActual">Cargando estado…</p>
+        </div>
+
         <div class="card">
           <h2>Mensaje del bot</h2>
-          <p class="hint">Instrucciones que sigue la IA para responder a los clientes. Sé específico: tono, qué información dar, qué evitar.</p>
+          <p class="hint">Instrucciones que sigue la IA para responder a los clientes. Sé específico: tono, qué información dar, qué evitar. Si el lead ya cumplió los criterios de calificación, este mismo prompt es el que debe mandarle el enlace del formulario o calendario correspondiente.</p>
           <label for="prompt">Prompt del sistema</label>
           <textarea id="prompt" rows="8" placeholder="Eres el asistente de..."></textarea>
         </div>
@@ -1823,23 +1899,12 @@ ${estilosBase()}
           <label for="maxHistorial">Mensajes a recordar</label>
           <input type="number" id="maxHistorial" min="1">
         </div>
-
-        <div class="card">
-          <h2>Clave de API (OpenAI)</h2>
-          <p class="hint">La clave se guarda en la base de datos y nunca se muestra completa aquí, solo sus últimos 4 caracteres. Escribe una nueva únicamente si quieres reemplazarla.</p>
-          <label for="openaiKey">Nueva clave</label>
-          <div class="key-input-row">
-            <input type="password" id="openaiKey" placeholder="sk-..." autocomplete="off">
-            <button type="button" class="btn-ojo" id="btnVerClave" title="Mostrar/ocultar">👁</button>
-          </div>
-          <p class="key-actual" id="keyActual">Cargando estado…</p>
-        </div>
       </div>
 
       <div class="col">
         <div class="card">
           <h2>Calificación automática de leads</h2>
-          <p class="hint">Define los criterios que debe cumplir un lead para calificar. Después de cada respuesta, la IA revisa la conversación y, en cuanto se cumplen TODOS, marca la conversación con la etiqueta ✅ Califica (puedes filtrarlos y exportarlos en Chats).</p>
+          <p class="hint">Define los criterios que debe cumplir un lead para calificar. Después de cada respuesta, la IA revisa la conversación y, en cuanto se cumplen TODOS, marca la conversación con la etiqueta ✅ Califica (puedes filtrarlos y exportarlos en Chats). El envío del enlace/formulario lo hace directamente tu prompt de arriba, no este bloque.</p>
 
           <label style="display:flex; align-items:center; gap:10px; cursor:pointer; margin-bottom:16px;">
             <input type="checkbox" id="calificacionActiva" style="width:18px; height:18px; accent-color:var(--green); cursor:pointer;">
@@ -1848,17 +1913,28 @@ ${estilosBase()}
 
           <label for="criteriosCalificacion">Criterios de calificación</label>
           <textarea id="criteriosCalificacion" rows="5" placeholder="Ej: Tiene más de 40 años.&#10;Quiere perder más de 10 kg.&#10;Es hombre."></textarea>
+        </div>
 
-          <label for="mensajeCalificado" style="margin-top:14px;">Mensaje al calificar (opcional)</label>
-          <textarea id="mensajeCalificado" rows="4" placeholder="Déjalo vacío si tu prompt principal ya se encarga de mandar el formulario/enlace. Solo llénalo si quieres que este sistema mande un mensaje aparte."></textarea>
-          <p class="hint" style="margin:8px 0 0;">⚠️ Si tu prompt (arriba) ya le manda el formulario o el enlace al cliente cuando califica, deja este campo <b>vacío</b> — así el sistema solo pone la etiqueta y no duplica el mensaje.</p>
+        <div class="card">
+          <h2>Enlace de calificación (calendario / formulario)</h2>
+          <p class="hint">Pega aquí el enlace exacto que tu prompt manda cuando un lead ya calificó (por ejemplo tu link de Calendly o de un formulario). El sistema NO lo envía — solo lo usa para detectar cuándo tu bot ya se lo mandó al cliente. En cuanto lo detecta en una respuesta, le pone la etiqueta 🔗 y activa un seguimiento especial distinto al normal (configurado abajo), en vez del seguimiento normal de silencio.</p>
+          <label for="enlaceCalificacion">Enlace a detectar</label>
+          <input type="text" id="enlaceCalificacion" placeholder="https://calendly.com/tu-usuario/...">
+          <span class="enlace-tag">Debe coincidir tal cual aparece en el mensaje que manda el bot</span>
         </div>
 
         <div class="card">
           <h2>Seguimientos automáticos</h2>
-          <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo.</p>
+          <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación (ver seguimiento especial abajo).</p>
           <div id="pasos"></div>
           <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
+        </div>
+
+        <div class="card">
+          <h2>Seguimiento especial al enlace</h2>
+          <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de calificación (detectado arriba). Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. Útil para algo como "¿pudiste agendar tu espacio?".</p>
+          <div id="pasosEnlace"></div>
+          <button class="add-paso" id="addPasoEnlace" type="button">+ Agregar paso de seguimiento al enlace</button>
         </div>
       </div>
     </div>
@@ -1905,7 +1981,7 @@ ${estilosBase()}
     input.type = input.type === "password" ? "text" : "password";
   });
 
-  // --- Seguimientos: editor dinámico ---
+  // --- Seguimientos normales: editor dinámico ---
   let pasos = [];
 
   function renderPasos(){
@@ -1943,6 +2019,44 @@ ${estilosBase()}
     });
   }
 
+  // --- Seguimiento especial al enlace: mismo patrón, otro contenedor ---
+  let pasosEnlace = [];
+
+  function renderPasosEnlace(){
+    const cont = document.getElementById("pasosEnlace");
+    cont.innerHTML = "";
+    pasosEnlace.forEach((paso, i) => {
+      const div = document.createElement("div");
+      div.className = "paso";
+      div.innerHTML = \`
+        <div class="paso-head">
+          <span class="eyebrow-num">PASO \${i + 1}</span>
+          <button type="button" class="quitar-enlace" data-i="\${i}">quitar</button>
+        </div>
+        <label>Horas desde que se envió el enlace, antes de disparar</label>
+        <input type="number" step="0.1" min="0" class="paso-enlace-horas" data-i="\${i}" value="\${paso.horas}" style="margin-bottom:10px;">
+        <label>Mensajes (uno por línea, rotan entre ellos)</label>
+        <textarea class="paso-enlace-mensajes" data-i="\${i}" rows="3">\${(paso.mensajes || []).join("\\n")}</textarea>
+      \`;
+      cont.appendChild(div);
+    });
+    cont.querySelectorAll(".quitar-enlace").forEach(b => b.addEventListener("click", e => {
+      pasosEnlace.splice(+e.target.dataset.i, 1); renderPasosEnlace();
+    }));
+  }
+
+  document.getElementById("addPasoEnlace").addEventListener("click", () => {
+    pasosEnlace.push({ horas: 4, mensajes: ["Ey, ¿cómo vas? ¿Pudiste encontrar un espacio que te quede bien?"] });
+    renderPasosEnlace();
+  });
+
+  function leerPasosEnlaceDelDOM(){
+    document.querySelectorAll(".paso-enlace-horas").forEach((input, i) => { pasosEnlace[i].horas = parseFloat(input.value) || 0; });
+    document.querySelectorAll(".paso-enlace-mensajes").forEach((ta, i) => {
+      pasosEnlace[i].mensajes = ta.value.split("\\n").map(m => m.trim()).filter(Boolean);
+    });
+  }
+
   async function cargarConfig(){
     const cfg = await llamarGET("/config");
     const msg = document.getElementById("saveMsg");
@@ -1958,10 +2072,12 @@ ${estilosBase()}
     document.getElementById("maxHistorial").value = cfg.max_historial ?? 20;
     document.getElementById("calificacionActiva").checked = Boolean(cfg.calificacion_activa);
     document.getElementById("criteriosCalificacion").value = cfg.criterios_calificacion || "";
-    document.getElementById("mensajeCalificado").value = cfg.mensaje_calificado || "";
+    document.getElementById("enlaceCalificacion").value = cfg.enlace_calificacion || "";
     pintarEstadoClave(cfg);
     pasos = Array.isArray(cfg.seguimientos) ? JSON.parse(JSON.stringify(cfg.seguimientos)) : [];
     renderPasos();
+    pasosEnlace = Array.isArray(cfg.seguimientos_enlace) ? JSON.parse(JSON.stringify(cfg.seguimientos_enlace)) : [];
+    renderPasosEnlace();
     document.getElementById("btnGuardar").disabled = false;
   }
 
@@ -1978,8 +2094,9 @@ ${estilosBase()}
 
   document.getElementById("btnGuardar").addEventListener("click", async () => {
     leerPasosDelDOM();
+    leerPasosEnlaceDelDOM();
     if(pasos.length === 0){
-      if(!confirm("No hay ningún paso de seguimiento configurado. ¿Seguro que quieres guardar así (se quedará sin seguimientos automáticos)?")) return;
+      if(!confirm("No hay ningún paso de seguimiento normal configurado. ¿Seguro que quieres guardar así (se quedará sin seguimientos automáticos)?")) return;
     }
     const body = {
       ai_prompt: document.getElementById("prompt").value,
@@ -1987,9 +2104,10 @@ ${estilosBase()}
       max_delay: parseInt(document.getElementById("maxDelay").value, 10),
       max_historial: parseInt(document.getElementById("maxHistorial").value, 10),
       seguimientos: pasos,
+      seguimientos_enlace: pasosEnlace,
       calificacion_activa: document.getElementById("calificacionActiva").checked,
       criterios_calificacion: document.getElementById("criteriosCalificacion").value,
-      mensaje_calificado: document.getElementById("mensajeCalificado").value
+      enlace_calificacion: document.getElementById("enlaceCalificacion").value
     };
     const nuevaClave = document.getElementById("openaiKey").value.trim();
     if(nuevaClave) body.openai_api_key = nuevaClave;
@@ -2043,18 +2161,22 @@ ${estilosBase()}
     display:flex; align-items:center; gap:6px; font-family:var(--mono); font-size:11px;
     color:var(--muted-dim); letter-spacing:.03em;
   }
-  .chat-tabs{ display:flex; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
+  .chat-tabs{ display:flex; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border); flex-shrink:0; flex-wrap:wrap; }
   .chat-tab{
     flex:1; text-align:center; padding:9px 8px; border-radius:9px; font-size:13px;
     font-weight:600; cursor:pointer; color:var(--muted); background:var(--surface-3);
-    border:1px solid transparent; transition:background .12s, color .12s;
+    border:1px solid transparent; transition:background .12s, color .12s; min-width:70px;
   }
   .chat-tab:hover{ color:var(--text); }
   .chat-tab.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.3); }
   .chat-tab.tab-handoff.active{ background:var(--red-soft); color:var(--red); border-color:rgba(255,93,93,.3); }
   .chat-tab.tab-califica.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.4); }
+  .chat-tab.tab-enlace.active{ background:rgba(63,199,232,.14); color:#3FC7E8; border-color:rgba(63,199,232,.4); }
   .chat-tab .count{ font-family:var(--mono); font-size:11.5px; opacity:.85; margin-left:4px; }
   .califica-badge{
+    font-size:11px; margin-left:7px; flex-shrink:0;
+  }
+  .enlace-badge{
     font-size:11px; margin-left:7px; flex-shrink:0;
   }
   .handoff-dot{
@@ -2072,6 +2194,11 @@ ${estilosBase()}
     border-bottom:1px solid rgba(49,217,124,.25); display:none; align-items:center; gap:8px;
   }
   .califica-banner.visible{ display:flex; }
+  .enlace-banner{
+    background:rgba(63,199,232,.1); color:#3FC7E8; font-size:13px; padding:11px 20px;
+    border-bottom:1px solid rgba(63,199,232,.28); display:none; align-items:center; gap:8px;
+  }
+  .enlace-banner.visible{ display:flex; }
   .chat-export{ padding:10px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
   .btn-exportar{
     display:block; text-align:center; background:var(--surface-3); color:var(--text);
@@ -2187,6 +2314,7 @@ ${estilosBase()}
         <div class="chat-tabs">
           <div class="chat-tab active" id="tabTodas" data-filtro="todas">Todas <span class="count" id="countTodas"></span></div>
           <div class="chat-tab tab-califica" id="tabCalifica" data-filtro="califica">✅ Califica <span class="count" id="countCalifica"></span></div>
+          <div class="chat-tab tab-enlace" id="tabEnlace" data-filtro="enlace">🔗 Enlace enviado <span class="count" id="countEnlace"></span></div>
           <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff">Handoff (+24h) <span class="count" id="countHandoff"></span></div>
         </div>
         <div class="chat-export">
@@ -2204,6 +2332,7 @@ ${estilosBase()}
           ⏰ Esta conversación salió de la ventana de 24 horas de Instagram — el bot ya no puede mandar mensajes normales aquí, se requiere atención manual (o una plantilla aprobada).
         </div>
         <div class="califica-banner" id="calificaBanner"></div>
+        <div class="enlace-banner" id="enlaceBanner"></div>
         <div class="chat-messages" id="chatMensajes">
           <div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>
         </div>
@@ -2264,9 +2393,11 @@ ${estilosBase()}
   function actualizarContadores(){
     const totalHandoff = conversaciones.filter(c => !c.en_ventana_24h).length;
     const totalCalifica = conversaciones.filter(c => c.califica).length;
+    const totalEnlace = conversaciones.filter(c => c.enlace_enviado).length;
     document.getElementById("countTodas").textContent = conversaciones.length;
     document.getElementById("countHandoff").textContent = totalHandoff;
     document.getElementById("countCalifica").textContent = totalCalifica;
+    document.getElementById("countEnlace").textContent = totalEnlace;
     document.getElementById("exportCount").textContent = "(" + totalHandoff + ")";
     document.getElementById("exportCountCalifica").textContent = "(" + totalCalifica + ")";
   }
@@ -2274,6 +2405,7 @@ ${estilosBase()}
   function conversacionesFiltradas(){
     if(filtroActual === "handoff") return conversaciones.filter(c => !c.en_ventana_24h);
     if(filtroActual === "califica") return conversaciones.filter(c => c.califica);
+    if(filtroActual === "enlace") return conversaciones.filter(c => c.enlace_enviado);
     return conversaciones;
   }
 
@@ -2286,6 +2418,7 @@ ${estilosBase()}
       let vacioTxt = '<p class="vacio-lista">Todavía no hay conversaciones.</p>';
       if(filtroActual === "handoff") vacioTxt = '<p class="vacio-lista">🎉 Ninguna conversación en handoff — todas están dentro de la ventana de 24h.</p>';
       if(filtroActual === "califica") vacioTxt = '<p class="vacio-lista">Todavía no hay leads calificados con los criterios actuales.</p>';
+      if(filtroActual === "enlace") vacioTxt = '<p class="vacio-lista">Todavía no se le ha mandado el enlace de calificación a nadie.</p>';
       cont.innerHTML = vacioTxt;
       return;
     }
@@ -2297,6 +2430,7 @@ ${estilosBase()}
           <div class="uname-row">
             <span class="uname">\${escapar(nombreMostrar(c))}</span>
             \${c.califica ? '<span class="califica-badge" title="Califica">✅</span>' : ''}
+            \${c.enlace_enviado ? '<span class="enlace-badge" title="Enlace enviado">🔗</span>' : ''}
             \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
           </div>
           <div class="preview">\${c.ultimo_role === "assistant" ? "🤖 " : ""}\${escapar(c.ultimo_texto) || "(sin mensajes)"}</div>
@@ -2314,17 +2448,19 @@ ${estilosBase()}
     const head = document.getElementById("chatHead");
     const banner = document.getElementById("handoffBanner");
     const bannerCalifica = document.getElementById("calificaBanner");
+    const bannerEnlace = document.getElementById("enlaceBanner");
     if(!senderSeleccionado){
       head.innerHTML = '<span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>';
       banner.classList.remove("visible");
       bannerCalifica.classList.remove("visible");
+      bannerEnlace.classList.remove("visible");
       return;
     }
     const conv = conversaciones.find(c => c.sender_id === senderSeleccionado) || { sender_id: senderSeleccionado, en_ventana_24h: true };
     head.innerHTML = \`
       \${avatarHTML(conv)}
       <div class="chat-window-head-text">
-        <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}\${conv.califica ? ' <span title="Califica">✅</span>' : ''}</div>
+        <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}\${conv.califica ? ' <span title="Califica">✅</span>' : ''}\${conv.enlace_enviado ? ' <span title="Enlace enviado">🔗</span>' : ''}</div>
         <div class="chat-window-head-id">\${conv.sender_id}</div>
       </div>
     \`;
@@ -2335,6 +2471,13 @@ ${estilosBase()}
       bannerCalifica.classList.add("visible");
     } else {
       bannerCalifica.classList.remove("visible");
+    }
+
+    if(conv.enlace_enviado){
+      bannerEnlace.textContent = "🔗 Ya se le mandó el enlace de calificación" + (conv.enlace_enviado_en ? " (" + formatearFecha(conv.enlace_enviado_en) + ")" : "") + " — activo el seguimiento especial.";
+      bannerEnlace.classList.add("visible");
+    } else {
+      bannerEnlace.classList.remove("visible");
     }
   }
 
@@ -2403,23 +2546,26 @@ ${estilosBase()}
 
   document.getElementById("tabTodas").addEventListener("click", () => {
     filtroActual = "todas";
+    document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabTodas").classList.add("active");
-    document.getElementById("tabHandoff").classList.remove("active");
-    document.getElementById("tabCalifica").classList.remove("active");
     renderLista();
   });
   document.getElementById("tabHandoff").addEventListener("click", () => {
     filtroActual = "handoff";
+    document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabHandoff").classList.add("active");
-    document.getElementById("tabTodas").classList.remove("active");
-    document.getElementById("tabCalifica").classList.remove("active");
     renderLista();
   });
   document.getElementById("tabCalifica").addEventListener("click", () => {
     filtroActual = "califica";
+    document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabCalifica").classList.add("active");
-    document.getElementById("tabTodas").classList.remove("active");
-    document.getElementById("tabHandoff").classList.remove("active");
+    renderLista();
+  });
+  document.getElementById("tabEnlace").addEventListener("click", () => {
+    filtroActual = "enlace";
+    document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
+    document.getElementById("tabEnlace").classList.add("active");
     renderLista();
   });
 
@@ -2542,7 +2688,7 @@ app.get("/exportar/calificados.csv", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, calificado_en, razon_calificacion")
+      .select("sender_id, historial, ultimo_mensaje_usuario, calificado_en, razon_calificacion, enlace_enviado, enlace_enviado_en")
       .eq("califica", true)
       .order("calificado_en", { ascending: false });
 
@@ -2561,12 +2707,14 @@ app.get("/exportar/calificados.csv", requireAdminKey, async (req, res) => {
         sender_id: c.sender_id,
         calificado_en: c.calificado_en || "",
         razon_calificacion: c.razon_calificacion || "",
+        enlace_enviado: c.enlace_enviado ? "sí" : "no",
+        enlace_enviado_en: c.enlace_enviado_en || "",
         en_ventana_24h: enVentana24h ? "sí" : "no (handoff)",
         ultimo_mensaje: ultimo ? ultimo.content : ""
       };
     }));
 
-    const encabezados = ["username", "sender_id", "calificado_en", "razon_calificacion", "en_ventana_24h", "ultimo_mensaje"];
+    const encabezados = ["username", "sender_id", "calificado_en", "razon_calificacion", "enlace_enviado", "enlace_enviado_en", "en_ventana_24h", "ultimo_mensaje"];
     const escaparCSV = (valor) => {
       const txt = String(valor ?? "");
       return /[",\n]/.test(txt) ? '"' + txt.replace(/"/g, '""') + '"' : txt;
@@ -2590,7 +2738,7 @@ app.get("/exportar/calificados.csv", requireAdminKey, async (req, res) => {
 
 app.get("/seguimientos/:senderId?", requireAdminKey, async (req, res) => {
   if (!req.params.senderId) {
-    return res.json({ configuracion: configActual.seguimientos });
+    return res.json({ configuracion: configActual.seguimientos, configuracion_enlace: configActual.seguimientos_enlace });
   }
   const { data, error } = await supabase
     .from("seguimientos_programados")
@@ -2599,7 +2747,7 @@ app.get("/seguimientos/:senderId?", requireAdminKey, async (req, res) => {
     .order("disparar_en", { ascending: true });
 
   if (error) return res.status(500).json({ error: error.message });
-  res.json({ configuracion: configActual.seguimientos, seguimientos: data });
+  res.json({ configuracion: configActual.seguimientos, configuracion_enlace: configActual.seguimientos_enlace, seguimientos: data });
 });
 
 const PORT = process.env.PORT || 3000;
