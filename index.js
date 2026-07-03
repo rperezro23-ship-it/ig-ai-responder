@@ -968,6 +968,32 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   }
 });
 
+// Envía un mensaje manual desde /chats (respuesta humana, fuera del flujo de la IA).
+// Se guarda en el mismo historial que usa la IA, para que si el bot retoma la
+// conversación más adelante tenga contexto de lo que ya se le contestó a mano.
+app.post("/chats/enviar", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId, mensaje } = req.body || {};
+    if (!senderId || typeof mensaje !== "string" || !mensaje.trim()) {
+      return res.status(400).json({ error: "Falta el destinatario o el mensaje." });
+    }
+
+    const texto = mensaje.trim();
+    await enviarMensajeInstagram(senderId, texto);
+    await agregarAlHistorialDB(senderId, "assistant", texto);
+
+    // Cancela seguimientos automáticos pendientes: ya hubo respuesta humana,
+    // no queremos que el bot le mande un seguimiento encima.
+    await cancelarSeguimientosPendientesDB(senderId);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(`❌ Error enviando mensaje manual a ${req.body?.senderId}:`, err.response?.data || err.message);
+    const mensajeError = err.response?.data?.error?.message || err.message;
+    res.status(500).json({ error: mensajeError });
+  }
+});
+
 app.get("/get-long-lived-token", requireAdminKey, async (req, res) => {
   try {
     const response = await axios.get("https://graph.instagram.com/access_token", {
@@ -1867,6 +1893,27 @@ ${estilosBase()}
     font-weight:600; text-decoration:none; transition:background .12s, border-color .12s, color .12s;
   }
   .btn-exportar:hover{ background:var(--surface-2); border-color:var(--red); color:var(--red); }
+  .chat-input-bar{
+    display:none; gap:10px; padding:14px 18px; border-top:1px solid var(--border);
+    align-items:flex-end; flex-shrink:0;
+  }
+  .chat-input-bar textarea{
+    flex:1; resize:none; min-height:42px; max-height:120px; background:var(--surface-3);
+    border:1px solid var(--border); border-radius:10px; color:var(--text); padding:10px 12px;
+    font-family:var(--body); font-size:14.5px; outline:none; line-height:1.4;
+  }
+  .chat-input-bar textarea:focus{ border-color:var(--green); }
+  .btn-enviar{
+    background:var(--green); color:#0A0D13; border:none; border-radius:10px; padding:11px 20px;
+    font-family:var(--display); font-weight:600; font-size:14px; cursor:pointer; flex-shrink:0;
+    transition:filter .15s;
+  }
+  .btn-enviar:hover{ filter:brightness(1.08); }
+  .btn-enviar:disabled{ opacity:.5; cursor:default; }
+  .chat-input-error{
+    padding:0 18px 12px; color:var(--red); font-size:12.5px; display:none; flex-shrink:0;
+  }
+  .chat-input-error.visible{ display:block; }
   .chat-list{ flex:1; overflow-y:auto; }
   .chat-list-item{
     display:flex; align-items:flex-start; gap:12px; padding:14px 18px;
@@ -1970,6 +2017,11 @@ ${estilosBase()}
         </div>
         <div class="chat-messages" id="chatMensajes">
           <div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>
+        </div>
+        <div class="chat-input-error" id="chatInputError"></div>
+        <div class="chat-input-bar" id="chatInputBar">
+          <textarea id="mensajeManual" rows="1" placeholder="Escribe una respuesta manual…"></textarea>
+          <button class="btn-enviar" id="btnEnviarManual">Enviar</button>
         </div>
       </div>
     </div>
@@ -2082,6 +2134,69 @@ ${estilosBase()}
     banner.classList.toggle("visible", conv.en_ventana_24h === false);
   }
 
+  function actualizarInputBar(){
+    const bar = document.getElementById("chatInputBar");
+    bar.style.display = senderSeleccionado ? "flex" : "none";
+    const errorBox = document.getElementById("chatInputError");
+    errorBox.classList.remove("visible");
+    errorBox.textContent = "";
+  }
+
+  async function enviarManual(){
+    if(!senderSeleccionado) return;
+    const ta = document.getElementById("mensajeManual");
+    const texto = ta.value.trim();
+    if(!texto) return;
+
+    const btn = document.getElementById("btnEnviarManual");
+    const errorBox = document.getElementById("chatInputError");
+    errorBox.classList.remove("visible");
+    errorBox.textContent = "";
+    btn.disabled = true;
+    btn.textContent = "Enviando…";
+
+    try {
+      const res = await fetch("/chats/enviar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ senderId: senderSeleccionado, mensaje: texto })
+      });
+      if(res.status === 401){
+        window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname);
+        return;
+      }
+      const data = await res.json();
+      if(!res.ok){
+        errorBox.textContent = "❌ " + (data.error || "No se pudo enviar el mensaje.");
+        errorBox.classList.add("visible");
+      } else {
+        ta.value = "";
+        ta.style.height = "auto";
+        ultimoHistorialJSON = null;
+        await cargarHistorial();
+        await cargarConversaciones();
+      }
+    } catch (err) {
+      errorBox.textContent = "❌ Error de conexión al enviar el mensaje.";
+      errorBox.classList.add("visible");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Enviar";
+    }
+  }
+
+  document.getElementById("btnEnviarManual").addEventListener("click", enviarManual);
+  document.getElementById("mensajeManual").addEventListener("keydown", (e) => {
+    if(e.key === "Enter" && !e.shiftKey){
+      e.preventDefault();
+      enviarManual();
+    }
+  });
+  document.getElementById("mensajeManual").addEventListener("input", function(){
+    this.style.height = "auto";
+    this.style.height = Math.min(this.scrollHeight, 120) + "px";
+  });
+
   document.getElementById("tabTodas").addEventListener("click", () => {
     filtroActual = "todas";
     document.getElementById("tabTodas").classList.add("active");
@@ -2108,6 +2223,8 @@ ${estilosBase()}
     ultimoHistorialJSON = null;
     renderLista();
     renderHead();
+    actualizarInputBar();
+    document.getElementById("mensajeManual").value = "";
     document.getElementById("chatMensajes").innerHTML = '<div class="chat-empty">Cargando…</div>';
     await cargarHistorial();
   }
