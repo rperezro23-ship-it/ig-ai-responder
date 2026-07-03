@@ -1624,7 +1624,6 @@ ${estilosBase()}
   </div>
 
 <script>
-<script>
   async function llamarGET(endpoint){
     const res = await fetch(endpoint);
     if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
