@@ -322,7 +322,9 @@ function validarOauthState(state) {
 
 // ---------------------------------------------------------------
 // Diseño compartido (estilo "dashboard de monitoreo") para /panel,
-// /privacy y /data-deletion — mismo lenguaje visual en las 3 páginas.
+// /cuentas, /privacy y /data-deletion — mismo lenguaje visual en
+// las 4 páginas. Layout centrado dentro del área de contenido
+// (sidebar fija a la izquierda + contenido centrado a la derecha).
 // ---------------------------------------------------------------
 
 const FUENTES_HTML = `
@@ -342,44 +344,55 @@ function estilosBase() {
     --mono:'JetBrains Mono',monospace; --display:'Space Grotesk',sans-serif; --body:'Inter',sans-serif;
   }
   *{ box-sizing:border-box; }
+  html{ font-size:17px; }
   body{ margin:0; background:var(--bg); color:var(--text); font-family:var(--body); }
   a{ color:var(--green); }
 
+  /* --- Layout general: sidebar fija + contenido centrado --- */
+  .app-shell{ display:flex; min-height:100vh; }
+
   /* --- Sidebar --- */
   .sidebar{
-    position:fixed; top:0; left:0; bottom:0; width:226px; background:var(--surface);
-    border-right:1px solid var(--border); padding:22px 16px; display:flex;
-    flex-direction:column; gap:26px; z-index:10;
+    position:fixed; top:0; left:0; bottom:0; width:236px; background:var(--surface);
+    border-right:1px solid var(--border); padding:26px 18px; display:flex;
+    flex-direction:column; gap:30px; z-index:10;
   }
-  .brand{ display:flex; align-items:center; gap:9px; padding:0 4px; }
-  .brand-dot{ width:9px; height:9px; border-radius:50%; background:var(--green); flex-shrink:0;
+  .brand{ display:flex; align-items:center; gap:10px; padding:0 4px; }
+  .brand-dot{ width:10px; height:10px; border-radius:50%; background:var(--green); flex-shrink:0;
     box-shadow:0 0 0 0 rgba(49,217,124,.5); animation:pulse 2.2s ease-out infinite; }
-  .brand-name{ font-family:var(--display); font-weight:600; font-size:14.5px; letter-spacing:.005em; }
-  nav.side-nav{ display:flex; flex-direction:column; gap:3px; }
+  .brand-name{ font-family:var(--display); font-weight:600; font-size:16.5px; letter-spacing:.005em; }
+  nav.side-nav{ display:flex; flex-direction:column; gap:4px; }
   .side-link{
     display:flex; align-items:center; justify-content:space-between; gap:10px;
-    padding:9px 10px; border-radius:9px; color:var(--muted); text-decoration:none;
-    font-size:13.5px; font-weight:500; transition:background .15s, color .15s;
+    padding:11px 12px; border-radius:10px; color:var(--muted); text-decoration:none;
+    font-size:15.5px; font-weight:500; transition:background .15s, color .15s;
   }
   .side-link:hover{ background:var(--surface-2); color:var(--text); }
   .side-link.active{ background:var(--green-soft); color:var(--green); }
   .side-tag{
-    font-family:var(--mono); font-size:9.5px; padding:3px 6px; border-radius:5px;
+    font-family:var(--mono); font-size:10.5px; padding:3px 7px; border-radius:5px;
     background:var(--surface-3); color:var(--muted-dim); letter-spacing:.04em;
   }
   .side-link.active .side-tag{ background:rgba(49,217,124,.18); color:var(--green); }
-  .sidebar-footer{ margin-top:auto; font-family:var(--mono); font-size:10px; color:var(--muted-dim);
+  .sidebar-footer{ margin-top:auto; font-family:var(--mono); font-size:11px; color:var(--muted-dim);
     letter-spacing:.03em; padding:0 4px; line-height:1.6; }
 
-  .main{ margin-left:226px; padding:30px 34px 90px; max-width:820px; }
+  /* El área a la derecha de la sidebar centra su contenido */
+  .content-area{
+    margin-left:236px; flex:1; display:flex; justify-content:center;
+    padding:38px 34px 100px;
+  }
+  .main{ width:100%; max-width:900px; }
 
   @media (max-width:860px){
+    .app-shell{ display:block; }
     .sidebar{ position:static; width:100%; flex-direction:row; align-items:center;
-      padding:13px 16px; border-right:none; border-bottom:1px solid var(--border);
-      overflow-x:auto; gap:18px; }
+      padding:15px 18px; border-right:none; border-bottom:1px solid var(--border);
+      overflow-x:auto; gap:20px; }
     .sidebar-footer{ display:none; }
     nav.side-nav{ flex-direction:row; }
-    .main{ margin-left:0; padding:22px 16px 90px; max-width:none; }
+    .content-area{ margin-left:0; padding:26px 18px 100px; justify-content:center; }
+    .main{ max-width:none; }
   }
 
   @keyframes pulse{
@@ -389,41 +402,42 @@ function estilosBase() {
   }
 
   /* --- Encabezado de página --- */
-  .page-eyebrow{ font-family:var(--mono); font-size:11px; letter-spacing:.14em;
-    text-transform:uppercase; color:var(--green); margin:0 0 6px; }
-  .page-title{ font-family:var(--display); font-weight:700; font-size:26px; margin:0 0 4px; letter-spacing:.005em; }
-  .page-sub{ color:var(--muted); font-size:13.5px; margin:0 0 24px; }
+  .page-eyebrow{ font-family:var(--mono); font-size:12.5px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--green); margin:0 0 8px; text-align:center; }
+  .page-title{ font-family:var(--display); font-weight:700; font-size:32px; margin:0 0 6px;
+    letter-spacing:.005em; text-align:center; }
+  .page-sub{ color:var(--muted); font-size:15.5px; margin:0 0 30px; text-align:center; }
 
   /* --- Tarjetas de estadística (estilo monitoreo) --- */
-  .stats-row{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:22px; }
+  .stats-row{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:26px; }
   @media (max-width:700px){ .stats-row{ grid-template-columns:1fr; } }
-  .stat-card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:16px 18px; }
-  .stat-label{ font-size:11.5px; color:var(--muted); margin-bottom:9px; font-weight:500; }
-  .stat-value{ font-family:var(--display); font-size:19px; font-weight:600; display:flex; align-items:center; gap:8px; }
+  .stat-card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:19px 20px; }
+  .stat-label{ font-size:13px; color:var(--muted); margin-bottom:10px; font-weight:500; }
+  .stat-value{ font-family:var(--display); font-size:22px; font-weight:600; display:flex; align-items:center; gap:9px; }
   .stat-value.green{ color:var(--green); }
   .stat-value.red{ color:var(--red); }
-  .status-dot{ width:8px; height:8px; border-radius:50%; background:var(--green); flex-shrink:0;
+  .status-dot{ width:9px; height:9px; border-radius:50%; background:var(--green); flex-shrink:0;
     box-shadow:0 0 0 0 rgba(49,217,124,.5); animation:pulse 1.8s ease-out infinite; }
   .status-dot.off{ background:var(--red); animation:none; box-shadow:none; }
-  .stat-note{ font-size:11px; color:var(--muted-dim); margin-top:7px; font-family:var(--mono); }
+  .stat-note{ font-size:12.5px; color:var(--muted-dim); margin-top:8px; font-family:var(--mono); }
 
   /* --- Tarjetas de contenido genéricas --- */
-  .card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:20px 22px; margin-bottom:14px; }
-  .card h2{ font-family:var(--display); font-size:15.5px; font-weight:600; margin:0 0 4px; }
-  .card .hint{ color:var(--muted); font-size:12.5px; margin:0 0 14px; line-height:1.55; }
-  .card p{ color:#C9D1DE; font-size:14px; line-height:1.7; margin:0 0 6px; }
+  .card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:24px 26px; margin-bottom:16px; }
+  .card h2{ font-family:var(--display); font-size:18px; font-weight:600; margin:0 0 5px; }
+  .card .hint{ color:var(--muted); font-size:14px; margin:0 0 16px; line-height:1.6; }
+  .card p{ color:#C9D1DE; font-size:16px; line-height:1.75; margin:0 0 7px; }
   .card p:last-child{ margin-bottom:0; }
 
-  label{ display:block; font-size:12.5px; color:var(--muted); margin:0 0 6px; font-weight:500; }
+  label{ display:block; font-size:14px; color:var(--muted); margin:0 0 7px; font-weight:500; }
   textarea, input[type=number], input[type=text]{
     width:100%; background:var(--surface-3); border:1px solid var(--border); color:var(--text);
-    border-radius:9px; padding:10px 12px; font-family:var(--body); font-size:14px; resize:vertical; outline:none;
+    border-radius:10px; padding:12px 14px; font-family:var(--body); font-size:15.5px; resize:vertical; outline:none;
   }
   textarea:focus, input:focus{ border-color:var(--green); }
-  textarea{ min-height:90px; line-height:1.5; }
-  .row2{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  textarea{ min-height:96px; line-height:1.55; }
+  .row2{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }
 
-  .volver{ display:inline-block; margin-top:8px; color:var(--muted); font-size:13px; text-decoration:none; }
+  .volver{ display:inline-block; margin-top:10px; color:var(--muted); font-size:14.5px; text-decoration:none; }
   .volver:hover{ color:var(--green); }
 </style>`;
 }
@@ -440,9 +454,8 @@ function sidebarHTML(activo) {
     <div class="brand-name">IG AI Responder</div>
   </div>
   <nav class="side-nav">
+    ${link("/cuentas", "CTA", "Cuentas", "cuentas")}
     ${link("/panel", "PNL", "Panel", "panel")}
-    ${link("/privacy", "PRV", "Privacidad", "privacy")}
-    ${link("/data-deletion", "DEL", "Eliminar datos", "deletion")}
   </nav>
   <div class="sidebar-footer">Robertoperez.coach<br>v1.0</div>
 </div>`;
@@ -676,7 +689,9 @@ ${FUENTES_HTML}
 ${estilosBase()}
 </head>
 <body>
+  <div class="app-shell">
   ${sidebarHTML("privacy")}
+  <div class="content-area">
   <div class="main">
     <p class="page-eyebrow">Instagram AI Responder</p>
     <h1 class="page-title">Política de Privacidad</h1>
@@ -710,6 +725,10 @@ ${estilosBase()}
       <h2>Contacto</h2>
       <p>Para dudas sobre esta política, contáctanos en: <a href="mailto:rperezro23@gmail.com">rperezro23@gmail.com</a></p>
     </div>
+
+    <a class="volver" href="/panel">← Volver al panel</a>
+  </div>
+  </div>
   </div>
 </body>
 </html>
@@ -729,7 +748,9 @@ ${FUENTES_HTML}
 ${estilosBase()}
 </head>
 <body>
+  <div class="app-shell">
   ${sidebarHTML("deletion")}
+  <div class="content-area">
   <div class="main">
     <p class="page-eyebrow">Instagram AI Responder</p>
     <h1 class="page-title">Eliminación de Datos</h1>
@@ -743,6 +764,10 @@ ${estilosBase()}
       nombre de usuario de Instagram. Procesaremos tu solicitud en un plazo máximo
       de 30 días.</p>
     </div>
+
+    <a class="volver" href="/panel">← Volver al panel</a>
+  </div>
+  </div>
   </div>
 </body>
 </html>
@@ -876,7 +901,7 @@ app.get("/oauth/instagram/callback", async (req, res) => {
     <html><body style="font-family:sans-serif; max-width:600px; margin:60px auto; line-height:1.6;">
       <h2>❌ ${titulo}</h2>
       <p>${detalle || ""}</p>
-      <p><a href="/panel">Volver al panel</a></p>
+      <p><a href="/cuentas">Volver a cuentas</a></p>
     </body></html>
   `);
 
@@ -929,7 +954,7 @@ app.get("/oauth/instagram/callback", async (req, res) => {
     await guardarCuentaConectada(cuenta);
     await guardarFechaTokenDB(expiresIn); // mantiene compatibilidad con /token-info
 
-    res.redirect("/panel");
+    res.redirect("/cuentas");
   } catch (err) {
     console.error("❌ Error en callback de OAuth de Instagram:", err.response?.data || err.message);
     paginaError("Error conectando la cuenta", `<pre>${JSON.stringify(err.response?.data || err.message, null, 2)}</pre>`);
@@ -942,7 +967,7 @@ app.get("/oauth/facebook/start", requireAdminKey, (req, res) => {
     <html><body style="font-family:sans-serif; max-width:600px; margin:60px auto; line-height:1.6;">
       <h2>🚧 Próximamente</h2>
       <p>La conexión vía Facebook / Página de Meta todavía no está implementada.</p>
-      <p><a href="/panel">Volver al panel</a></p>
+      <p><a href="/cuentas">Volver a cuentas</a></p>
     </body></html>
   `);
 });
@@ -1148,108 +1173,64 @@ app.post("/config", requireAdminKey, async (req, res) => {
   }
 });
 
-app.get("/panel", (req, res) => {
+// ---------------------------------------------------------------
+// /cuentas — conectar cuentas de Instagram y ver estado del token
+// ---------------------------------------------------------------
+
+app.get("/cuentas", (req, res) => {
   res.type("html").send(`
 <!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Panel — Instagram AI Responder</title>
+<title>Cuentas — Instagram AI Responder</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 ${FUENTES_HTML}
 ${estilosBase()}
 <style>
-  /* --- Estilos específicos del panel --- */
-  body{ padding-bottom:0; }
-  .switch-row{ display:flex; gap:8px; }
-  .btn{
-    font-family:var(--body); font-weight:600; font-size:13px; border:none;
-    border-radius:9px; padding:9px 14px; cursor:pointer; transition:filter .15s, transform .1s;
-  }
-  .btn:active{ transform:scale(.97); }
-  .btn-on{ background:var(--green); color:#0A0D13; }
-  .btn-off{ background:transparent; color:var(--red); border:1px solid rgba(255,93,93,.4); }
-  .btn:hover{ filter:brightness(1.08); }
-
-  .paso{
-    border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:10px;
-    background:rgba(255,255,255,.015);
-  }
-  .paso-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; }
-  .paso-head .eyebrow-num{ font-family:var(--mono); font-size:11px; color:var(--green); }
-  .quitar{ background:none; border:none; color:var(--muted); font-size:12px; cursor:pointer; text-decoration:underline; }
-  .quitar:hover{ color:var(--red); }
-  .add-paso{
-    width:100%; background:transparent; border:1px dashed var(--border); color:var(--muted);
-    border-radius:9px; padding:11px; font-size:13px; cursor:pointer; font-weight:500;
-  }
-  .add-paso:hover{ border-color:var(--green); color:var(--green); }
-
-  .savebar{
-    position:fixed; left:226px; right:0; bottom:0; background:linear-gradient(0deg, var(--bg) 65%, transparent);
-    padding:20px 34px 22px;
-  }
-  .savebar-inner{ max-width:820px; display:flex; align-items:center; gap:12px; }
-  .save-btn{
-    flex:1; background:var(--green); color:#0A0D13; font-family:var(--display);
-    font-weight:600; font-size:14.5px; border:none; border-radius:11px; padding:13px; cursor:pointer;
-    letter-spacing:.01em;
-  }
-  .save-btn:active{ transform:scale(.985); }
-  .save-msg{ font-size:12.5px; color:var(--muted); white-space:nowrap; }
-  .save-msg.ok{ color:var(--green); }
-  .main{ padding-bottom:110px; }
-  @media (max-width:860px){ .savebar{ left:0; padding:16px 16px 18px; } }
-
   /* --- Conectar cuentas de Instagram --- */
-  .conectar-header{ margin-bottom:16px; }
-  .conectar-botones{ margin-bottom:18px; }
+  .conectar-header{ margin-bottom:18px; }
+  .conectar-botones{ margin-bottom:20px; }
   .btn-conectar{
-    width:100%; font-family:var(--display); font-weight:600; font-size:14px;
-    letter-spacing:.01em; border:none; border-radius:10px; padding:12px 16px; cursor:pointer;
+    width:100%; font-family:var(--display); font-weight:600; font-size:15.5px;
+    letter-spacing:.01em; border:none; border-radius:11px; padding:14px 18px; cursor:pointer;
     text-align:center; background:var(--green); color:#0A0D13; transition:filter .15s, transform .1s;
   }
   .btn-conectar:hover{ filter:brightness(1.08); }
   .btn-conectar:active{ transform:scale(.985); }
-  .cuentas-titulo{ font-family:var(--mono); font-size:11px; letter-spacing:.12em;
-    text-transform:uppercase; color:var(--green); margin:0 0 4px; }
-  .cuentas-subtitulo{ font-family:var(--display); font-weight:600; font-size:15px; margin:0 0 12px; }
+  .cuentas-titulo{ font-family:var(--mono); font-size:12px; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--green); margin:0 0 5px; }
+  .cuentas-subtitulo{ font-family:var(--display); font-weight:600; font-size:17px; margin:0 0 14px; }
   .cuenta-item{
-    display:flex; align-items:center; gap:14px; background:var(--surface-3); border:1px solid var(--border);
-    border-radius:12px; padding:14px 16px;
+    display:flex; align-items:center; gap:16px; background:var(--surface-3); border:1px solid var(--border);
+    border-radius:13px; padding:16px 18px;
   }
   .cuenta-info{ flex:1; min-width:0; }
-  .cuenta-info .nombre{ font-family:var(--display); font-weight:600; font-size:17px; margin-bottom:4px; }
-  .cuenta-info .detalle{ color:var(--muted); font-size:12px; line-height:1.6; font-family:var(--mono); }
+  .cuenta-info .nombre{ font-family:var(--display); font-weight:600; font-size:19px; margin-bottom:5px; }
+  .cuenta-info .detalle{ color:var(--muted); font-size:13px; line-height:1.65; font-family:var(--mono); }
   .cuenta-info .detalle b{ color:#C9D1DE; font-weight:500; }
-  .cuenta-lado{ display:flex; flex-direction:column; align-items:flex-end; gap:8px; flex-shrink:0; }
-  .badge{ font-size:11px; font-family:var(--mono); padding:4px 9px; border-radius:20px;
+  .cuenta-lado{ display:flex; flex-direction:column; align-items:flex-end; gap:9px; flex-shrink:0; }
+  .badge{ font-size:12px; font-family:var(--mono); padding:5px 10px; border-radius:20px;
     background:var(--green-soft); color:var(--green); border:1px solid rgba(49,217,124,.25); white-space:nowrap; }
   .btn-eliminar{
     background:var(--red-soft); color:var(--red); border:1px solid rgba(255,93,93,.3);
-    border-radius:8px; padding:7px 12px; font-size:12px; font-weight:600; cursor:pointer;
+    border-radius:8px; padding:8px 13px; font-size:13px; font-weight:600; cursor:pointer;
   }
   .btn-eliminar:hover{ background:rgba(255,93,93,.18); }
-  .sin-cuenta{ color:var(--muted); font-size:13px; padding:8px 2px; }
+  .sin-cuenta{ color:var(--muted); font-size:14.5px; padding:8px 2px; }
 </style>
 </head>
 <body>
-  ${sidebarHTML("panel")}
+  <div class="app-shell">
+  ${sidebarHTML("cuentas")}
+  <div class="content-area">
   <div class="main">
     <p class="page-eyebrow">Instagram AI Responder</p>
-    <h1 class="page-title">Panel del bot</h1>
-    <p class="page-sub">Robertoperez.coach — control y configuración</p>
+    <h1 class="page-title">Cuentas</h1>
+    <p class="page-sub">Robertoperez.coach — conexión y estado de la cuenta de Instagram</p>
 
     <div class="stats-row">
-      <div class="stat-card">
-        <div class="stat-label">Estado del bot</div>
-        <div class="stat-value" id="statValor">
-          <div class="status-dot" id="dot"></div>
-          <span id="statTexto">Cargando…</span>
-        </div>
-        <div class="stat-note" id="statNota">consultando…</div>
-      </div>
       <div class="stat-card">
         <div class="stat-label">Cuenta conectada</div>
         <div class="stat-value" id="cuentaValor">—</div>
@@ -1260,11 +1241,6 @@ ${estilosBase()}
         <div class="stat-value" id="tokenValor">—</div>
         <div class="stat-note" id="tokenNota">consultando…</div>
       </div>
-    </div>
-
-    <div class="switch-row" style="margin-bottom:22px;">
-      <button class="btn btn-on" id="btnOn">Encender bot</button>
-      <button class="btn btn-off" id="btnOff">Apagar bot</button>
     </div>
 
     <div class="card">
@@ -1280,49 +1256,8 @@ ${estilosBase()}
       <p class="cuentas-subtitulo">Estado actual</p>
       <div id="cuentaActual"><p class="sin-cuenta">Cargando…</p></div>
     </div>
-
-    <div class="card">
-      <h2>Mensaje del bot</h2>
-      <p class="hint">Instrucciones que sigue la IA para responder a los clientes. Sé específico: tono, qué información dar, qué evitar.</p>
-      <label for="prompt">Prompt del sistema</label>
-      <textarea id="prompt" rows="5" placeholder="Eres el asistente de..."></textarea>
-    </div>
-
-    <div class="card">
-      <h2>Tiempos de respuesta</h2>
-      <p class="hint">Antes de contestar, el bot espera un rato aleatorio entre estos dos valores — así da tiempo a que el cliente termine de escribir varias líneas seguidas.</p>
-      <div class="row2">
-        <div>
-          <label for="minDelay">Espera mínima (segundos)</label>
-          <input type="number" id="minDelay" min="0">
-        </div>
-        <div>
-          <label for="maxDelay">Espera máxima (segundos)</label>
-          <input type="number" id="maxDelay" min="0">
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Memoria de conversación</h2>
-      <p class="hint">Cuántos mensajes recientes (tuyos y del cliente) recuerda el bot al responder. Más alto = más contexto, pero más costo por respuesta.</p>
-      <label for="maxHistorial">Mensajes a recordar</label>
-      <input type="number" id="maxHistorial" min="1">
-    </div>
-
-    <div class="card">
-      <h2>Seguimientos automáticos</h2>
-      <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo.</p>
-      <div id="pasos"></div>
-      <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
-    </div>
   </div>
-
-  <div class="savebar">
-    <div class="savebar-inner">
-      <button class="save-btn" id="btnGuardar">Guardar cambios</button>
-      <span class="save-msg" id="saveMsg"></span>
-    </div>
+  </div>
   </div>
 
 <script>
@@ -1346,23 +1281,6 @@ ${estilosBase()}
     return res.json();
   }
 
-  function pintarEstado(activo){
-    document.getElementById("dot").className = "status-dot" + (activo ? "" : " off");
-    document.getElementById("statTexto").textContent = activo ? "Activo" : "Apagado";
-    document.getElementById("statTexto").parentElement.className = "stat-value" + (activo ? " green" : " red");
-    document.getElementById("statNota").textContent = activo
-      ? "Respondiendo mensajes automáticamente"
-      : "No responde ni manda seguimientos";
-  }
-
-  async function actualizarEstado(){
-    const data = await llamarGET("/bot/estado");
-    if(data) pintarEstado(data.activo);
-  }
-  document.getElementById("btnOn").addEventListener("click", async () => { await llamarGET("/bot/encender"); actualizarEstado(); });
-  document.getElementById("btnOff").addEventListener("click", async () => { await llamarGET("/bot/apagar"); actualizarEstado(); });
-
-  // --- Conectar cuentas de Instagram ---
   document.getElementById("btnConectarInstagram").addEventListener("click", () => {
     const key = getKey(); if(!key) return;
     window.location.href = "/oauth/instagram/start?key=" + encodeURIComponent(key);
@@ -1427,6 +1345,176 @@ ${estilosBase()}
       cargarCuentaActual();
     });
   }
+
+  cargarCuentaActual();
+</script>
+</body>
+</html>
+  `);
+});
+
+app.get("/panel", (req, res) => {
+  res.type("html").send(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panel — Instagram AI Responder</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+${FUENTES_HTML}
+${estilosBase()}
+<style>
+  /* --- Estilos específicos del panel --- */
+  body{ padding-bottom:0; }
+  .switch-row{ display:flex; gap:10px; }
+  .btn{
+    font-family:var(--body); font-weight:600; font-size:14.5px; border:none;
+    border-radius:10px; padding:11px 16px; cursor:pointer; transition:filter .15s, transform .1s;
+  }
+  .btn:active{ transform:scale(.97); }
+  .btn-on{ background:var(--green); color:#0A0D13; }
+  .btn-off{ background:transparent; color:var(--red); border:1px solid rgba(255,93,93,.4); }
+  .btn:hover{ filter:brightness(1.08); }
+
+  .paso{
+    border:1px solid var(--border); border-radius:11px; padding:16px; margin-bottom:12px;
+    background:rgba(255,255,255,.015);
+  }
+  .paso-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px; }
+  .paso-head .eyebrow-num{ font-family:var(--mono); font-size:12px; color:var(--green); }
+  .quitar{ background:none; border:none; color:var(--muted); font-size:13px; cursor:pointer; text-decoration:underline; }
+  .quitar:hover{ color:var(--red); }
+  .add-paso{
+    width:100%; background:transparent; border:1px dashed var(--border); color:var(--muted);
+    border-radius:10px; padding:13px; font-size:14.5px; cursor:pointer; font-weight:500;
+  }
+  .add-paso:hover{ border-color:var(--green); color:var(--green); }
+
+  .savebar{
+    position:fixed; left:236px; right:0; bottom:0; background:linear-gradient(0deg, var(--bg) 65%, transparent);
+    padding:22px 34px 24px; display:flex; justify-content:center;
+  }
+  .savebar-inner{ width:100%; max-width:900px; display:flex; align-items:center; gap:14px; }
+  .save-btn{
+    flex:1; background:var(--green); color:#0A0D13; font-family:var(--display);
+    font-weight:600; font-size:16px; border:none; border-radius:12px; padding:15px; cursor:pointer;
+    letter-spacing:.01em;
+  }
+  .save-btn:active{ transform:scale(.985); }
+  .save-msg{ font-size:13.5px; color:var(--muted); white-space:nowrap; }
+  .save-msg.ok{ color:var(--green); }
+  .content-area{ padding-bottom:120px; }
+  @media (max-width:860px){ .savebar{ left:0; padding:18px 18px 20px; } }
+</style>
+</head>
+<body>
+  <div class="app-shell">
+  ${sidebarHTML("panel")}
+  <div class="content-area">
+  <div class="main">
+    <p class="page-eyebrow">Instagram AI Responder</p>
+    <h1 class="page-title">Panel del bot</h1>
+    <p class="page-sub">Robertoperez.coach — control y configuración</p>
+
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">Estado del bot</div>
+        <div class="stat-value" id="statValor">
+          <div class="status-dot" id="dot"></div>
+          <span id="statTexto">Cargando…</span>
+        </div>
+        <div class="stat-note" id="statNota">consultando…</div>
+      </div>
+    </div>
+
+    <div class="switch-row" style="margin-bottom:26px;">
+      <button class="btn btn-on" id="btnOn">Encender bot</button>
+      <button class="btn btn-off" id="btnOff">Apagar bot</button>
+    </div>
+
+    <div class="card">
+      <h2>Mensaje del bot</h2>
+      <p class="hint">Instrucciones que sigue la IA para responder a los clientes. Sé específico: tono, qué información dar, qué evitar.</p>
+      <label for="prompt">Prompt del sistema</label>
+      <textarea id="prompt" rows="5" placeholder="Eres el asistente de..."></textarea>
+    </div>
+
+    <div class="card">
+      <h2>Tiempos de respuesta</h2>
+      <p class="hint">Antes de contestar, el bot espera un rato aleatorio entre estos dos valores — así da tiempo a que el cliente termine de escribir varias líneas seguidas.</p>
+      <div class="row2">
+        <div>
+          <label for="minDelay">Espera mínima (segundos)</label>
+          <input type="number" id="minDelay" min="0">
+        </div>
+        <div>
+          <label for="maxDelay">Espera máxima (segundos)</label>
+          <input type="number" id="maxDelay" min="0">
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Memoria de conversación</h2>
+      <p class="hint">Cuántos mensajes recientes (tuyos y del cliente) recuerda el bot al responder. Más alto = más contexto, pero más costo por respuesta.</p>
+      <label for="maxHistorial">Mensajes a recordar</label>
+      <input type="number" id="maxHistorial" min="1">
+    </div>
+
+    <div class="card">
+      <h2>Seguimientos automáticos</h2>
+      <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo.</p>
+      <div id="pasos"></div>
+      <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
+    </div>
+  </div>
+  </div>
+  </div>
+
+  <div class="savebar">
+    <div class="savebar-inner">
+      <button class="save-btn" id="btnGuardar">Guardar cambios</button>
+      <span class="save-msg" id="saveMsg"></span>
+    </div>
+  </div>
+
+<script>
+  function getKey(){
+    let key = localStorage.getItem("admin_key");
+    if(!key){ key = prompt("Ingresa tu ADMIN_API_KEY:"); if(key) localStorage.setItem("admin_key", key); }
+    return key;
+  }
+  async function llamarGET(endpoint){
+    const key = getKey(); if(!key) return null;
+    const res = await fetch(endpoint + "?key=" + encodeURIComponent(key));
+    if(res.status === 401){ localStorage.removeItem("admin_key"); alert("Clave incorrecta."); return null; }
+    return res.json();
+  }
+  async function llamarPOST(endpoint, body){
+    const key = getKey(); if(!key) return null;
+    const res = await fetch(endpoint + "?key=" + encodeURIComponent(key), {
+      method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body || {})
+    });
+    if(res.status === 401){ localStorage.removeItem("admin_key"); alert("Clave incorrecta."); return null; }
+    return res.json();
+  }
+
+  function pintarEstado(activo){
+    document.getElementById("dot").className = "status-dot" + (activo ? "" : " off");
+    document.getElementById("statTexto").textContent = activo ? "Activo" : "Apagado";
+    document.getElementById("statTexto").parentElement.className = "stat-value" + (activo ? " green" : " red");
+    document.getElementById("statNota").textContent = activo
+      ? "Respondiendo mensajes automáticamente"
+      : "No responde ni manda seguimientos";
+  }
+
+  async function actualizarEstado(){
+    const data = await llamarGET("/bot/estado");
+    if(data) pintarEstado(data.activo);
+  }
+  document.getElementById("btnOn").addEventListener("click", async () => { await llamarGET("/bot/encender"); actualizarEstado(); });
+  document.getElementById("btnOff").addEventListener("click", async () => { await llamarGET("/bot/apagar"); actualizarEstado(); });
 
   // --- Seguimientos: editor dinámico ---
   let pasos = [];
@@ -1495,7 +1583,6 @@ ${estilosBase()}
 
   actualizarEstado();
   cargarConfig();
-  cargarCuentaActual();
 </script>
 </body>
 </html>
