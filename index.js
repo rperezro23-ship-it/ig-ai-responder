@@ -377,12 +377,12 @@ function estilosBase() {
   .sidebar-footer{ margin-top:auto; font-family:var(--mono); font-size:11px; color:var(--muted-dim);
     letter-spacing:.03em; padding:0 4px; line-height:1.6; }
 
-  /* El área a la derecha de la sidebar centra su contenido */
+  /* El área a la derecha de la sidebar aloja el contenido, alineado a la izquierda */
   .content-area{
-    margin-left:236px; flex:1; display:flex; justify-content:center;
-    padding:38px 34px 100px;
+    margin-left:236px; flex:1;
+    padding:44px 46px 100px;
   }
-  .main{ width:100%; max-width:900px; }
+  .main{ width:100%; max-width:1360px; }
 
   @media (max-width:860px){
     .app-shell{ display:block; }
@@ -391,7 +391,7 @@ function estilosBase() {
       overflow-x:auto; gap:20px; }
     .sidebar-footer{ display:none; }
     nav.side-nav{ flex-direction:row; }
-    .content-area{ margin-left:0; padding:26px 18px 100px; justify-content:center; }
+    .content-area{ margin-left:0; padding:26px 18px 100px; }
     .main{ max-width:none; }
   }
 
@@ -402,11 +402,46 @@ function estilosBase() {
   }
 
   /* --- Encabezado de página --- */
+  .page-header{
+    display:flex; align-items:flex-start; justify-content:space-between;
+    gap:24px; flex-wrap:wrap; margin-bottom:14px;
+  }
+  .page-header-left{ flex:1; min-width:280px; }
   .page-eyebrow{ font-family:var(--mono); font-size:12.5px; letter-spacing:.14em;
-    text-transform:uppercase; color:var(--green); margin:0 0 8px; text-align:center; }
-  .page-title{ font-family:var(--display); font-weight:700; font-size:32px; margin:0 0 6px;
-    letter-spacing:.005em; text-align:center; }
-  .page-sub{ color:var(--muted); font-size:15.5px; margin:0 0 30px; text-align:center; }
+    text-transform:uppercase; color:#3FC7E8; margin:0 0 10px; }
+  .page-title{ font-family:var(--display); font-weight:700; font-size:38px; margin:0;
+    letter-spacing:.005em; line-height:1.12; }
+  .page-sub{ color:var(--muted); font-size:15.5px; line-height:1.65; margin:16px 0 30px; max-width:680px; }
+
+  /* --- Botón hero (conectar cuenta) --- */
+  .btn-hero{
+    font-family:var(--display); font-weight:600; font-size:15px; white-space:nowrap;
+    border:none; border-radius:11px; padding:15px 22px; cursor:pointer; color:#04140D;
+    background:linear-gradient(90deg, #31D97C, #34C9E8);
+    box-shadow:0 0 0 1px rgba(49,217,124,.15), 0 8px 24px -8px rgba(49,217,124,.55);
+    transition:filter .15s, transform .1s; flex-shrink:0;
+  }
+  .btn-hero:hover{ filter:brightness(1.06); }
+  .btn-hero:active{ transform:scale(.985); }
+
+  /* --- Cluster de estado del bot en el encabezado del panel --- */
+  .header-status{ display:flex; align-items:center; gap:14px; flex-wrap:wrap; flex-shrink:0; }
+  .header-status-text{ text-align:right; }
+  .header-status-label{ font-size:12.5px; color:var(--muted); margin-bottom:4px; }
+  .header-status-value{ font-family:var(--display); font-weight:600; font-size:19px;
+    display:flex; align-items:center; gap:8px; justify-content:flex-end; }
+  .header-status-value.green{ color:var(--green); }
+  .header-status-value.red{ color:var(--red); }
+  @media (max-width:640px){
+    .header-status{ width:100%; justify-content:space-between; }
+    .header-status-text{ text-align:left; }
+    .header-status-value{ justify-content:flex-start; }
+  }
+
+  /* --- Grid de 2 columnas (usado en /panel) --- */
+  .grid-2col{ display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:start; }
+  @media (max-width:980px){ .grid-2col{ grid-template-columns:1fr; } }
+  .col{ display:flex; flex-direction:column; }
 
   /* --- Tarjetas de estadística (estilo monitoreo) --- */
   .stats-row{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:26px; }
@@ -692,7 +727,7 @@ ${estilosBase()}
   <div class="app-shell">
   ${sidebarHTML("privacy")}
   <div class="content-area">
-  <div class="main">
+  <div class="main" style="max-width:760px;">
     <p class="page-eyebrow">Instagram AI Responder</p>
     <h1 class="page-title">Política de Privacidad</h1>
     <p class="page-sub">Última actualización: ${new Date().toLocaleDateString("es-MX")}</p>
@@ -751,7 +786,7 @@ ${estilosBase()}
   <div class="app-shell">
   ${sidebarHTML("deletion")}
   <div class="content-area">
-  <div class="main">
+  <div class="main" style="max-width:760px;">
     <p class="page-eyebrow">Instagram AI Responder</p>
     <h1 class="page-title">Eliminación de Datos</h1>
     <p class="page-sub">Instrucciones para solicitar la eliminación de tus datos</p>
@@ -1190,35 +1225,26 @@ ${FUENTES_HTML}
 ${estilosBase()}
 <style>
   /* --- Conectar cuentas de Instagram --- */
-  .conectar-header{ margin-bottom:18px; }
-  .conectar-botones{ margin-bottom:20px; }
-  .btn-conectar{
-    width:100%; font-family:var(--display); font-weight:600; font-size:15.5px;
-    letter-spacing:.01em; border:none; border-radius:11px; padding:14px 18px; cursor:pointer;
-    text-align:center; background:var(--green); color:#0A0D13; transition:filter .15s, transform .1s;
-  }
-  .btn-conectar:hover{ filter:brightness(1.08); }
-  .btn-conectar:active{ transform:scale(.985); }
-  .cuentas-titulo{ font-family:var(--mono); font-size:12px; letter-spacing:.12em;
-    text-transform:uppercase; color:var(--green); margin:0 0 5px; }
-  .cuentas-subtitulo{ font-family:var(--display); font-weight:600; font-size:17px; margin:0 0 14px; }
+  .cuentas-titulo{ font-family:var(--mono); font-size:12.5px; letter-spacing:.14em;
+    text-transform:uppercase; color:#3FC7E8; margin:0 0 6px; }
+  .cuentas-subtitulo{ font-family:var(--display); font-weight:600; font-size:19px; margin:0 0 16px; }
   .cuenta-item{
     display:flex; align-items:center; gap:16px; background:var(--surface-3); border:1px solid var(--border);
-    border-radius:13px; padding:16px 18px;
+    border-radius:13px; padding:18px 20px;
   }
   .cuenta-info{ flex:1; min-width:0; }
-  .cuenta-info .nombre{ font-family:var(--display); font-weight:600; font-size:19px; margin-bottom:5px; }
-  .cuenta-info .detalle{ color:var(--muted); font-size:13px; line-height:1.65; font-family:var(--mono); }
+  .cuenta-info .nombre{ font-family:var(--display); font-weight:600; font-size:22px; margin-bottom:6px; }
+  .cuenta-info .detalle{ color:var(--muted); font-size:13.5px; line-height:1.65; font-family:var(--mono); }
   .cuenta-info .detalle b{ color:#C9D1DE; font-weight:500; }
-  .cuenta-lado{ display:flex; flex-direction:column; align-items:flex-end; gap:9px; flex-shrink:0; }
-  .badge{ font-size:12px; font-family:var(--mono); padding:5px 10px; border-radius:20px;
-    background:var(--green-soft); color:var(--green); border:1px solid rgba(49,217,124,.25); white-space:nowrap; }
+  .cuenta-lado{ display:flex; flex-direction:column; align-items:flex-end; gap:10px; flex-shrink:0; }
+  .badge{ font-size:12.5px; font-family:var(--mono); padding:6px 13px; border-radius:20px;
+    background:var(--green-soft); color:var(--green); border:1px solid rgba(49,217,124,.3); white-space:nowrap; }
   .btn-eliminar{
-    background:var(--red-soft); color:var(--red); border:1px solid rgba(255,93,93,.3);
-    border-radius:8px; padding:8px 13px; font-size:13px; font-weight:600; cursor:pointer;
+    background:var(--red-soft); color:var(--red); border:1px solid rgba(255,93,93,.35);
+    border-radius:9px; padding:9px 15px; font-size:13.5px; font-weight:600; cursor:pointer;
   }
   .btn-eliminar:hover{ background:rgba(255,93,93,.18); }
-  .sin-cuenta{ color:var(--muted); font-size:14.5px; padding:8px 2px; }
+  .sin-cuenta{ color:var(--muted); font-size:15px; padding:8px 2px; }
 </style>
 </head>
 <body>
@@ -1226,32 +1252,15 @@ ${estilosBase()}
   ${sidebarHTML("cuentas")}
   <div class="content-area">
   <div class="main">
-    <p class="page-eyebrow">Instagram AI Responder</p>
-    <h1 class="page-title">Cuentas</h1>
-    <p class="page-sub">Robertoperez.coach — conexión y estado de la cuenta de Instagram</p>
-
-    <div class="stats-row">
-      <div class="stat-card">
-        <div class="stat-label">Cuenta conectada</div>
-        <div class="stat-value" id="cuentaValor">—</div>
-        <div class="stat-note" id="cuentaNota">consultando…</div>
+    <div class="page-header">
+      <div class="page-header-left">
+        <h1 class="page-title">CONECTAR CUENTAS DE INSTAGRAM</h1>
       </div>
-      <div class="stat-card">
-        <div class="stat-label">Token de acceso</div>
-        <div class="stat-value" id="tokenValor">—</div>
-        <div class="stat-note" id="tokenNota">consultando…</div>
-      </div>
+      <button class="btn-hero" id="btnConectarInstagram">Instagram directo (token 60 días)</button>
     </div>
+    <p class="page-sub">Conecta una cuenta directo desde Instagram y el sistema intenta guardar token long-lived (60 días) sin depender de Facebook Page. Por ahora solo se puede tener una cuenta activa a la vez: conectar una nueva reemplaza a la anterior.</p>
 
     <div class="card">
-      <div class="conectar-header">
-        <h2>Conectar cuentas de Instagram</h2>
-        <p class="hint">Conecta una cuenta directo desde Instagram y el sistema intenta guardar token long-lived (60 días) sin depender de Facebook Page. Por ahora solo se puede tener una cuenta activa a la vez: conectar una nueva reemplaza a la anterior.</p>
-      </div>
-      <div class="conectar-botones">
-        <button class="btn-conectar" id="btnConectarInstagram">Instagram directo (token 60 días)</button>
-      </div>
-
       <p class="cuentas-titulo">Tus cuentas</p>
       <p class="cuentas-subtitulo">Estado actual</p>
       <div id="cuentaActual"><p class="sin-cuenta">Cargando…</p></div>
@@ -1298,11 +1307,6 @@ ${estilosBase()}
     const data = await llamarGET("/cuenta/actual");
     if(!data || !data.conectada){
       cont.innerHTML = '<p class="sin-cuenta">No hay ninguna cuenta conectada todavía. Usa el botón de arriba para conectar una.</p>';
-      document.getElementById("cuentaValor").textContent = "Sin conectar";
-      document.getElementById("cuentaValor").className = "stat-value red";
-      document.getElementById("cuentaNota").textContent = "conecta una cuenta abajo";
-      document.getElementById("tokenValor").textContent = "—";
-      document.getElementById("tokenNota").textContent = "sin cuenta activa";
       return;
     }
 
@@ -1311,18 +1315,7 @@ ${estilosBase()}
     if(tokenInfo && !tokenInfo.error){
       const fecha = new Date(tokenInfo.expira_aproximadamente_en);
       diasRestantesTxt = \`Token vence en \${tokenInfo.dias_restantes} día(s) (\${fecha.toLocaleDateString("es-MX",{day:"2-digit",month:"short"})})\`;
-
-      document.getElementById("tokenValor").textContent = tokenInfo.dias_restantes + " días";
-      document.getElementById("tokenValor").className = "stat-value" + (tokenInfo.dias_restantes <= 10 ? " red" : " green");
-      document.getElementById("tokenNota").textContent = \`vence \${fecha.toLocaleDateString("es-MX",{day:"2-digit",month:"short"})}\`;
-    } else {
-      document.getElementById("tokenValor").textContent = "Sin datos";
-      document.getElementById("tokenNota").textContent = "corre /refresh-token";
     }
-
-    document.getElementById("cuentaValor").textContent = "@" + (data.username || "sin_usuario");
-    document.getElementById("cuentaValor").className = "stat-value green";
-    document.getElementById("cuentaNota").textContent = "conectada " + formatearFecha(data.conectada_en);
 
     cont.innerHTML = \`
       <div class="cuenta-item">
@@ -1393,19 +1386,19 @@ ${estilosBase()}
 
   .savebar{
     position:fixed; left:236px; right:0; bottom:0; background:linear-gradient(0deg, var(--bg) 65%, transparent);
-    padding:22px 34px 24px; display:flex; justify-content:center;
+    padding:22px 46px 24px;
   }
-  .savebar-inner{ width:100%; max-width:900px; display:flex; align-items:center; gap:14px; }
+  .savebar-inner{ width:100%; max-width:1360px; margin:0 auto; display:flex; align-items:center; gap:14px; }
   .save-btn{
-    flex:1; background:var(--green); color:#0A0D13; font-family:var(--display);
-    font-weight:600; font-size:16px; border:none; border-radius:12px; padding:15px; cursor:pointer;
+    background:var(--green); color:#0A0D13; font-family:var(--display);
+    font-weight:600; font-size:16px; border:none; border-radius:12px; padding:15px 28px; cursor:pointer;
     letter-spacing:.01em;
   }
   .save-btn:active{ transform:scale(.985); }
   .save-msg{ font-size:13.5px; color:var(--muted); white-space:nowrap; }
   .save-msg.ok{ color:var(--green); }
   .content-area{ padding-bottom:120px; }
-  @media (max-width:860px){ .savebar{ left:0; padding:18px 18px 20px; } }
+  @media (max-width:860px){ .savebar{ left:0; padding:18px 18px 20px; } .save-btn{ flex:1; } }
 </style>
 </head>
 <body>
@@ -1413,60 +1406,64 @@ ${estilosBase()}
   ${sidebarHTML("panel")}
   <div class="content-area">
   <div class="main">
-    <p class="page-eyebrow">Instagram AI Responder</p>
-    <h1 class="page-title">Panel del bot</h1>
-    <p class="page-sub">Robertoperez.coach — control y configuración</p>
-
-    <div class="stats-row">
-      <div class="stat-card">
-        <div class="stat-label">Estado del bot</div>
-        <div class="stat-value" id="statValor">
-          <div class="status-dot" id="dot"></div>
-          <span id="statTexto">Cargando…</span>
+    <div class="page-header">
+      <div class="page-header-left">
+        <p class="page-eyebrow">Automatizaciones</p>
+        <h1 class="page-title">Automatizaciones en respuestas y followup</h1>
+      </div>
+      <div class="header-status">
+        <div class="header-status-text">
+          <div class="header-status-label">Estado del bot</div>
+          <div class="header-status-value" id="statValor">
+            <span class="status-dot" id="dot"></span>
+            <span id="statTexto">Cargando…</span>
+          </div>
         </div>
-        <div class="stat-note" id="statNota">consultando…</div>
+        <button class="btn btn-on" id="btnOn">Encender bot</button>
+        <button class="btn btn-off" id="btnOff">Apagar bot</button>
       </div>
     </div>
 
-    <div class="switch-row" style="margin-bottom:26px;">
-      <button class="btn btn-on" id="btnOn">Encender bot</button>
-      <button class="btn btn-off" id="btnOff">Apagar bot</button>
-    </div>
-
-    <div class="card">
-      <h2>Mensaje del bot</h2>
-      <p class="hint">Instrucciones que sigue la IA para responder a los clientes. Sé específico: tono, qué información dar, qué evitar.</p>
-      <label for="prompt">Prompt del sistema</label>
-      <textarea id="prompt" rows="5" placeholder="Eres el asistente de..."></textarea>
-    </div>
-
-    <div class="card">
-      <h2>Tiempos de respuesta</h2>
-      <p class="hint">Antes de contestar, el bot espera un rato aleatorio entre estos dos valores — así da tiempo a que el cliente termine de escribir varias líneas seguidas.</p>
-      <div class="row2">
-        <div>
-          <label for="minDelay">Espera mínima (segundos)</label>
-          <input type="number" id="minDelay" min="0">
+    <div class="grid-2col">
+      <div class="col">
+        <div class="card">
+          <h2>Mensaje del bot</h2>
+          <p class="hint">Instrucciones que sigue la IA para responder a los clientes. Sé específico: tono, qué información dar, qué evitar.</p>
+          <label for="prompt">Prompt del sistema</label>
+          <textarea id="prompt" rows="8" placeholder="Eres el asistente de..."></textarea>
         </div>
-        <div>
-          <label for="maxDelay">Espera máxima (segundos)</label>
-          <input type="number" id="maxDelay" min="0">
+
+        <div class="card">
+          <h2>Tiempos de respuesta</h2>
+          <p class="hint">Antes de contestar, el bot espera un rato aleatorio entre estos dos valores — así da tiempo a que el cliente termine de escribir varias líneas seguidas.</p>
+          <div class="row2">
+            <div>
+              <label for="minDelay">Espera mínima (segundos)</label>
+              <input type="number" id="minDelay" min="0">
+            </div>
+            <div>
+              <label for="maxDelay">Espera máxima (segundos)</label>
+              <input type="number" id="maxDelay" min="0">
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Memoria de conversación</h2>
+          <p class="hint">Cuántos mensajes recientes (tuyos y del cliente) recuerda el bot al responder. Más alto = más contexto, pero más costo por respuesta.</p>
+          <label for="maxHistorial">Mensajes a recordar</label>
+          <input type="number" id="maxHistorial" min="1">
         </div>
       </div>
-    </div>
 
-    <div class="card">
-      <h2>Memoria de conversación</h2>
-      <p class="hint">Cuántos mensajes recientes (tuyos y del cliente) recuerda el bot al responder. Más alto = más contexto, pero más costo por respuesta.</p>
-      <label for="maxHistorial">Mensajes a recordar</label>
-      <input type="number" id="maxHistorial" min="1">
-    </div>
-
-    <div class="card">
-      <h2>Seguimientos automáticos</h2>
-      <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo.</p>
-      <div id="pasos"></div>
-      <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
+      <div class="col">
+        <div class="card">
+          <h2>Seguimientos automáticos</h2>
+          <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo.</p>
+          <div id="pasos"></div>
+          <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
+        </div>
+      </div>
     </div>
   </div>
   </div>
@@ -1503,10 +1500,7 @@ ${estilosBase()}
   function pintarEstado(activo){
     document.getElementById("dot").className = "status-dot" + (activo ? "" : " off");
     document.getElementById("statTexto").textContent = activo ? "Activo" : "Apagado";
-    document.getElementById("statTexto").parentElement.className = "stat-value" + (activo ? " green" : " red");
-    document.getElementById("statNota").textContent = activo
-      ? "Respondiendo mensajes automáticamente"
-      : "No responde ni manda seguimientos";
+    document.getElementById("statValor").className = "header-status-value" + (activo ? " green" : " red");
   }
 
   async function actualizarEstado(){
