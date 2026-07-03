@@ -6,6 +6,11 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
+// Render está detrás de un proxy: sin esto, req.protocol siempre da "http"
+// aunque el usuario haya entrado por https, lo cual rompe el redirect_uri
+// que mandamos a Meta en el flujo de OAuth (Meta exige que coincida exacto).
+app.set("trust proxy", true);
+
 // Necesitamos el body "crudo" para poder verificar la firma que manda Meta
 app.use(express.json({
   verify: (req, res, buf) => { req.rawBody = buf; }
