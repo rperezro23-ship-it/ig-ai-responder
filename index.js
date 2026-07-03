@@ -1860,6 +1860,13 @@ ${estilosBase()}
     border-bottom:1px solid rgba(255,93,93,.25); display:none; align-items:center; gap:8px;
   }
   .handoff-banner.visible{ display:flex; }
+  .chat-export{ padding:10px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
+  .btn-exportar{
+    display:block; text-align:center; background:var(--surface-3); color:var(--text);
+    border:1px solid var(--border); border-radius:9px; padding:10px 10px; font-size:13px;
+    font-weight:600; text-decoration:none; transition:background .12s, border-color .12s, color .12s;
+  }
+  .btn-exportar:hover{ background:var(--surface-2); border-color:var(--red); color:var(--red); }
   .chat-list{ flex:1; overflow-y:auto; }
   .chat-list-item{
     display:flex; align-items:flex-start; gap:12px; padding:14px 18px;
@@ -1948,6 +1955,9 @@ ${estilosBase()}
           <div class="chat-tab active" id="tabTodas" data-filtro="todas">Todas <span class="count" id="countTodas"></span></div>
           <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff">Handoff (+24h) <span class="count" id="countHandoff"></span></div>
         </div>
+        <div class="chat-export">
+          <a id="btnExportarCSV" href="/exportar/handoff.csv" class="btn-exportar">⬇ Exportar CSV handoff <span id="exportCount">(0)</span></a>
+        </div>
         <div class="chat-list" id="listaChats"><p class="vacio-lista">Cargando…</p></div>
       </div>
 
@@ -2011,8 +2021,10 @@ ${estilosBase()}
   }
 
   function actualizarContadores(){
+    const totalHandoff = conversaciones.filter(c => !c.en_ventana_24h).length;
     document.getElementById("countTodas").textContent = conversaciones.length;
-    document.getElementById("countHandoff").textContent = conversaciones.filter(c => !c.en_ventana_24h).length;
+    document.getElementById("countHandoff").textContent = totalHandoff;
+    document.getElementById("exportCount").textContent = "(" + totalHandoff + ")";
   }
 
   function conversacionesFiltradas(){
@@ -2139,6 +2151,60 @@ ${estilosBase()}
 </body>
 </html>
   `);
+});
+
+// Exporta a CSV las conversaciones que ya salieron de la ventana de 24h de
+// Instagram (handoff), para poder darles seguimiento manual fuera del bot.
+app.get("/exportar/handoff.csv", requireAdminKey, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("conversaciones")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en")
+      .order("ultimo_mensaje_usuario", { ascending: true });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    const fueraDeVentana = (data || []).filter((c) => {
+      if (!c.ultimo_mensaje_usuario) return false;
+      return (Date.now() - new Date(c.ultimo_mensaje_usuario).getTime()) >= VENTANA_24H_MS;
+    });
+
+    const filas = await Promise.all(fueraDeVentana.map(async (c) => {
+      const perfil = await obtenerPerfilInstagram(c.sender_id);
+      const historial = Array.isArray(c.historial) ? c.historial : [];
+      const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
+      const horasInactivo = Math.round((Date.now() - new Date(c.ultimo_mensaje_usuario).getTime()) / 3600000);
+
+      return {
+        username: perfil?.username ? "@" + perfil.username : "",
+        sender_id: c.sender_id,
+        ultimo_mensaje_usuario: c.ultimo_mensaje_usuario,
+        horas_inactivo: horasInactivo,
+        ultimo_mensaje: ultimo ? ultimo.content : ""
+      };
+    }));
+
+    const encabezados = ["username", "sender_id", "ultimo_mensaje_usuario", "horas_inactivo", "ultimo_mensaje"];
+    const escaparCSV = (valor) => {
+      const txt = String(valor ?? "");
+      return /[",\n]/.test(txt) ? '"' + txt.replace(/"/g, '""') + '"' : txt;
+    };
+
+    const lineas = [
+      encabezados.join(","),
+      ...filas.map((f) => encabezados.map((h) => escaparCSV(f[h])).join(","))
+    ];
+
+    // BOM al inicio para que Excel abra los acentos/emojis correctamente.
+    const csv = "\uFEFF" + lineas.join("\r\n");
+    const fechaArchivo = new Date().toISOString().slice(0, 10);
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="handoff_${fechaArchivo}.csv"`);
+    res.send(csv);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/seguimientos/:senderId?", requireAdminKey, async (req, res) => {
