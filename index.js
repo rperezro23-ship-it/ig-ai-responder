@@ -321,6 +321,134 @@ function validarOauthState(state) {
 }
 
 // ---------------------------------------------------------------
+// Diseño compartido (estilo "dashboard de monitoreo") para /panel,
+// /privacy y /data-deletion — mismo lenguaje visual en las 3 páginas.
+// ---------------------------------------------------------------
+
+const FUENTES_HTML = `
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+`;
+
+function estilosBase() {
+  return `
+<style>
+  :root{
+    --bg:#0A0D13; --surface:#10141C; --surface-2:#161B25; --surface-3:#1D2330;
+    --border:#232A38; --text:#EDF0F4; --muted:#7C879B; --muted-dim:#4B5568;
+    --green:#31D97C; --green-soft:rgba(49,217,124,.14);
+    --red:#FF5D5D; --red-soft:rgba(255,93,93,.14);
+    --radius:12px; --radius-lg:18px;
+    --mono:'JetBrains Mono',monospace; --display:'Space Grotesk',sans-serif; --body:'Inter',sans-serif;
+  }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:var(--body); }
+  a{ color:var(--green); }
+
+  /* --- Sidebar --- */
+  .sidebar{
+    position:fixed; top:0; left:0; bottom:0; width:226px; background:var(--surface);
+    border-right:1px solid var(--border); padding:22px 16px; display:flex;
+    flex-direction:column; gap:26px; z-index:10;
+  }
+  .brand{ display:flex; align-items:center; gap:9px; padding:0 4px; }
+  .brand-dot{ width:9px; height:9px; border-radius:50%; background:var(--green); flex-shrink:0;
+    box-shadow:0 0 0 0 rgba(49,217,124,.5); animation:pulse 2.2s ease-out infinite; }
+  .brand-name{ font-family:var(--display); font-weight:600; font-size:14.5px; letter-spacing:.005em; }
+  nav.side-nav{ display:flex; flex-direction:column; gap:3px; }
+  .side-link{
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:9px 10px; border-radius:9px; color:var(--muted); text-decoration:none;
+    font-size:13.5px; font-weight:500; transition:background .15s, color .15s;
+  }
+  .side-link:hover{ background:var(--surface-2); color:var(--text); }
+  .side-link.active{ background:var(--green-soft); color:var(--green); }
+  .side-tag{
+    font-family:var(--mono); font-size:9.5px; padding:3px 6px; border-radius:5px;
+    background:var(--surface-3); color:var(--muted-dim); letter-spacing:.04em;
+  }
+  .side-link.active .side-tag{ background:rgba(49,217,124,.18); color:var(--green); }
+  .sidebar-footer{ margin-top:auto; font-family:var(--mono); font-size:10px; color:var(--muted-dim);
+    letter-spacing:.03em; padding:0 4px; line-height:1.6; }
+
+  .main{ margin-left:226px; padding:30px 34px 90px; max-width:820px; }
+
+  @media (max-width:860px){
+    .sidebar{ position:static; width:100%; flex-direction:row; align-items:center;
+      padding:13px 16px; border-right:none; border-bottom:1px solid var(--border);
+      overflow-x:auto; gap:18px; }
+    .sidebar-footer{ display:none; }
+    nav.side-nav{ flex-direction:row; }
+    .main{ margin-left:0; padding:22px 16px 90px; max-width:none; }
+  }
+
+  @keyframes pulse{
+    0%{ box-shadow:0 0 0 0 rgba(49,217,124,.5); }
+    70%{ box-shadow:0 0 0 8px rgba(49,217,124,0); }
+    100%{ box-shadow:0 0 0 0 rgba(49,217,124,0); }
+  }
+
+  /* --- Encabezado de página --- */
+  .page-eyebrow{ font-family:var(--mono); font-size:11px; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--green); margin:0 0 6px; }
+  .page-title{ font-family:var(--display); font-weight:700; font-size:26px; margin:0 0 4px; letter-spacing:.005em; }
+  .page-sub{ color:var(--muted); font-size:13.5px; margin:0 0 24px; }
+
+  /* --- Tarjetas de estadística (estilo monitoreo) --- */
+  .stats-row{ display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:22px; }
+  @media (max-width:700px){ .stats-row{ grid-template-columns:1fr; } }
+  .stat-card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:16px 18px; }
+  .stat-label{ font-size:11.5px; color:var(--muted); margin-bottom:9px; font-weight:500; }
+  .stat-value{ font-family:var(--display); font-size:19px; font-weight:600; display:flex; align-items:center; gap:8px; }
+  .stat-value.green{ color:var(--green); }
+  .stat-value.red{ color:var(--red); }
+  .status-dot{ width:8px; height:8px; border-radius:50%; background:var(--green); flex-shrink:0;
+    box-shadow:0 0 0 0 rgba(49,217,124,.5); animation:pulse 1.8s ease-out infinite; }
+  .status-dot.off{ background:var(--red); animation:none; box-shadow:none; }
+  .stat-note{ font-size:11px; color:var(--muted-dim); margin-top:7px; font-family:var(--mono); }
+
+  /* --- Tarjetas de contenido genéricas --- */
+  .card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:20px 22px; margin-bottom:14px; }
+  .card h2{ font-family:var(--display); font-size:15.5px; font-weight:600; margin:0 0 4px; }
+  .card .hint{ color:var(--muted); font-size:12.5px; margin:0 0 14px; line-height:1.55; }
+  .card p{ color:#C9D1DE; font-size:14px; line-height:1.7; margin:0 0 6px; }
+  .card p:last-child{ margin-bottom:0; }
+
+  label{ display:block; font-size:12.5px; color:var(--muted); margin:0 0 6px; font-weight:500; }
+  textarea, input[type=number], input[type=text]{
+    width:100%; background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:9px; padding:10px 12px; font-family:var(--body); font-size:14px; resize:vertical; outline:none;
+  }
+  textarea:focus, input:focus{ border-color:var(--green); }
+  textarea{ min-height:90px; line-height:1.5; }
+  .row2{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+
+  .volver{ display:inline-block; margin-top:8px; color:var(--muted); font-size:13px; text-decoration:none; }
+  .volver:hover{ color:var(--green); }
+</style>`;
+}
+
+function sidebarHTML(activo) {
+  const link = (href, tag, label, key) => `
+    <a class="side-link${activo === key ? " active" : ""}" href="${href}">
+      <span>${label}</span><span class="side-tag">${tag}</span>
+    </a>`;
+  return `
+<div class="sidebar">
+  <div class="brand">
+    <div class="brand-dot"></div>
+    <div class="brand-name">IG AI Responder</div>
+  </div>
+  <nav class="side-nav">
+    ${link("/panel", "PNL", "Panel", "panel")}
+    ${link("/privacy", "PRV", "Privacidad", "privacy")}
+    ${link("/data-deletion", "DEL", "Eliminar datos", "deletion")}
+  </nav>
+  <div class="sidebar-footer">Robertoperez.coach<br>v1.0</div>
+</div>`;
+}
+
+// ---------------------------------------------------------------
 // Verificación del webhook (GET, lo hace Meta una sola vez al configurarlo)
 // ---------------------------------------------------------------
 app.get("/webhook", (req, res) => {
@@ -544,34 +672,15 @@ app.get("/privacy", (req, res) => {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Política de Privacidad — Instagram AI Responder</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>
-  :root{
-    --bg:#12141A; --surface:#1B1F27; --surface-2:#20242E; --border:#2A2F3A;
-    --text:#F3F5F7; --muted:#8A93A3; --lime:#C9FF3E; --radius:14px;
-  }
-  *{ box-sizing:border-box; }
-  body{ margin:0; background:var(--bg); color:var(--text); font-family:'Inter',sans-serif; padding-bottom:60px; }
-  .wrap{ max-width:640px; margin:0 auto; padding:28px 20px 40px; }
-  .eyebrow{ font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:.14em;
-    text-transform:uppercase; color:var(--lime); margin:0 0 6px; }
-  h1{ font-family:'Oswald',sans-serif; font-weight:700; font-size:28px; margin:0 0 4px; letter-spacing:.01em; }
-  .sub{ color:var(--muted); font-size:13.5px; margin:0 0 24px; }
-  .card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:22px 24px; margin-bottom:16px; }
-  .card h2{ font-family:'Oswald',sans-serif; font-size:16px; font-weight:600; margin:0 0 10px; color:var(--lime); }
-  .card p{ color:#C9D1DE; font-size:14px; line-height:1.7; margin:0 0 6px; }
-  .card p:last-child{ margin-bottom:0; }
-  a{ color:var(--lime); }
-  .volver{ display:inline-block; margin-top:8px; color:var(--muted); font-size:13px; text-decoration:none; }
-  .volver:hover{ color:var(--lime); }
-</style>
+${FUENTES_HTML}
+${estilosBase()}
 </head>
 <body>
-  <div class="wrap">
-    <p class="eyebrow">Instagram AI Responder</p>
-    <h1>Política de Privacidad</h1>
-    <p class="sub">Última actualización: ${new Date().toLocaleDateString("es-MX")}</p>
+  ${sidebarHTML("privacy")}
+  <div class="main">
+    <p class="page-eyebrow">Instagram AI Responder</p>
+    <h1 class="page-title">Política de Privacidad</h1>
+    <p class="page-sub">Última actualización: ${new Date().toLocaleDateString("es-MX")}</p>
 
     <div class="card">
       <p>Esta aplicación ("Instagram AI Responder") es una herramienta de uso privado que
@@ -601,8 +710,6 @@ app.get("/privacy", (req, res) => {
       <h2>Contacto</h2>
       <p>Para dudas sobre esta política, contáctanos en: <a href="mailto:rperezro23@gmail.com">rperezro23@gmail.com</a></p>
     </div>
-
-    <a class="volver" href="/panel">&larr; Volver al panel</a>
   </div>
 </body>
 </html>
@@ -618,33 +725,15 @@ app.get("/data-deletion", (req, res) => {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Eliminación de Datos — Instagram AI Responder</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>
-  :root{
-    --bg:#12141A; --surface:#1B1F27; --surface-2:#20242E; --border:#2A2F3A;
-    --text:#F3F5F7; --muted:#8A93A3; --lime:#C9FF3E; --radius:14px;
-  }
-  *{ box-sizing:border-box; }
-  body{ margin:0; background:var(--bg); color:var(--text); font-family:'Inter',sans-serif; padding-bottom:60px; }
-  .wrap{ max-width:640px; margin:0 auto; padding:28px 20px 40px; }
-  .eyebrow{ font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:.14em;
-    text-transform:uppercase; color:var(--lime); margin:0 0 6px; }
-  h1{ font-family:'Oswald',sans-serif; font-weight:700; font-size:28px; margin:0 0 4px; letter-spacing:.01em; }
-  .sub{ color:var(--muted); font-size:13.5px; margin:0 0 24px; }
-  .card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:22px 24px; margin-bottom:16px; }
-  .card p{ color:#C9D1DE; font-size:14px; line-height:1.7; margin:0 0 6px; }
-  .card p:last-child{ margin-bottom:0; }
-  a{ color:var(--lime); }
-  .volver{ display:inline-block; margin-top:8px; color:var(--muted); font-size:13px; text-decoration:none; }
-  .volver:hover{ color:var(--lime); }
-</style>
+${FUENTES_HTML}
+${estilosBase()}
 </head>
 <body>
-  <div class="wrap">
-    <p class="eyebrow">Instagram AI Responder</p>
-    <h1>Eliminación de Datos</h1>
-    <p class="sub">Instrucciones para solicitar la eliminación de tus datos</p>
+  ${sidebarHTML("deletion")}
+  <div class="main">
+    <p class="page-eyebrow">Instagram AI Responder</p>
+    <h1 class="page-title">Eliminación de Datos</h1>
+    <p class="page-sub">Instrucciones para solicitar la eliminación de tus datos</p>
 
     <div class="card">
       <p>Si deseas solicitar la eliminación de cualquier dato asociado a tu cuenta de
@@ -654,8 +743,6 @@ app.get("/data-deletion", (req, res) => {
       nombre de usuario de Instagram. Procesaremos tu solicitud en un plazo máximo
       de 30 días.</p>
     </div>
-
-    <a class="volver" href="/panel">&larr; Volver al panel</a>
   </div>
 </body>
 </html>
@@ -1070,152 +1157,114 @@ app.get("/panel", (req, res) => {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Panel — Instagram AI Responder</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+${FUENTES_HTML}
+${estilosBase()}
 <style>
-  :root{
-    --bg:#12141A; --surface:#1B1F27; --surface-2:#20242E; --border:#2A2F3A;
-    --text:#F3F5F7; --muted:#8A93A3; --lime:#C9FF3E; --coral:#FF5A5A;
-    --radius:14px;
-  }
-  *{ box-sizing:border-box; }
-  body{
-    margin:0; background:var(--bg); color:var(--text);
-    font-family:'Inter',sans-serif; padding-bottom:120px;
-  }
-  .wrap{ max-width:640px; margin:0 auto; padding:28px 20px 40px; }
-  .eyebrow{ font-family:'JetBrains Mono',monospace; font-size:12px; letter-spacing:.14em;
-    text-transform:uppercase; color:var(--lime); margin:0 0 6px; }
-  h1{ font-family:'Oswald',sans-serif; font-weight:700; font-size:30px; margin:0 0 4px;
-    letter-spacing:.01em; }
-  .sub{ color:var(--muted); font-size:14px; margin:0 0 22px; }
-
-  .statusbar{
-    display:flex; align-items:center; justify-content:space-between; gap:14px;
-    background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
-    padding:16px 18px; margin-bottom:22px; position:relative; overflow:hidden;
-  }
-  .statusbar::after{
-    content:""; position:absolute; left:0; right:0; bottom:0; height:2px;
-    background:linear-gradient(90deg, transparent, var(--lime), transparent);
-    background-size:200% 100%; animation:sweep 2.8s linear infinite;
-  }
-  .statusbar.off::after{ background:linear-gradient(90deg, transparent, var(--coral), transparent); background-size:200% 100%; }
-  @keyframes sweep{ 0%{background-position:200% 0;} 100%{background-position:-200% 0;} }
-  .status-left{ display:flex; align-items:center; gap:12px; }
-  .dot{ width:11px; height:11px; border-radius:50%; background:var(--lime);
-    box-shadow:0 0 0 0 rgba(201,255,62,.5); animation:pulse 1.8s ease-out infinite; flex-shrink:0; }
-  .dot.off{ background:var(--coral); animation:none; box-shadow:none; }
-  @keyframes pulse{
-    0%{ box-shadow:0 0 0 0 rgba(201,255,62,.5); }
-    70%{ box-shadow:0 0 0 9px rgba(201,255,62,0); }
-    100%{ box-shadow:0 0 0 0 rgba(201,255,62,0); }
-  }
-  .status-text{ font-family:'Oswald',sans-serif; font-weight:600; font-size:17px; }
-  .status-text small{ display:block; font-family:'Inter',sans-serif; font-weight:400;
-    font-size:12.5px; color:var(--muted); margin-top:1px; }
+  /* --- Estilos específicos del panel --- */
+  body{ padding-bottom:0; }
   .switch-row{ display:flex; gap:8px; }
   .btn{
-    font-family:'Inter',sans-serif; font-weight:600; font-size:13.5px; border:none;
-    border-radius:9px; padding:10px 16px; cursor:pointer; transition:filter .15s, transform .1s;
+    font-family:var(--body); font-weight:600; font-size:13px; border:none;
+    border-radius:9px; padding:9px 14px; cursor:pointer; transition:filter .15s, transform .1s;
   }
   .btn:active{ transform:scale(.97); }
-  .btn-on{ background:var(--lime); color:#12141A; }
-  .btn-off{ background:transparent; color:var(--coral); border:1px solid rgba(255,90,90,.4); }
+  .btn-on{ background:var(--green); color:#0A0D13; }
+  .btn-off{ background:transparent; color:var(--red); border:1px solid rgba(255,93,93,.4); }
   .btn:hover{ filter:brightness(1.08); }
-
-  .card{
-    background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
-    padding:20px; margin-bottom:16px;
-  }
-  .card h2{ font-family:'Oswald',sans-serif; font-size:16px; font-weight:600; margin:0 0 3px; }
-  .card .hint{ color:var(--muted); font-size:12.5px; margin:0 0 14px; line-height:1.5; }
-  label{ display:block; font-size:12.5px; color:var(--muted); margin:0 0 6px; font-weight:500; }
-  textarea, input[type=number], input[type=text]{
-    width:100%; background:var(--surface-2); border:1px solid var(--border); color:var(--text);
-    border-radius:9px; padding:10px 12px; font-family:'Inter',sans-serif; font-size:14px;
-    resize:vertical; outline:none;
-  }
-  textarea:focus, input:focus{ border-color:var(--lime); }
-  textarea{ min-height:90px; line-height:1.5; }
-  .row2{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
-  .row2 + .hint{ margin-top:10px; }
 
   .paso{
     border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:10px;
     background:rgba(255,255,255,.015);
   }
   .paso-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; }
-  .paso-head .eyebrow-num{ font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--lime); }
+  .paso-head .eyebrow-num{ font-family:var(--mono); font-size:11px; color:var(--green); }
   .quitar{ background:none; border:none; color:var(--muted); font-size:12px; cursor:pointer; text-decoration:underline; }
-  .quitar:hover{ color:var(--coral); }
+  .quitar:hover{ color:var(--red); }
   .add-paso{
     width:100%; background:transparent; border:1px dashed var(--border); color:var(--muted);
     border-radius:9px; padding:11px; font-size:13px; cursor:pointer; font-weight:500;
   }
-  .add-paso:hover{ border-color:var(--lime); color:var(--lime); }
+  .add-paso:hover{ border-color:var(--green); color:var(--green); }
 
   .savebar{
-    position:fixed; left:0; right:0; bottom:0; background:linear-gradient(0deg, var(--bg) 60%, transparent);
-    padding:22px 20px 20px;
+    position:fixed; left:226px; right:0; bottom:0; background:linear-gradient(0deg, var(--bg) 65%, transparent);
+    padding:20px 34px 22px;
   }
-  .savebar-inner{ max-width:640px; margin:0 auto; display:flex; align-items:center; gap:12px; }
+  .savebar-inner{ max-width:820px; display:flex; align-items:center; gap:12px; }
   .save-btn{
-    flex:1; background:var(--lime); color:#12141A; font-family:'Oswald',sans-serif;
-    font-weight:600; font-size:15px; border:none; border-radius:11px; padding:14px; cursor:pointer;
-    letter-spacing:.02em;
+    flex:1; background:var(--green); color:#0A0D13; font-family:var(--display);
+    font-weight:600; font-size:14.5px; border:none; border-radius:11px; padding:13px; cursor:pointer;
+    letter-spacing:.01em;
   }
   .save-btn:active{ transform:scale(.985); }
   .save-msg{ font-size:12.5px; color:var(--muted); white-space:nowrap; }
-  .save-msg.ok{ color:var(--lime); }
+  .save-msg.ok{ color:var(--green); }
+  .main{ padding-bottom:110px; }
+  @media (max-width:860px){ .savebar{ left:0; padding:16px 16px 18px; } }
 
   /* --- Conectar cuentas de Instagram --- */
   .conectar-header{ margin-bottom:16px; }
   .conectar-botones{ margin-bottom:18px; }
   .btn-conectar{
-    width:100%; font-family:'Oswald',sans-serif; font-weight:600; font-size:14.5px;
-    letter-spacing:.02em; border:none; border-radius:10px; padding:13px 16px; cursor:pointer;
-    text-align:center; background:var(--lime); color:#12141A; transition:filter .15s, transform .1s;
+    width:100%; font-family:var(--display); font-weight:600; font-size:14px;
+    letter-spacing:.01em; border:none; border-radius:10px; padding:12px 16px; cursor:pointer;
+    text-align:center; background:var(--green); color:#0A0D13; transition:filter .15s, transform .1s;
   }
   .btn-conectar:hover{ filter:brightness(1.08); }
   .btn-conectar:active{ transform:scale(.985); }
-  .cuentas-titulo{ font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:.12em;
-    text-transform:uppercase; color:var(--lime); margin:0 0 4px; }
-  .cuentas-subtitulo{ font-family:'Oswald',sans-serif; font-weight:600; font-size:15px; margin:0 0 12px; }
+  .cuentas-titulo{ font-family:var(--mono); font-size:11px; letter-spacing:.12em;
+    text-transform:uppercase; color:var(--green); margin:0 0 4px; }
+  .cuentas-subtitulo{ font-family:var(--display); font-weight:600; font-size:15px; margin:0 0 12px; }
   .cuenta-item{
-    display:flex; align-items:center; gap:14px; background:var(--surface-2); border:1px solid var(--border);
+    display:flex; align-items:center; gap:14px; background:var(--surface-3); border:1px solid var(--border);
     border-radius:12px; padding:14px 16px;
   }
   .cuenta-info{ flex:1; min-width:0; }
-  .cuenta-info .nombre{ font-family:'Oswald',sans-serif; font-weight:600; font-size:17px; margin-bottom:4px; }
-  .cuenta-info .detalle{ color:var(--muted); font-size:12px; line-height:1.6; font-family:'JetBrains Mono',monospace; }
+  .cuenta-info .nombre{ font-family:var(--display); font-weight:600; font-size:17px; margin-bottom:4px; }
+  .cuenta-info .detalle{ color:var(--muted); font-size:12px; line-height:1.6; font-family:var(--mono); }
   .cuenta-info .detalle b{ color:#C9D1DE; font-weight:500; }
   .cuenta-lado{ display:flex; flex-direction:column; align-items:flex-end; gap:8px; flex-shrink:0; }
-  .badge{ font-size:11px; font-family:'JetBrains Mono',monospace; padding:4px 9px; border-radius:20px;
-    background:rgba(201,255,62,.12); color:var(--lime); border:1px solid rgba(201,255,62,.25); white-space:nowrap; }
+  .badge{ font-size:11px; font-family:var(--mono); padding:4px 9px; border-radius:20px;
+    background:var(--green-soft); color:var(--green); border:1px solid rgba(49,217,124,.25); white-space:nowrap; }
   .btn-eliminar{
-    background:rgba(255,90,90,.1); color:var(--coral); border:1px solid rgba(255,90,90,.3);
+    background:var(--red-soft); color:var(--red); border:1px solid rgba(255,93,93,.3);
     border-radius:8px; padding:7px 12px; font-size:12px; font-weight:600; cursor:pointer;
   }
-  .btn-eliminar:hover{ background:rgba(255,90,90,.18); }
+  .btn-eliminar:hover{ background:rgba(255,93,93,.18); }
   .sin-cuenta{ color:var(--muted); font-size:13px; padding:8px 2px; }
 </style>
 </head>
 <body>
-  <div class="wrap">
-    <p class="eyebrow">Instagram AI Responder</p>
-    <h1>Panel del bot</h1>
-    <p class="sub">Robertoperez.coach — control y configuración</p>
+  ${sidebarHTML("panel")}
+  <div class="main">
+    <p class="page-eyebrow">Instagram AI Responder</p>
+    <h1 class="page-title">Panel del bot</h1>
+    <p class="page-sub">Robertoperez.coach — control y configuración</p>
 
-    <div class="statusbar" id="statusbar">
-      <div class="status-left">
-        <div class="dot" id="dot"></div>
-        <div class="status-text" id="statusText">Cargando…<small>Consultando estado</small></div>
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-label">Estado del bot</div>
+        <div class="stat-value" id="statValor">
+          <div class="status-dot" id="dot"></div>
+          <span id="statTexto">Cargando…</span>
+        </div>
+        <div class="stat-note" id="statNota">consultando…</div>
       </div>
-      <div class="switch-row">
-        <button class="btn btn-on" id="btnOn">Encender</button>
-        <button class="btn btn-off" id="btnOff">Apagar</button>
+      <div class="stat-card">
+        <div class="stat-label">Cuenta conectada</div>
+        <div class="stat-value" id="cuentaValor">—</div>
+        <div class="stat-note" id="cuentaNota">consultando…</div>
       </div>
+      <div class="stat-card">
+        <div class="stat-label">Token de acceso</div>
+        <div class="stat-value" id="tokenValor">—</div>
+        <div class="stat-note" id="tokenNota">consultando…</div>
+      </div>
+    </div>
+
+    <div class="switch-row" style="margin-bottom:22px;">
+      <button class="btn btn-on" id="btnOn">Encender bot</button>
+      <button class="btn btn-off" id="btnOff">Apagar bot</button>
     </div>
 
     <div class="card">
@@ -1298,11 +1347,12 @@ app.get("/panel", (req, res) => {
   }
 
   function pintarEstado(activo){
-    document.getElementById("dot").className = "dot" + (activo ? "" : " off");
-    document.getElementById("statusbar").className = "statusbar" + (activo ? "" : " off");
-    document.getElementById("statusText").innerHTML = activo
-      ? "Bot encendido<small>Respondiendo mensajes automáticamente</small>"
-      : "Bot apagado<small>No responde ni manda seguimientos</small>";
+    document.getElementById("dot").className = "status-dot" + (activo ? "" : " off");
+    document.getElementById("statTexto").textContent = activo ? "Activo" : "Apagado";
+    document.getElementById("statTexto").parentElement.className = "stat-value" + (activo ? " green" : " red");
+    document.getElementById("statNota").textContent = activo
+      ? "Respondiendo mensajes automáticamente"
+      : "No responde ni manda seguimientos";
   }
 
   async function actualizarEstado(){
@@ -1330,6 +1380,11 @@ app.get("/panel", (req, res) => {
     const data = await llamarGET("/cuenta/actual");
     if(!data || !data.conectada){
       cont.innerHTML = '<p class="sin-cuenta">No hay ninguna cuenta conectada todavía. Usa el botón de arriba para conectar una.</p>';
+      document.getElementById("cuentaValor").textContent = "Sin conectar";
+      document.getElementById("cuentaValor").className = "stat-value red";
+      document.getElementById("cuentaNota").textContent = "conecta una cuenta abajo";
+      document.getElementById("tokenValor").textContent = "—";
+      document.getElementById("tokenNota").textContent = "sin cuenta activa";
       return;
     }
 
@@ -1338,7 +1393,18 @@ app.get("/panel", (req, res) => {
     if(tokenInfo && !tokenInfo.error){
       const fecha = new Date(tokenInfo.expira_aproximadamente_en);
       diasRestantesTxt = \`Token vence en \${tokenInfo.dias_restantes} día(s) (\${fecha.toLocaleDateString("es-MX",{day:"2-digit",month:"short"})})\`;
+
+      document.getElementById("tokenValor").textContent = tokenInfo.dias_restantes + " días";
+      document.getElementById("tokenValor").className = "stat-value" + (tokenInfo.dias_restantes <= 10 ? " red" : " green");
+      document.getElementById("tokenNota").textContent = \`vence \${fecha.toLocaleDateString("es-MX",{day:"2-digit",month:"short"})}\`;
+    } else {
+      document.getElementById("tokenValor").textContent = "Sin datos";
+      document.getElementById("tokenNota").textContent = "corre /refresh-token";
     }
+
+    document.getElementById("cuentaValor").textContent = "@" + (data.username || "sin_usuario");
+    document.getElementById("cuentaValor").className = "stat-value green";
+    document.getElementById("cuentaNota").textContent = "conectada " + formatearFecha(data.conectada_en);
 
     cont.innerHTML = \`
       <div class="cuenta-item">
