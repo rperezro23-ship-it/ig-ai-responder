@@ -729,7 +729,10 @@ async function procesarBuffer(senderId) {
       console.log(`✅ Respondido a ${senderId} (una sola respuesta por ${mensajesAResponder.length} línea(s))`);
 
       // Calificación automática: solo si está activada, hay criterios definidos,
-      // y esta conversación todavía no había calificado antes.
+      // y esta conversación todavía no había calificado antes. El mensaje de
+      // calendario es OPCIONAL: si tu ai_prompt ya se encarga de mandar el
+      // formulario/enlace por su cuenta, deja "mensaje_calificado" vacío en
+      // /panel y aquí solo se pondrá la etiqueta, sin mandar nada duplicado.
       if (configActual.calificacion_activa && configActual.criterios_calificacion?.trim()) {
         const convActualizada = await obtenerConversacion(senderId);
         if (!convActualizada.califica) {
@@ -1836,7 +1839,7 @@ ${estilosBase()}
       <div class="col">
         <div class="card">
           <h2>Calificación automática de leads</h2>
-          <p class="hint">Define los criterios que debe cumplir un lead para calificar (uno por línea o como quieras redactarlo). La IA revisa la conversación después de cada respuesta y, en cuanto se cumplen TODOS, marca la conversación como "califica" y le manda el mensaje con tu enlace de calendario, una sola vez.</p>
+          <p class="hint">Define los criterios que debe cumplir un lead para calificar. Después de cada respuesta, la IA revisa la conversación y, en cuanto se cumplen TODOS, marca la conversación con la etiqueta ✅ Califica (puedes filtrarlos y exportarlos en Chats).</p>
 
           <label style="display:flex; align-items:center; gap:10px; cursor:pointer; margin-bottom:16px;">
             <input type="checkbox" id="calificacionActiva" style="width:18px; height:18px; accent-color:var(--green); cursor:pointer;">
@@ -1846,8 +1849,9 @@ ${estilosBase()}
           <label for="criteriosCalificacion">Criterios de calificación</label>
           <textarea id="criteriosCalificacion" rows="5" placeholder="Ej: Tiene más de 40 años.&#10;Quiere perder más de 10 kg.&#10;Es hombre."></textarea>
 
-          <label for="mensajeCalificado" style="margin-top:14px;">Mensaje al calificar (incluye tu enlace de calendario)</label>
-          <textarea id="mensajeCalificado" rows="4" placeholder="¡Genial! Por lo que me cuentas encajas perfecto en el programa 💪 Agenda tu sesión aquí: https://tu-enlace-de-calendario.com"></textarea>
+          <label for="mensajeCalificado" style="margin-top:14px;">Mensaje al calificar (opcional)</label>
+          <textarea id="mensajeCalificado" rows="4" placeholder="Déjalo vacío si tu prompt principal ya se encarga de mandar el formulario/enlace. Solo llénalo si quieres que este sistema mande un mensaje aparte."></textarea>
+          <p class="hint" style="margin:8px 0 0;">⚠️ Si tu prompt (arriba) ya le manda el formulario o el enlace al cliente cuando califica, deja este campo <b>vacío</b> — así el sistema solo pone la etiqueta y no duplica el mensaje.</p>
         </div>
 
         <div class="card">
