@@ -32,10 +32,56 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 // Genera una clave larga y aleatoria y ponla en Render como ADMIN_API_KEY.
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
+// ---------------------------------------------------------------
+// Sesión de admin vía cookie (para que /panel y /cuentas puedan
+// verificar el acceso ANTES de mandar cualquier HTML al navegador,
+// en vez de mostrar el diseño completo y luego pedir la clave con
+// un prompt() que se puede cancelar dejando el diseño visible).
+// No usamos cookie-parser para no agregar una dependencia nueva:
+// se parsea el header Cookie a mano.
+// ---------------------------------------------------------------
+
+const COOKIE_NOMBRE   = "admin_session";
+const COOKIE_MAX_AGE  = 60 * 60 * 24 * 30; // 30 días, en segundos
+
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  if (!header) return {};
+  return header.split(";").reduce((acc, parte) => {
+    const idx = parte.indexOf("=");
+    if (idx === -1) return acc;
+    const k = parte.slice(0, idx).trim();
+    const v = decodeURIComponent(parte.slice(idx + 1).trim());
+    acc[k] = v;
+    return acc;
+  }, {});
+}
+
+function ponerCookieSesion(res, req) {
+  const seguro = req.protocol === "https" ? " Secure;" : "";
+  res.setHeader("Set-Cookie",
+    `${COOKIE_NOMBRE}=${encodeURIComponent(ADMIN_API_KEY)}; HttpOnly;${seguro} SameSite=Lax; Max-Age=${COOKIE_MAX_AGE}; Path=/`
+  );
+}
+
+function borrarCookieSesion(res) {
+  res.setHeader("Set-Cookie", `${COOKIE_NOMBRE}=; HttpOnly; SameSite=Lax; Max-Age=0; Path=/`);
+}
+
 function requireAdminKey(req, res, next) {
-  const key = req.get("x-admin-key") || req.query.key;
+  const key = req.get("x-admin-key") || req.query.key || parseCookies(req)[COOKIE_NOMBRE];
   if (!ADMIN_API_KEY || key !== ADMIN_API_KEY) {
     return res.status(401).json({ error: "No autorizado" });
+  }
+  next();
+}
+
+// Protege páginas completas (no endpoints JSON): si no hay sesión válida,
+// redirige a /login ANTES de renderizar nada del diseño del panel.
+function requireAdminSesion(req, res, next) {
+  const key = parseCookies(req)[COOKIE_NOMBRE];
+  if (!ADMIN_API_KEY || key !== ADMIN_API_KEY) {
+    return res.redirect(`/login?redirect=${encodeURIComponent(req.originalUrl)}`);
   }
   next();
 }
@@ -493,7 +539,7 @@ function sidebarHTML(activo) {
     ${link("/cuentas", "CTA", "Cuentas", "cuentas")}
     ${link("/panel", "PNL", "Panel", "panel")}
   </nav>
-  <div class="sidebar-footer">Robertoperez.coach<br>v1.0</div>
+  <div class="sidebar-footer">Robertoperez.coach<br>v1.0<br><a href="/logout" style="color:var(--muted-dim);">Cerrar sesión</a></div>
 </div>`;
 }
 
@@ -1209,7 +1255,119 @@ app.post("/config", requireAdminKey, async (req, res) => {
 // /cuentas — conectar cuentas de Instagram y ver estado del token
 // ---------------------------------------------------------------
 
-app.get("/cuentas", (req, res) => {
+// ---------------------------------------------------------------
+// /login — página real de acceso (reemplaza el prompt() del navegador).
+// Se manda ANTES que cualquier ruta protegida por requireAdminSesion,
+// así que un "Cancelar" aquí simplemente te deja en esta misma página,
+// nunca llega a mostrarse el diseño del panel sin autenticar.
+// ---------------------------------------------------------------
+
+app.get("/login", (req, res) => {
+  const yaAutenticado = parseCookies(req)[COOKIE_NOMBRE] === ADMIN_API_KEY && ADMIN_API_KEY;
+  if (yaAutenticado) {
+    return res.redirect(req.query.redirect || "/panel");
+  }
+
+  res.type("html").send(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iniciar sesión — Instagram AI Responder</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+${FUENTES_HTML}
+${estilosBase()}
+<style>
+  body{ display:flex; align-items:center; justify-content:center; min-height:100vh; padding:24px; }
+  .login-card{
+    width:100%; max-width:380px; background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius-lg); padding:34px 30px;
+  }
+  .login-brand{ display:flex; align-items:center; gap:10px; margin-bottom:26px; }
+  .login-dot{ width:10px; height:10px; border-radius:50%; background:var(--green); flex-shrink:0; }
+  .login-brand-name{ font-family:var(--display); font-weight:600; font-size:16.5px; }
+  .login-card h1{ font-family:var(--display); font-weight:700; font-size:24px; margin:0 0 8px; }
+  .login-card p{ color:var(--muted); font-size:14px; margin:0 0 22px; line-height:1.55; }
+  .login-card input{
+    width:100%; background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:10px; padding:13px 14px; font-family:var(--body); font-size:15px; outline:none; margin-bottom:14px;
+  }
+  .login-card input:focus{ border-color:var(--green); }
+  .login-btn{
+    width:100%; background:var(--green); color:#0A0D13; font-family:var(--display);
+    font-weight:600; font-size:15.5px; border:none; border-radius:10px; padding:13px; cursor:pointer;
+  }
+  .login-btn:hover{ filter:brightness(1.08); }
+  .login-btn:disabled{ opacity:.6; cursor:default; }
+  .login-error{ color:var(--red); font-size:13.5px; margin-top:12px; display:none; }
+</style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="login-brand">
+      <div class="login-dot"></div>
+      <div class="login-brand-name">IG AI Responder</div>
+    </div>
+    <h1>Iniciar sesión</h1>
+    <p>Ingresa tu clave de administrador para entrar al panel.</p>
+    <form id="loginForm">
+      <input type="password" id="clave" placeholder="ADMIN_API_KEY" autofocus>
+      <button type="submit" class="login-btn" id="btnLogin">Entrar</button>
+      <p class="login-error" id="loginError">Clave incorrecta. Intenta de nuevo.</p>
+    </form>
+  </div>
+<script>
+  const params = new URLSearchParams(window.location.search);
+  const redirectTo = params.get("redirect") || "/panel";
+
+  document.getElementById("loginForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const clave = document.getElementById("clave").value;
+    const btn = document.getElementById("btnLogin");
+    const err = document.getElementById("loginError");
+    err.style.display = "none";
+    btn.disabled = true; btn.textContent = "Entrando…";
+
+    try {
+      const res = await fetch("/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clave })
+      });
+      if (res.ok) {
+        window.location.href = redirectTo;
+      } else {
+        err.style.display = "block";
+        btn.disabled = false; btn.textContent = "Entrar";
+      }
+    } catch {
+      err.textContent = "Error de conexión. Intenta de nuevo.";
+      err.style.display = "block";
+      btn.disabled = false; btn.textContent = "Entrar";
+    }
+  });
+</script>
+</body>
+</html>
+  `);
+});
+
+app.post("/login", (req, res) => {
+  const { clave } = req.body || {};
+  if (!ADMIN_API_KEY || clave !== ADMIN_API_KEY) {
+    return res.status(401).json({ error: "Clave incorrecta" });
+  }
+  ponerCookieSesion(res, req);
+  res.json({ ok: true });
+});
+
+app.get("/logout", (req, res) => {
+  borrarCookieSesion(res);
+  res.redirect("/login");
+});
+
+app.get("/cuentas", requireAdminSesion, (req, res) => {
   res.type("html").send(`
 <!DOCTYPE html>
 <html lang="es">
@@ -1267,29 +1425,21 @@ ${estilosBase()}
   </div>
 
 <script>
-  function getKey(){
-    let key = localStorage.getItem("admin_key");
-    if(!key){ key = prompt("Ingresa tu ADMIN_API_KEY:"); if(key) localStorage.setItem("admin_key", key); }
-    return key;
-  }
   async function llamarGET(endpoint){
-    const key = getKey(); if(!key) return null;
-    const res = await fetch(endpoint + "?key=" + encodeURIComponent(key));
-    if(res.status === 401){ localStorage.removeItem("admin_key"); alert("Clave incorrecta."); return null; }
+    const res = await fetch(endpoint);
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
     return res.json();
   }
   async function llamarPOST(endpoint, body){
-    const key = getKey(); if(!key) return null;
-    const res = await fetch(endpoint + "?key=" + encodeURIComponent(key), {
+    const res = await fetch(endpoint, {
       method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body || {})
     });
-    if(res.status === 401){ localStorage.removeItem("admin_key"); alert("Clave incorrecta."); return null; }
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
     return res.json();
   }
 
   document.getElementById("btnConectarInstagram").addEventListener("click", () => {
-    const key = getKey(); if(!key) return;
-    window.location.href = "/oauth/instagram/start?key=" + encodeURIComponent(key);
+    window.location.href = "/oauth/instagram/start";
   });
 
   function formatearFecha(iso){
@@ -1343,7 +1493,7 @@ ${estilosBase()}
   `);
 });
 
-app.get("/panel", (req, res) => {
+app.get("/panel", requireAdminSesion, (req, res) => {
   res.type("html").send(`
 <!DOCTYPE html>
 <html lang="es">
@@ -1474,23 +1624,17 @@ ${estilosBase()}
   </div>
 
 <script>
-  function getKey(){
-    let key = localStorage.getItem("admin_key");
-    if(!key){ key = prompt("Ingresa tu ADMIN_API_KEY:"); if(key) localStorage.setItem("admin_key", key); }
-    return key;
-  }
+<script>
   async function llamarGET(endpoint){
-    const key = getKey(); if(!key) return null;
-    const res = await fetch(endpoint + "?key=" + encodeURIComponent(key));
-    if(res.status === 401){ localStorage.removeItem("admin_key"); alert("Clave incorrecta."); return null; }
+    const res = await fetch(endpoint);
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
     return res.json();
   }
   async function llamarPOST(endpoint, body){
-    const key = getKey(); if(!key) return null;
-    const res = await fetch(endpoint + "?key=" + encodeURIComponent(key), {
+    const res = await fetch(endpoint, {
       method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body || {})
     });
-    if(res.status === 401){ localStorage.removeItem("admin_key"); alert("Clave incorrecta."); return null; }
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
     return res.json();
   }
 
