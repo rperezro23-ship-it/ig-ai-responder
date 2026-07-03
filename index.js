@@ -732,7 +732,7 @@ app.post("/webhook", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.json({ status: "ok", message: "Instagram AI Responder activo 🤖" });
+  res.redirect("/login");
 });
 
 // Ícono de la app (aparece en la pestaña del navegador, ej. en /panel)
