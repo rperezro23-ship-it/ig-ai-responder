@@ -11,8 +11,12 @@ const app = express();
 // que mandamos a Meta en el flujo de OAuth (Meta exige que coincida exacto).
 app.set("trust proxy", true);
 
-// Necesitamos el body "crudo" para poder verificar la firma que manda Meta
+// Necesitamos el body "crudo" para poder verificar la firma que manda Meta.
+// El límite se sube a 25mb porque los audios pregrabados se suben en base64
+// dentro del body JSON (ver /audios/subir) y con el límite por defecto (100kb)
+// cualquier audio real lo rechazaría.
 app.use(express.json({
+  limit: "25mb",
   verify: (req, res, buf) => { req.rawBody = buf; }
 }));
 
@@ -679,6 +683,31 @@ async function enviarMensajeInstagram(senderId, texto) {
   );
 }
 
+// Manda un audio pregrabado como adjunto ("attachment" tipo audio). Instagram
+// lo entrega en el chat como un mensaje de audio reproducible normal, igual
+// que cualquier nota de voz — la diferencia es que el archivo ya existe (no
+// se graba en el momento), pero para quien lo recibe se ve/escucha igual.
+async function enviarAudioInstagram(senderId, urlAudio) {
+  const cuenta = await obtenerCuentaActiva();
+  if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
+
+  await axios.post(
+    `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
+    {
+      recipient: { id: senderId },
+      message: {
+        attachment: {
+          type: "audio",
+          payload: { url: urlAudio }
+        }
+      }
+    },
+    {
+      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
+    }
+  );
+}
+
 // ---------------------------------------------------------------
 // Calificación automática de leads: además de responder, la IA revisa
 // si la conversación ya cumple con los criterios que definiste en
@@ -761,23 +790,58 @@ async function procesarBuffer(senderId) {
       temperature: 0.7
     });
 
-    const respuesta = completion.choices[0]?.message?.content?.trim();
-    if (respuesta) {
-      console.log(`🤖 Respuesta IA: "${respuesta}"`);
+    const respuestaCruda = completion.choices[0]?.message?.content?.trim();
+    if (respuestaCruda) {
+      console.log(`🤖 Respuesta IA (cruda): "${respuestaCruda}"`);
 
       await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
-      await agregarAlHistorialDB(senderId, "assistant", respuesta);
 
-      await enviarMensajeInstagram(senderId, respuesta);
+      // Detección del marcador de audio pregrabado: si el prompt decide que
+      // en esta etapa hay que mandar un audio (ej. "[[audio:audio1]]"), en
+      // vez de mandarlo como texto se busca ese audio en la configuración
+      // (subido desde /panel) y se manda como un mensaje de audio real de
+      // Instagram. Puede venir solo el marcador, o texto + marcador (en ese
+      // caso se manda primero el texto y luego el audio, como dos mensajes
+      // separados, que es como se ve más natural).
+      const marcadorAudio = /\[\[audio:([a-zA-Z0-9_-]+)\]\]/i;
+      const coincidencia = respuestaCruda.match(marcadorAudio);
+      let textoAEnviar = respuestaCruda;
+      let audioAEnviar = null;
+
+      if (coincidencia) {
+        const clave = coincidencia[1].toLowerCase();
+        textoAEnviar = respuestaCruda.replace(marcadorAudio, "").trim();
+        const audioConfigurado = configActual.audios?.[clave];
+        if (audioConfigurado?.url) {
+          audioAEnviar = { clave, ...audioConfigurado };
+        } else {
+          console.warn(`⚠️ El prompt pidió el audio "${clave}" pero no está configurado en /panel (sección Audios pregrabados). Se ignora el marcador.`);
+        }
+      }
+
+      if (textoAEnviar) {
+        await agregarAlHistorialDB(senderId, "assistant", textoAEnviar);
+        await enviarMensajeInstagram(senderId, textoAEnviar);
+      }
+
+      if (audioAEnviar) {
+        console.log(`🎤 Enviando audio pregrabado "${audioAEnviar.clave}" a ${senderId}`);
+        await agregarAlHistorialDB(senderId, "assistant", `🎤 [Audio enviado: ${audioAEnviar.clave}]`);
+        await enviarAudioInstagram(senderId, audioAEnviar.url);
+      }
+
+      if (!textoAEnviar && !audioAEnviar) {
+        console.warn(`⚠️ La respuesta a ${senderId} quedó vacía después de procesar el marcador de audio (probablemente el audio referenciado no existe). No se envió nada.`);
+      }
 
       console.log(`✅ Respondido a ${senderId} (una sola respuesta por ${mensajesAResponder.length} línea(s))`);
 
       // Detección del enlace de calificación (calendario/formulario): el propio
       // prompt es el que decide mandarlo cuando el lead ya cumplió las etapas.
-      // Aquí solo lo detectamos dentro de la respuesta que se acaba de enviar,
+      // Aquí solo lo detectamos dentro del texto que se acaba de enviar,
       // le ponemos la etiqueta "enlace_enviado" y con eso, al terminar el buffer,
       // se programará el seguimiento ESPECIAL en vez del seguimiento normal.
-      if (configActual.enlace_calificacion?.trim() && respuesta.includes(configActual.enlace_calificacion.trim())) {
+      if (configActual.enlace_calificacion?.trim() && textoAEnviar.includes(configActual.enlace_calificacion.trim())) {
         console.log(`🔗 Enlace de calificación detectado en la respuesta a ${senderId}. Se marca y se activará el seguimiento especial.`);
         await guardarConversacion(senderId, {
           enlace_enviado: true,
@@ -1328,7 +1392,8 @@ let configActual = {
   criterios_calificacion: "",
   enlace_calificacion: "",
   seguimientos: SEGUIMIENTOS_CONFIG,
-  seguimientos_enlace: SEGUIMIENTOS_ENLACE_DEFAULT
+  seguimientos_enlace: SEGUIMIENTOS_ENLACE_DEFAULT,
+  audios: {} // { claveAudio: { url, nombre_original, ruta_archivo, subido_en } }
 };
 
 // Cliente de OpenAI: se reconstruye cada vez que cambia configActual.openai_api_key
@@ -1519,6 +1584,92 @@ app.post("/config", requireAdminKey, async (req, res) => {
 
     const guardado = await guardarConfigDB(nuevaConfig);
     res.json({ mensaje: "✅ Configuración guardada", config: configParaFrontend(guardado) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------
+// Audios pregrabados: se suben en base64 desde /panel, se guardan en
+// Supabase Storage (bucket "audios", debe existir y ser público — ver
+// migracion_supabase.sql) y quedan disponibles para que el prompt los
+// mande con el marcador [[audio:clave]] en vez de texto.
+// ---------------------------------------------------------------
+
+app.post("/audios/subir", requireAdminKey, async (req, res) => {
+  try {
+    const { nombre, base64, tipo } = req.body || {};
+    if (!nombre || !nombre.trim()) return res.status(400).json({ error: "Falta el nombre del audio." });
+    if (!base64) return res.status(400).json({ error: "Falta el archivo de audio." });
+
+    // La clave es el nombre normalizado (sin espacios/acentos/mayúsculas):
+    // es lo que se usa en el prompt como [[audio:clave]].
+    const clave = nombre.trim().toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // quita acentos
+      .replace(/[^a-z0-9_-]/g, "_");
+
+    if (!clave) return res.status(400).json({ error: "El nombre no dejó ningún caracter válido, prueba con otro." });
+
+    const extension = (tipo && tipo.includes("/")) ? tipo.split("/")[1].split(";")[0] : "mp3";
+    const rutaArchivo = `${clave}_${Date.now()}.${extension}`;
+    const buffer = Buffer.from(base64, "base64");
+
+    if (buffer.length > 15 * 1024 * 1024) {
+      return res.status(400).json({ error: "El audio pesa más de 15MB, prueba con un archivo más liviano." });
+    }
+
+    const { error: errorSubida } = await supabase.storage
+      .from("audios")
+      .upload(rutaArchivo, buffer, { contentType: tipo || "audio/mpeg", upsert: true });
+
+    if (errorSubida) {
+      console.error("❌ Error subiendo audio a Supabase Storage:", errorSubida.message);
+      return res.status(500).json({ error: "No se pudo subir el audio: " + errorSubida.message + ". ¿Existe el bucket 'audios' y es público? Revisa migracion_supabase.sql." });
+    }
+
+    const { data: urlData } = supabase.storage.from("audios").getPublicUrl(rutaArchivo);
+
+    // Si ya existía un audio con esa misma clave, se borra el archivo viejo
+    // del storage para no dejar basura acumulada.
+    const audioAnterior = configActual.audios?.[clave];
+    if (audioAnterior?.ruta_archivo) {
+      await supabase.storage.from("audios").remove([audioAnterior.ruta_archivo]);
+    }
+
+    const nuevosAudios = { ...(configActual.audios || {}) };
+    nuevosAudios[clave] = {
+      url: urlData.publicUrl,
+      nombre_original: nombre.trim(),
+      ruta_archivo: rutaArchivo,
+      subido_en: new Date().toISOString()
+    };
+
+    await guardarConfigDB({ audios: nuevosAudios });
+
+    res.json({ mensaje: "✅ Audio subido", clave, audio: nuevosAudios[clave] });
+  } catch (err) {
+    console.error("❌ Error inesperado subiendo audio:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/audios/eliminar", requireAdminKey, async (req, res) => {
+  try {
+    const { clave } = req.body || {};
+    if (!clave) return res.status(400).json({ error: "Falta la clave del audio a eliminar." });
+
+    const audios = { ...(configActual.audios || {}) };
+    const audio = audios[clave];
+
+    if (audio?.ruta_archivo) {
+      const { error: errorBorrado } = await supabase.storage.from("audios").remove([audio.ruta_archivo]);
+      if (errorBorrado) console.error("❌ Error borrando archivo de audio en Storage:", errorBorrado.message);
+    }
+
+    delete audios[clave];
+    await guardarConfigDB({ audios });
+
+    res.json({ mensaje: "🗑️ Audio eliminado" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1826,6 +1977,15 @@ ${estilosBase()}
   }
   .btn-ojo:hover{ color:var(--text); border-color:var(--green); }
   .key-actual{ font-family:var(--mono); font-size:12.5px; color:var(--muted); margin:10px 0 0; }
+  .audio-item{
+    display:flex; align-items:center; gap:12px; background:var(--surface-3); border:1px solid var(--border);
+    border-radius:11px; padding:12px 14px; margin-bottom:10px; flex-wrap:wrap;
+  }
+  .audio-item .audio-info{ flex:1; min-width:160px; }
+  .audio-item .audio-clave{ font-family:var(--mono); font-size:13px; color:var(--green); font-weight:600; }
+  .audio-item .audio-nombre{ font-size:12.5px; color:var(--muted); margin-top:2px; }
+  .audio-item audio{ height:34px; max-width:220px; }
+  .audio-item .quitar{ flex-shrink:0; }
   .card.card-destacada{ border-color:rgba(49,217,124,.35); }
   .enlace-tag{
     display:inline-block; font-family:var(--mono); font-size:11.5px; color:#3FC7E8;
@@ -1935,6 +2095,26 @@ ${estilosBase()}
           <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de calificación (detectado arriba). Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. Útil para algo como "¿pudiste agendar tu espacio?".</p>
           <div id="pasosEnlace"></div>
           <button class="add-paso" id="addPasoEnlace" type="button">+ Agregar paso de seguimiento al enlace</button>
+        </div>
+
+        <div class="card">
+          <h2>Audios pregrabados</h2>
+          <p class="hint">Sube audios y ponles un nombre corto (sin espacios). En tu prompt, cuando quieras que el bot mande ese audio en vez de texto, escribe el marcador <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:nombre]]</code> — por ejemplo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:peso]]</code>. Le llega al cliente como un mensaje de audio normal de Instagram. Si el prompt manda texto además del marcador, primero se envía el texto y luego el audio, como dos mensajes.</p>
+
+          <div id="listaAudios" style="margin-bottom:16px;"></div>
+
+          <div class="row2" style="align-items:flex-end;">
+            <div>
+              <label for="audioNombre">Nombre (clave para el prompt)</label>
+              <input type="text" id="audioNombre" placeholder="ej: peso, bienvenida, precios">
+            </div>
+            <div>
+              <label for="audioArchivo">Archivo de audio</label>
+              <input type="file" id="audioArchivo" accept="audio/*">
+            </div>
+          </div>
+          <button class="add-paso" id="btnSubirAudio" type="button" style="margin-top:12px;">⬆ Subir audio</button>
+          <p class="hint" id="audioSubidaMsg" style="margin:10px 0 0;"></p>
         </div>
       </div>
     </div>
@@ -2078,8 +2258,99 @@ ${estilosBase()}
     renderPasos();
     pasosEnlace = Array.isArray(cfg.seguimientos_enlace) ? JSON.parse(JSON.stringify(cfg.seguimientos_enlace)) : [];
     renderPasosEnlace();
+    renderAudios(cfg.audios || {});
     document.getElementById("btnGuardar").disabled = false;
   }
+
+  // --- Audios pregrabados: subir, listar, borrar ---
+  function renderAudios(audios){
+    const cont = document.getElementById("listaAudios");
+    const claves = Object.keys(audios || {});
+    if(claves.length === 0){
+      cont.innerHTML = '<p class="hint" style="margin:0 0 4px;">Todavía no has subido ningún audio.</p>';
+      return;
+    }
+    cont.innerHTML = claves.map(clave => {
+      const a = audios[clave];
+      return \`
+        <div class="audio-item" data-clave="\${clave}">
+          <div class="audio-info">
+            <div class="audio-clave">[[audio:\${clave}]]</div>
+            <div class="audio-nombre">\${(a.nombre_original || clave).replace(/</g,"&lt;")}</div>
+          </div>
+          <audio controls src="\${a.url}"></audio>
+          <button type="button" class="quitar btn-audio-quitar" data-clave="\${clave}">quitar</button>
+        </div>
+      \`;
+    }).join("");
+
+    cont.querySelectorAll(".btn-audio-quitar").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const clave = btn.dataset.clave;
+        if(!confirm('¿Eliminar el audio "' + clave + '"? Ya no se podrá usar en el prompt.')) return;
+        btn.disabled = true; btn.textContent = "eliminando…";
+        const data = await llamarPOST("/audios/eliminar", { clave });
+        if(data && !data.error){
+          const cfgActualizado = await llamarGET("/config");
+          if(cfgActualizado) renderAudios(cfgActualizado.audios || {});
+        } else {
+          alert("No se pudo eliminar: " + (data?.error || "error desconocido"));
+          btn.disabled = false; btn.textContent = "quitar";
+        }
+      });
+    });
+  }
+
+  function leerArchivoComoBase64(archivo){
+    return new Promise((resolve, reject) => {
+      const lector = new FileReader();
+      lector.onload = () => {
+        // El resultado viene como "data:audio/mpeg;base64,AAAA..." — solo
+        // nos interesa la parte después de la coma.
+        const resultado = lector.result;
+        const base64 = resultado.substring(resultado.indexOf(",") + 1);
+        resolve(base64);
+      };
+      lector.onerror = () => reject(new Error("No se pudo leer el archivo."));
+      lector.readAsDataURL(archivo);
+    });
+  }
+
+  document.getElementById("btnSubirAudio").addEventListener("click", async () => {
+    const nombre = document.getElementById("audioNombre").value.trim();
+    const inputArchivo = document.getElementById("audioArchivo");
+    const archivo = inputArchivo.files?.[0];
+    const msg = document.getElementById("audioSubidaMsg");
+    const btn = document.getElementById("btnSubirAudio");
+
+    msg.style.color = "";
+    if(!nombre){ msg.style.color = "var(--red)"; msg.textContent = "Ponle un nombre al audio primero."; return; }
+    if(!archivo){ msg.style.color = "var(--red)"; msg.textContent = "Selecciona un archivo de audio primero."; return; }
+
+    btn.disabled = true;
+    msg.textContent = "Subiendo audio…";
+
+    try {
+      const base64 = await leerArchivoComoBase64(archivo);
+      const data = await llamarPOST("/audios/subir", { nombre, base64, tipo: archivo.type });
+      if(data && !data.error){
+        msg.style.color = "var(--green)";
+        msg.textContent = "✓ Audio \\"" + data.clave + "\\" subido correctamente. Úsalo en el prompt como [[audio:" + data.clave + "]]";
+        document.getElementById("audioNombre").value = "";
+        inputArchivo.value = "";
+        const cfgActualizado = await llamarGET("/config");
+        if(cfgActualizado) renderAudios(cfgActualizado.audios || {});
+      } else {
+        msg.style.color = "var(--red)";
+        msg.textContent = "❌ " + (data?.error || "No se pudo subir el audio.");
+      }
+    } catch (err) {
+      msg.style.color = "var(--red)";
+      msg.textContent = "❌ Error leyendo o subiendo el archivo: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
 
   function pintarEstadoClave(cfg){
     const estadoKey = document.getElementById("keyActual");
