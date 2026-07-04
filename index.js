@@ -2317,9 +2317,8 @@ ${estilosBase()}
           <div class="chat-tab tab-enlace" id="tabEnlace" data-filtro="enlace">🔗 Enlace enviado <span class="count" id="countEnlace"></span></div>
           <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff">Handoff (+24h) <span class="count" id="countHandoff"></span></div>
         </div>
-        <div class="chat-export">
-          <a id="btnExportarCSV" href="/exportar/handoff.csv" class="btn-exportar">⬇ Exportar handoff <span id="exportCount">(0)</span></a>
-          <a id="btnExportarCalificados" href="/exportar/calificados.csv" class="btn-exportar" style="margin-top:8px; border-color:rgba(49,217,124,.3); color:var(--green);">⬇ Exportar calificados <span id="exportCountCalifica">(0)</span></a>
+        <div class="chat-export" id="chatExportWrap" style="display:none;">
+          <a id="btnExportar" href="#" class="btn-exportar">⬇ Exportar</a>
         </div>
         <div class="chat-list" id="listaChats"><p class="vacio-lista">Cargando…</p></div>
       </div>
@@ -2398,8 +2397,30 @@ ${estilosBase()}
     document.getElementById("countHandoff").textContent = totalHandoff;
     document.getElementById("countCalifica").textContent = totalCalifica;
     document.getElementById("countEnlace").textContent = totalEnlace;
-    document.getElementById("exportCount").textContent = "(" + totalHandoff + ")";
-    document.getElementById("exportCountCalifica").textContent = "(" + totalCalifica + ")";
+    actualizarBotonExportar({ totalHandoff, totalCalifica, totalEnlace });
+  }
+
+  // Un solo botón de exportar que cambia según la pestaña seleccionada.
+  // En "Todas" se oculta porque esa vista no se exporta.
+  function actualizarBotonExportar({ totalHandoff, totalCalifica, totalEnlace }){
+    const wrap = document.getElementById("chatExportWrap");
+    const btn = document.getElementById("btnExportar");
+
+    const config = {
+      handoff:  { href: "/exportar/handoff.csv",     texto: "⬇ Exportar handoff",           total: totalHandoff,  estilo: "" },
+      califica: { href: "/exportar/calificados.csv", texto: "⬇ Exportar calificados",        total: totalCalifica, estilo: "border-color:rgba(49,217,124,.3); color:var(--green);" },
+      enlace:   { href: "/exportar/enlace.csv",       texto: "⬇ Exportar enlaces enviados",  total: totalEnlace,   estilo: "border-color:rgba(63,199,232,.35); color:#3FC7E8;" }
+    };
+
+    const cfg = config[filtroActual];
+    if(!cfg){
+      wrap.style.display = "none";
+      return;
+    }
+    wrap.style.display = "block";
+    btn.setAttribute("href", cfg.href);
+    btn.setAttribute("style", cfg.estilo);
+    btn.textContent = cfg.texto + " (" + cfg.total + ")";
   }
 
   function conversacionesFiltradas(){
@@ -2730,6 +2751,59 @@ app.get("/exportar/calificados.csv", requireAdminKey, async (req, res) => {
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="calificados_${fechaArchivo}.csv"`);
+    res.send(csv);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Exporta a CSV los leads a los que ya se les mandó el enlace de calificación
+// (calendario/formulario), detectado automáticamente en las respuestas del bot.
+app.get("/exportar/enlace.csv", requireAdminKey, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("conversaciones")
+      .select("sender_id, historial, ultimo_mensaje_usuario, enlace_enviado_en, califica, razon_calificacion")
+      .eq("enlace_enviado", true)
+      .order("enlace_enviado_en", { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    const filas = await Promise.all((data || []).map(async (c) => {
+      const perfil = await obtenerPerfilInstagram(c.sender_id);
+      const historial = Array.isArray(c.historial) ? c.historial : [];
+      const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
+      const enVentana24h = c.ultimo_mensaje_usuario
+        ? (Date.now() - new Date(c.ultimo_mensaje_usuario).getTime()) < VENTANA_24H_MS
+        : false;
+
+      return {
+        username: perfil?.username ? "@" + perfil.username : "",
+        sender_id: c.sender_id,
+        enlace_enviado_en: c.enlace_enviado_en || "",
+        califica: c.califica ? "sí" : "no",
+        razon_calificacion: c.razon_calificacion || "",
+        en_ventana_24h: enVentana24h ? "sí" : "no (handoff)",
+        ultimo_mensaje: ultimo ? ultimo.content : ""
+      };
+    }));
+
+    const encabezados = ["username", "sender_id", "enlace_enviado_en", "califica", "razon_calificacion", "en_ventana_24h", "ultimo_mensaje"];
+    const escaparCSV = (valor) => {
+      const txt = String(valor ?? "");
+      return /[",\n]/.test(txt) ? '"' + txt.replace(/"/g, '""') + '"' : txt;
+    };
+
+    const lineas = [
+      encabezados.join(","),
+      ...filas.map((f) => encabezados.map((h) => escaparCSV(f[h])).join(","))
+    ];
+
+    const csv = "\uFEFF" + lineas.join("\r\n");
+    const fechaArchivo = new Date().toISOString().slice(0, 10);
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="enlace_enviado_${fechaArchivo}.csv"`);
     res.send(csv);
   } catch (err) {
     res.status(500).json({ error: err.message });
