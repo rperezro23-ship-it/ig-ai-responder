@@ -175,11 +175,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_seguimiento_pendiente: false };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_seguimiento_pendiente: false };
   }
 
   return data;
@@ -205,15 +205,20 @@ async function registrarMensajeUsuario(senderId) {
   await guardarConversacion(senderId, { ultimo_mensaje_usuario: new Date().toISOString() });
 }
 
-// Si el lead ya había recibido el enlace de calificación (calendario/formulario)
-// y ahora vuelve a escribir, ya no tiene sentido seguir con el "seguimiento
-// especial" de ese enlace: se apaga la etiqueta para que, si vuelve a quedarse
-// callado más adelante, reciba de nuevo los seguimientos normales (a menos que
-// el bot le reenvíe el enlace, en cuyo caso se vuelve a activar).
+// La etiqueta "enlace_enviado" es PERMANENTE — una vez que se le manda el
+// enlace de calificación a un lead, queda marcado así para siempre (para
+// poder filtrarlo/exportarlo en /chats, sin importar qué pase después).
+// Lo que sí se apaga cuando el lead vuelve a escribir es
+// "enlace_seguimiento_pendiente": ese es el que decide si el PRÓXIMO
+// silencio dispara el seguimiento especial (enlace) o el normal. Así, si
+// el lead responde y luego se vuelve a quedar callado, recibe el
+// seguimiento normal — pero conserva la etiqueta de que en algún momento
+// se le mandó el enlace (a menos que el bot se lo reenvíe, lo cual vuelve
+// a activar el seguimiento especial).
 async function reiniciarSeguimientoEnlaceSiAplica(senderId) {
   const conv = await obtenerConversacion(senderId);
-  if (conv.enlace_enviado) {
-    await guardarConversacion(senderId, { enlace_enviado: false, enlace_enviado_en: null });
+  if (conv.enlace_seguimiento_pendiente) {
+    await guardarConversacion(senderId, { enlace_seguimiento_pendiente: false });
   }
 }
 
@@ -242,7 +247,7 @@ async function programarSeguimientosDB(senderId) {
   const ultimoMsg = new Date(conv.ultimo_mensaje_usuario).getTime();
   const limiteVentana = ultimoMsg + VENTANA_24H_MS - COLCHON_SEGURIDAD_MS;
 
-  const esSeguimientoEnlace = Boolean(conv.enlace_enviado);
+  const esSeguimientoEnlace = Boolean(conv.enlace_seguimiento_pendiente);
   const pasos = esSeguimientoEnlace ? (configActual.seguimientos_enlace || []) : (configActual.seguimientos || []);
   const tipo = esSeguimientoEnlace ? "enlace" : "normal";
   const referencia = (esSeguimientoEnlace && conv.enlace_enviado_en)
@@ -326,8 +331,7 @@ async function procesarSeguimientosPendientesDB() {
 
     try {
       console.log(`🔔 Enviando seguimiento (${tipo}, paso ${pasoIndex}, ${pasoConfig.horas} h) a ${senderId}: "${mensaje}"`);
-      await enviarMensajeInstagram(senderId, mensaje);
-      await agregarAlHistorialDB(senderId, "assistant", mensaje);
+      await enviarContenidoConMarcadores(senderId, mensaje);
       await guardarConversacion(senderId, { rotacion });
       await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
       procesados++;
@@ -708,6 +712,85 @@ async function enviarAudioInstagram(senderId, urlAudio) {
   );
 }
 
+// Manda una imagen como adjunto ("attachment" tipo image). Se usa tanto para
+// fotos pregrabadas ([[foto:clave]] desde el prompt o los seguimientos) como
+// para fotos sueltas mandadas a mano desde /chats (ej. casos de éxito).
+async function enviarImagenInstagram(senderId, urlImagen) {
+  const cuenta = await obtenerCuentaActiva();
+  if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
+
+  await axios.post(
+    `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
+    {
+      recipient: { id: senderId },
+      message: {
+        attachment: {
+          type: "image",
+          payload: { url: urlImagen }
+        }
+      }
+    },
+    {
+      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
+    }
+  );
+}
+
+// Marcadores dentro de un texto que, en vez de mandarse como texto plano,
+// se resuelven a contenido multimedia pregrabado: [[audio:clave]] manda un
+// audio ya subido en /panel, [[foto:clave]] manda una foto ya subida. Sirve
+// tanto para la respuesta principal de la IA como para los mensajes de
+// seguimiento automático (normal o del enlace) — cualquier mensaje de texto
+// del sistema puede llevar estos marcadores.
+// Devuelve el texto que sí se mandó como texto (sin los marcadores), útil
+// para lógicas que necesitan revisar el contenido textual real enviado
+// (ej. la detección del enlace de calificación).
+const MARCADOR_MULTIMEDIA_REGEX = /\[\[(audio|foto):([a-zA-Z0-9_-]+)\]\]/gi;
+
+async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
+  const coincidencias = [...contenidoCrudo.matchAll(MARCADOR_MULTIMEDIA_REGEX)];
+  const textoLimpio = contenidoCrudo.replace(MARCADOR_MULTIMEDIA_REGEX, "").trim();
+
+  if (textoLimpio) {
+    await agregarAlHistorialDB(senderId, "assistant", textoLimpio);
+    await enviarMensajeInstagram(senderId, textoLimpio);
+  }
+
+  let algoSeMando = Boolean(textoLimpio);
+
+  for (const coincidencia of coincidencias) {
+    const tipo = coincidencia[1].toLowerCase();   // "audio" | "foto"
+    const clave = coincidencia[2].toLowerCase();
+    const almacen = tipo === "audio" ? configActual.audios : configActual.fotos;
+    const item = almacen?.[clave];
+
+    if (!item?.url) {
+      console.warn(`⚠️ Se pidió el ${tipo} "${clave}" pero no está configurado en /panel. Se ignora ese marcador.`);
+      continue;
+    }
+
+    if (tipo === "audio") {
+      console.log(`🎤 Enviando audio pregrabado "${clave}" a ${senderId}`);
+      await agregarAlHistorialDB(senderId, "assistant", `🎤 [Audio enviado: ${clave}]`);
+      await enviarAudioInstagram(senderId, item.url);
+    } else {
+      console.log(`📷 Enviando foto pregrabada "${clave}" a ${senderId}`);
+      await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${item.url}`);
+      await enviarImagenInstagram(senderId, item.url);
+    }
+    algoSeMando = true;
+  }
+
+  // Si había marcadores pero ninguno se pudo resolver (todos mal escritos o
+  // audios/fotos borrados) y no quedó texto, no se manda nada — ya se avisó
+  // por consola. Evita mandarle al cliente el marcador crudo tipo "[[audio:x]]".
+  if (!algoSeMando) {
+    console.warn(`⚠️ No se pudo mandar nada a ${senderId}: el mensaje solo tenía marcadores multimedia que no existen en /panel.`);
+  }
+
+  return textoLimpio;
+}
+
 // ---------------------------------------------------------------
 // Calificación automática de leads: además de responder, la IA revisa
 // si la conversación ya cumple con los criterios que definiste en
@@ -796,56 +879,28 @@ async function procesarBuffer(senderId) {
 
       await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
 
-      // Detección del marcador de audio pregrabado: si el prompt decide que
-      // en esta etapa hay que mandar un audio (ej. "[[audio:audio1]]"), en
-      // vez de mandarlo como texto se busca ese audio en la configuración
-      // (subido desde /panel) y se manda como un mensaje de audio real de
-      // Instagram. Puede venir solo el marcador, o texto + marcador (en ese
-      // caso se manda primero el texto y luego el audio, como dos mensajes
-      // separados, que es como se ve más natural).
-      const marcadorAudio = /\[\[audio:([a-zA-Z0-9_-]+)\]\]/i;
-      const coincidencia = respuestaCruda.match(marcadorAudio);
-      let textoAEnviar = respuestaCruda;
-      let audioAEnviar = null;
-
-      if (coincidencia) {
-        const clave = coincidencia[1].toLowerCase();
-        textoAEnviar = respuestaCruda.replace(marcadorAudio, "").trim();
-        const audioConfigurado = configActual.audios?.[clave];
-        if (audioConfigurado?.url) {
-          audioAEnviar = { clave, ...audioConfigurado };
-        } else {
-          console.warn(`⚠️ El prompt pidió el audio "${clave}" pero no está configurado en /panel (sección Audios pregrabados). Se ignora el marcador.`);
-        }
-      }
-
-      if (textoAEnviar) {
-        await agregarAlHistorialDB(senderId, "assistant", textoAEnviar);
-        await enviarMensajeInstagram(senderId, textoAEnviar);
-      }
-
-      if (audioAEnviar) {
-        console.log(`🎤 Enviando audio pregrabado "${audioAEnviar.clave}" a ${senderId}`);
-        await agregarAlHistorialDB(senderId, "assistant", `🎤 [Audio enviado: ${audioAEnviar.clave}]`);
-        await enviarAudioInstagram(senderId, audioAEnviar.url);
-      }
-
-      if (!textoAEnviar && !audioAEnviar) {
-        console.warn(`⚠️ La respuesta a ${senderId} quedó vacía después de procesar el marcador de audio (probablemente el audio referenciado no existe). No se envió nada.`);
-      }
+      // Si el prompt decide mandar un audio o foto pregrabada en vez de (o
+      // además de) texto — ej. "[[audio:peso]]" o "[[foto:antes_despues1]]" —
+      // este helper lo detecta, manda cada parte por su lado (texto primero,
+      // luego cada archivo) y devuelve el texto real que se mandó, para la
+      // detección del enlace de calificación más abajo.
+      const textoAEnviar = await enviarContenidoConMarcadores(senderId, respuestaCruda);
 
       console.log(`✅ Respondido a ${senderId} (una sola respuesta por ${mensajesAResponder.length} línea(s))`);
 
       // Detección del enlace de calificación (calendario/formulario): el propio
       // prompt es el que decide mandarlo cuando el lead ya cumplió las etapas.
-      // Aquí solo lo detectamos dentro del texto que se acaba de enviar,
-      // le ponemos la etiqueta "enlace_enviado" y con eso, al terminar el buffer,
-      // se programará el seguimiento ESPECIAL en vez del seguimiento normal.
+      // Aquí solo lo detectamos dentro del texto que se acaba de enviar.
+      // "enlace_enviado" es la etiqueta PERMANENTE (para filtrar/exportar en
+      // /chats, nunca se apaga). "enlace_seguimiento_pendiente" es la bandera
+      // que de verdad decide si el PRÓXIMO silencio dispara el seguimiento
+      // especial — esa sí se apaga en cuanto el lead vuelve a escribir.
       if (configActual.enlace_calificacion?.trim() && textoAEnviar.includes(configActual.enlace_calificacion.trim())) {
-        console.log(`🔗 Enlace de calificación detectado en la respuesta a ${senderId}. Se marca y se activará el seguimiento especial.`);
+        console.log(`🔗 Enlace de calificación detectado en la respuesta a ${senderId}. Se marca (permanente) y se activará el seguimiento especial.`);
         await guardarConversacion(senderId, {
           enlace_enviado: true,
-          enlace_enviado_en: new Date().toISOString()
+          enlace_enviado_en: new Date().toISOString(),
+          enlace_seguimiento_pendiente: true
         });
       }
 
@@ -1123,7 +1178,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, enlace_enviado, enlace_enviado_en")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, enlace_enviado, enlace_enviado_en, enlace_seguimiento_pendiente")
       .order("actualizado_en", { ascending: false })
       .limit(200);
 
@@ -1151,9 +1206,11 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         calificado_en: c.calificado_en || null,
         razon_calificacion: c.razon_calificacion || null,
         enlace_enviado: Boolean(c.enlace_enviado),
-        enlace_enviado_en: c.enlace_enviado_en || null
+        enlace_enviado_en: c.enlace_enviado_en || null,
+        enlace_seguimiento_pendiente: Boolean(c.enlace_seguimiento_pendiente)
       };
     }));
+
 
     res.json({ conversaciones: resumen });
   } catch (err) {
@@ -1184,6 +1241,70 @@ app.post("/chats/enviar", requireAdminKey, async (req, res) => {
     console.error(`❌ Error enviando mensaje manual a ${req.body?.senderId}:`, err.response?.data || err.message);
     const mensajeError = err.response?.data?.error?.message || err.message;
     res.status(500).json({ error: mensajeError });
+  }
+});
+
+// Envía una foto suelta desde /chats (ej. una foto de un caso de éxito que
+// quieres compartir en el momento con ese lead específico). Se sube al
+// bucket "fotos" bajo una subcarpeta "manual/" para no mezclarse con las
+// fotos pregrabadas con nombre que se usan desde /panel.
+app.post("/chats/enviar-foto", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId, base64, tipo } = req.body || {};
+    if (!senderId || !base64) {
+      return res.status(400).json({ error: "Falta el destinatario o la imagen." });
+    }
+
+    const extension = (tipo && tipo.includes("/")) ? tipo.split("/")[1].split(";")[0] : "jpg";
+    const rutaArchivo = `manual/${senderId}_${Date.now()}.${extension}`;
+    const buffer = Buffer.from(base64, "base64");
+
+    if (buffer.length > 15 * 1024 * 1024) {
+      return res.status(400).json({ error: "La imagen pesa más de 15MB, prueba con un archivo más liviano." });
+    }
+
+    const { error: errorSubida } = await supabase.storage
+      .from("fotos")
+      .upload(rutaArchivo, buffer, { contentType: tipo || "image/jpeg", upsert: true });
+
+    if (errorSubida) {
+      return res.status(500).json({ error: "No se pudo subir la imagen: " + errorSubida.message });
+    }
+
+    const { data: urlData } = supabase.storage.from("fotos").getPublicUrl(rutaArchivo);
+    const url = urlData.publicUrl;
+
+    await enviarImagenInstagram(senderId, url);
+    await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${url}`);
+    await cancelarSeguimientosPendientesDB(senderId);
+
+    res.json({ ok: true, url });
+  } catch (err) {
+    console.error(`❌ Error enviando foto manual a ${req.body?.senderId}:`, err.response?.data || err.message);
+    const mensajeError = err.response?.data?.error?.message || err.message;
+    res.status(500).json({ error: mensajeError });
+  }
+});
+
+// Borra por completo el historial y estado de una conversación (usado desde
+// el clic derecho en /chats). Útil para hacer pruebas y que la próxima vez
+// que esa persona escriba, el bot arranque desde cero como si fuera nueva.
+// También cancela cualquier seguimiento pendiente que le quedara programado.
+app.post("/chats/borrar", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId } = req.body || {};
+    if (!senderId) return res.status(400).json({ error: "Falta el senderId de la conversación a borrar." });
+
+    await supabase.from("seguimientos_programados").delete().eq("sender_id", senderId);
+    const { error } = await supabase.from("conversaciones").delete().eq("sender_id", senderId);
+    if (error) return res.status(500).json({ error: error.message });
+
+    perfilesCache.delete(senderId);
+
+    res.json({ ok: true, mensaje: "Conversación borrada. Si esta persona vuelve a escribir, el bot empezará desde cero." });
+  } catch (err) {
+    console.error(`❌ Error borrando conversación de ${req.body?.senderId}:`, err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -1393,7 +1514,8 @@ let configActual = {
   enlace_calificacion: "",
   seguimientos: SEGUIMIENTOS_CONFIG,
   seguimientos_enlace: SEGUIMIENTOS_ENLACE_DEFAULT,
-  audios: {} // { claveAudio: { url, nombre_original, ruta_archivo, subido_en } }
+  audios: {}, // { claveAudio: { url, nombre_original, ruta_archivo, subido_en } }
+  fotos: {}  // { claveFoto: { url, nombre_original, ruta_archivo, subido_en } }
 };
 
 // Cliente de OpenAI: se reconstruye cada vez que cambia configActual.openai_api_key
@@ -1670,6 +1792,87 @@ app.post("/audios/eliminar", requireAdminKey, async (req, res) => {
     await guardarConfigDB({ audios });
 
     res.json({ mensaje: "🗑️ Audio eliminado" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------
+// Fotos pregrabadas: mismo mecanismo que los audios, pero en el bucket
+// "fotos" de Supabase Storage. Se usan con el marcador [[foto:clave]]
+// tanto en el prompt como en los mensajes de seguimiento.
+// ---------------------------------------------------------------
+
+app.post("/fotos/subir", requireAdminKey, async (req, res) => {
+  try {
+    const { nombre, base64, tipo } = req.body || {};
+    if (!nombre || !nombre.trim()) return res.status(400).json({ error: "Falta el nombre de la foto." });
+    if (!base64) return res.status(400).json({ error: "Falta el archivo de imagen." });
+
+    const clave = nombre.trim().toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9_-]/g, "_");
+
+    if (!clave) return res.status(400).json({ error: "El nombre no dejó ningún caracter válido, prueba con otro." });
+
+    const extension = (tipo && tipo.includes("/")) ? tipo.split("/")[1].split(";")[0] : "jpg";
+    const rutaArchivo = `${clave}_${Date.now()}.${extension}`;
+    const buffer = Buffer.from(base64, "base64");
+
+    if (buffer.length > 15 * 1024 * 1024) {
+      return res.status(400).json({ error: "La imagen pesa más de 15MB, prueba con un archivo más liviano." });
+    }
+
+    const { error: errorSubida } = await supabase.storage
+      .from("fotos")
+      .upload(rutaArchivo, buffer, { contentType: tipo || "image/jpeg", upsert: true });
+
+    if (errorSubida) {
+      console.error("❌ Error subiendo foto a Supabase Storage:", errorSubida.message);
+      return res.status(500).json({ error: "No se pudo subir la foto: " + errorSubida.message + ". ¿Existe el bucket 'fotos' y es público? Revisa migracion_supabase.sql." });
+    }
+
+    const { data: urlData } = supabase.storage.from("fotos").getPublicUrl(rutaArchivo);
+
+    const fotoAnterior = configActual.fotos?.[clave];
+    if (fotoAnterior?.ruta_archivo) {
+      await supabase.storage.from("fotos").remove([fotoAnterior.ruta_archivo]);
+    }
+
+    const nuevasFotos = { ...(configActual.fotos || {}) };
+    nuevasFotos[clave] = {
+      url: urlData.publicUrl,
+      nombre_original: nombre.trim(),
+      ruta_archivo: rutaArchivo,
+      subido_en: new Date().toISOString()
+    };
+
+    await guardarConfigDB({ fotos: nuevasFotos });
+
+    res.json({ mensaje: "✅ Foto subida", clave, foto: nuevasFotos[clave] });
+  } catch (err) {
+    console.error("❌ Error inesperado subiendo foto:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/fotos/eliminar", requireAdminKey, async (req, res) => {
+  try {
+    const { clave } = req.body || {};
+    if (!clave) return res.status(400).json({ error: "Falta la clave de la foto a eliminar." });
+
+    const fotos = { ...(configActual.fotos || {}) };
+    const foto = fotos[clave];
+
+    if (foto?.ruta_archivo) {
+      const { error: errorBorrado } = await supabase.storage.from("fotos").remove([foto.ruta_archivo]);
+      if (errorBorrado) console.error("❌ Error borrando archivo de foto en Storage:", errorBorrado.message);
+    }
+
+    delete fotos[clave];
+    await guardarConfigDB({ fotos });
+
+    res.json({ mensaje: "🗑️ Foto eliminada" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2059,9 +2262,7 @@ ${estilosBase()}
           <label for="maxHistorial">Mensajes a recordar</label>
           <input type="number" id="maxHistorial" min="1">
         </div>
-      </div>
 
-      <div class="col">
         <div class="card">
           <h2>Calificación automática de leads</h2>
           <p class="hint">Define los criterios que debe cumplir un lead para calificar. Después de cada respuesta, la IA revisa la conversación y, en cuanto se cumplen TODOS, marca la conversación con la etiqueta ✅ Califica (puedes filtrarlos y exportarlos en Chats). El envío del enlace/formulario lo hace directamente tu prompt de arriba, no este bloque.</p>
@@ -2076,37 +2277,15 @@ ${estilosBase()}
         </div>
 
         <div class="card">
-          <h2>Enlace de calificación (calendario / formulario)</h2>
-          <p class="hint">Pega aquí el enlace exacto que tu prompt manda cuando un lead ya calificó (por ejemplo tu link de Calendly o de un formulario). El sistema NO lo envía — solo lo usa para detectar cuándo tu bot ya se lo mandó al cliente. En cuanto lo detecta en una respuesta, le pone la etiqueta 🔗 y activa un seguimiento especial distinto al normal (configurado abajo), en vez del seguimiento normal de silencio.</p>
-          <label for="enlaceCalificacion">Enlace a detectar</label>
-          <input type="text" id="enlaceCalificacion" placeholder="https://calendly.com/tu-usuario/...">
-          <span class="enlace-tag">Debe coincidir tal cual aparece en el mensaje que manda el bot</span>
-        </div>
+          <h2>Audios y fotos pregrabados</h2>
+          <p class="hint">Sube audios y fotos, y ponles un nombre corto (sin espacios). Úsalos en tu <b>prompt</b> o en los mensajes de <b>seguimientos</b> (a la derecha) con los marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:nombre]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:nombre]]</code> — por ejemplo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:antes_despues1]]</code>. Le llegan al cliente como un mensaje de audio o imagen normal de Instagram. Si el mensaje tiene texto además del marcador, primero se envía el texto y luego el archivo.</p>
 
-        <div class="card">
-          <h2>Seguimientos automáticos</h2>
-          <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación (ver seguimiento especial abajo).</p>
-          <div id="pasos"></div>
-          <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
-        </div>
-
-        <div class="card">
-          <h2>Seguimiento especial al enlace</h2>
-          <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de calificación (detectado arriba). Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. Útil para algo como "¿pudiste agendar tu espacio?".</p>
-          <div id="pasosEnlace"></div>
-          <button class="add-paso" id="addPasoEnlace" type="button">+ Agregar paso de seguimiento al enlace</button>
-        </div>
-
-        <div class="card">
-          <h2>Audios pregrabados</h2>
-          <p class="hint">Sube audios y ponles un nombre corto (sin espacios). En tu prompt, cuando quieras que el bot mande ese audio en vez de texto, escribe el marcador <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:nombre]]</code> — por ejemplo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:peso]]</code>. Le llega al cliente como un mensaje de audio normal de Instagram. Si el prompt manda texto además del marcador, primero se envía el texto y luego el audio, como dos mensajes.</p>
-
-          <div id="listaAudios" style="margin-bottom:16px;"></div>
-
+          <p style="font-family:var(--display); font-weight:600; font-size:14.5px; margin:18px 0 10px;">🎤 Audios</p>
+          <div id="listaAudios" style="margin-bottom:14px;"></div>
           <div class="row2" style="align-items:flex-end;">
             <div>
-              <label for="audioNombre">Nombre (clave para el prompt)</label>
-              <input type="text" id="audioNombre" placeholder="ej: peso, bienvenida, precios">
+              <label for="audioNombre">Nombre (clave)</label>
+              <input type="text" id="audioNombre" placeholder="ej: peso, bienvenida">
             </div>
             <div>
               <label for="audioArchivo">Archivo de audio</label>
@@ -2115,6 +2294,47 @@ ${estilosBase()}
           </div>
           <button class="add-paso" id="btnSubirAudio" type="button" style="margin-top:12px;">⬆ Subir audio</button>
           <p class="hint" id="audioSubidaMsg" style="margin:10px 0 0;"></p>
+
+          <div style="height:1px; background:var(--border); margin:24px 0;"></div>
+
+          <p style="font-family:var(--display); font-weight:600; font-size:14.5px; margin:0 0 10px;">🖼️ Fotos</p>
+          <div id="listaFotos" style="margin-bottom:14px;"></div>
+          <div class="row2" style="align-items:flex-end;">
+            <div>
+              <label for="fotoNombre">Nombre (clave)</label>
+              <input type="text" id="fotoNombre" placeholder="ej: antes_despues1, gimnasio">
+            </div>
+            <div>
+              <label for="fotoArchivo">Archivo de imagen</label>
+              <input type="file" id="fotoArchivo" accept="image/*">
+            </div>
+          </div>
+          <button class="add-paso" id="btnSubirFoto" type="button" style="margin-top:12px;">⬆ Subir foto</button>
+          <p class="hint" id="fotoSubidaMsg" style="margin:10px 0 0;"></p>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="card">
+          <h2>Enlace de calificación (calendario / formulario)</h2>
+          <p class="hint">Pega aquí el enlace exacto que tu prompt manda cuando un lead ya calificó (por ejemplo tu link de Calendly o de un formulario). El sistema NO lo envía — solo lo usa para detectar cuándo tu bot ya se lo mandó al cliente. En cuanto lo detecta en una respuesta, le pone la etiqueta 🔗 <b>para siempre</b> (no se quita aunque el lead vuelva a escribir) y activa el seguimiento especial de abajo en vez del seguimiento normal de silencio. Si el lead responde, el seguimiento especial se apaga (vuelve al normal), pero la etiqueta 🔗 se queda.</p>
+          <label for="enlaceCalificacion">Enlace a detectar</label>
+          <input type="text" id="enlaceCalificacion" placeholder="https://calendly.com/tu-usuario/...">
+          <span class="enlace-tag">Debe coincidir tal cual aparece en el mensaje que manda el bot</span>
+
+          <div style="height:1px; background:var(--border); margin:24px 0;"></div>
+
+          <h2 style="margin-bottom:5px;">Seguimiento especial a ese enlace</h2>
+          <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de arriba. Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. Útil para algo como "¿pudiste agendar tu espacio?". También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en estos mensajes.</p>
+          <div id="pasosEnlace"></div>
+          <button class="add-paso" id="addPasoEnlace" type="button">+ Agregar paso de seguimiento al enlace</button>
+        </div>
+
+        <div class="card">
+          <h2>Seguimientos automáticos</h2>
+          <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación (ver seguimiento especial a la izquierda). También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en cualquiera de estos mensajes.</p>
+          <div id="pasos"></div>
+          <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
         </div>
       </div>
     </div>
@@ -2259,6 +2479,7 @@ ${estilosBase()}
     pasosEnlace = Array.isArray(cfg.seguimientos_enlace) ? JSON.parse(JSON.stringify(cfg.seguimientos_enlace)) : [];
     renderPasosEnlace();
     renderAudios(cfg.audios || {});
+    renderFotos(cfg.fotos || {});
     document.getElementById("btnGuardar").disabled = false;
   }
 
@@ -2335,7 +2556,7 @@ ${estilosBase()}
       const data = await llamarPOST("/audios/subir", { nombre, base64, tipo: archivo.type });
       if(data && !data.error){
         msg.style.color = "var(--green)";
-        msg.textContent = "✓ Audio \\"" + data.clave + "\\" subido correctamente. Úsalo en el prompt como [[audio:" + data.clave + "]]";
+        msg.textContent = "✓ Audio \\"" + data.clave + "\\" subido correctamente. Úsalo como [[audio:" + data.clave + "]]";
         document.getElementById("audioNombre").value = "";
         inputArchivo.value = "";
         const cfgActualizado = await llamarGET("/config");
@@ -2343,6 +2564,81 @@ ${estilosBase()}
       } else {
         msg.style.color = "var(--red)";
         msg.textContent = "❌ " + (data?.error || "No se pudo subir el audio.");
+      }
+    } catch (err) {
+      msg.style.color = "var(--red)";
+      msg.textContent = "❌ Error leyendo o subiendo el archivo: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // --- Fotos pregrabadas: mismo patrón que los audios ---
+  function renderFotos(fotos){
+    const cont = document.getElementById("listaFotos");
+    const claves = Object.keys(fotos || {});
+    if(claves.length === 0){
+      cont.innerHTML = '<p class="hint" style="margin:0 0 4px;">Todavía no has subido ninguna foto.</p>';
+      return;
+    }
+    cont.innerHTML = claves.map(clave => {
+      const f = fotos[clave];
+      return \`
+        <div class="audio-item" data-clave="\${clave}">
+          <img src="\${f.url}" alt="" style="width:52px; height:52px; object-fit:cover; border-radius:9px; flex-shrink:0;">
+          <div class="audio-info">
+            <div class="audio-clave">[[foto:\${clave}]]</div>
+            <div class="audio-nombre">\${(f.nombre_original || clave).replace(/</g,"&lt;")}</div>
+          </div>
+          <button type="button" class="quitar btn-foto-quitar" data-clave="\${clave}">quitar</button>
+        </div>
+      \`;
+    }).join("");
+
+    cont.querySelectorAll(".btn-foto-quitar").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const clave = btn.dataset.clave;
+        if(!confirm('¿Eliminar la foto "' + clave + '"? Ya no se podrá usar en el prompt ni en seguimientos.')) return;
+        btn.disabled = true; btn.textContent = "eliminando…";
+        const data = await llamarPOST("/fotos/eliminar", { clave });
+        if(data && !data.error){
+          const cfgActualizado = await llamarGET("/config");
+          if(cfgActualizado) renderFotos(cfgActualizado.fotos || {});
+        } else {
+          alert("No se pudo eliminar: " + (data?.error || "error desconocido"));
+          btn.disabled = false; btn.textContent = "quitar";
+        }
+      });
+    });
+  }
+
+  document.getElementById("btnSubirFoto").addEventListener("click", async () => {
+    const nombre = document.getElementById("fotoNombre").value.trim();
+    const inputArchivo = document.getElementById("fotoArchivo");
+    const archivo = inputArchivo.files?.[0];
+    const msg = document.getElementById("fotoSubidaMsg");
+    const btn = document.getElementById("btnSubirFoto");
+
+    msg.style.color = "";
+    if(!nombre){ msg.style.color = "var(--red)"; msg.textContent = "Ponle un nombre a la foto primero."; return; }
+    if(!archivo){ msg.style.color = "var(--red)"; msg.textContent = "Selecciona un archivo de imagen primero."; return; }
+
+    btn.disabled = true;
+    msg.textContent = "Subiendo foto…";
+
+    try {
+      const base64 = await leerArchivoComoBase64(archivo);
+      const data = await llamarPOST("/fotos/subir", { nombre, base64, tipo: archivo.type });
+      if(data && !data.error){
+        msg.style.color = "var(--green)";
+        msg.textContent = "✓ Foto \\"" + data.clave + "\\" subida correctamente. Úsala como [[foto:" + data.clave + "]]";
+        document.getElementById("fotoNombre").value = "";
+        inputArchivo.value = "";
+        const cfgActualizado = await llamarGET("/config");
+        if(cfgActualizado) renderFotos(cfgActualizado.fotos || {});
+      } else {
+        msg.style.color = "var(--red)";
+        msg.textContent = "❌ " + (data?.error || "No se pudo subir la foto.");
       }
     } catch (err) {
       msg.style.color = "var(--red)";
@@ -2494,6 +2790,25 @@ ${estilosBase()}
   }
   .btn-enviar:hover{ filter:brightness(1.08); }
   .btn-enviar:disabled{ opacity:.5; cursor:default; }
+  .btn-adjuntar{
+    background:var(--surface-3); border:1px solid var(--border); color:var(--muted);
+    border-radius:10px; width:42px; height:42px; flex-shrink:0; cursor:pointer; font-size:18px;
+    display:flex; align-items:center; justify-content:center; transition:background .12s, color .12s, border-color .12s;
+  }
+  .btn-adjuntar:hover{ color:var(--green); border-color:var(--green); }
+  .btn-adjuntar:disabled{ opacity:.5; cursor:default; }
+  .bubble-imagen{ padding:5px !important; background:transparent !important; }
+  .bubble-imagen img{ max-width:220px; max-height:280px; border-radius:12px; display:block; object-fit:cover; }
+  .menu-contextual{
+    position:fixed; z-index:1000; background:var(--surface-3); border:1px solid var(--border);
+    border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,.4); padding:6px; min-width:230px; display:none;
+  }
+  .menu-contextual.visible{ display:block; }
+  .menu-contextual-item{
+    display:block; width:100%; text-align:left; background:none; border:none; color:var(--red);
+    padding:10px 12px; font-size:13.5px; font-weight:600; cursor:pointer; border-radius:8px;
+  }
+  .menu-contextual-item:hover{ background:rgba(255,93,93,.12); }
   .chat-input-error{
     padding:0 18px 12px; color:var(--red); font-size:12.5px; display:none; flex-shrink:0;
   }
@@ -2608,6 +2923,8 @@ ${estilosBase()}
         </div>
         <div class="chat-input-error" id="chatInputError"></div>
         <div class="chat-input-bar" id="chatInputBar">
+          <button class="btn-adjuntar" id="btnAdjuntarFoto" title="Enviar una foto">📷</button>
+          <input type="file" id="inputFotoManual" accept="image/*" style="display:none;">
           <textarea id="mensajeManual" rows="1" placeholder="Escribe una respuesta manual…"></textarea>
           <button class="btn-enviar" id="btnEnviarManual">Enviar</button>
         </div>
@@ -2615,6 +2932,10 @@ ${estilosBase()}
     </div>
   </div>
   </div>
+  </div>
+
+  <div class="menu-contextual" id="menuContextual">
+    <button type="button" class="menu-contextual-item" id="btnBorrarChat">🗑 Borrar conversación (empezar de cero)</button>
   </div>
 
 <script>
@@ -2733,8 +3054,68 @@ ${estilosBase()}
 
     cont.querySelectorAll(".chat-list-item").forEach(el => {
       el.addEventListener("click", () => seleccionarChat(el.dataset.id));
+      el.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        mostrarMenuContextual(e.clientX, e.clientY, el.dataset.id);
+      });
     });
   }
+
+  // --- Menú contextual (clic derecho): borrar conversación y empezar de cero ---
+  let senderMenuContextual = null;
+
+  function mostrarMenuContextual(x, y, senderId){
+    senderMenuContextual = senderId;
+    const menu = document.getElementById("menuContextual");
+    // Se ajusta si se saldría de la pantalla por la derecha o por abajo.
+    const anchoEstimado = 240, altoEstimado = 50;
+    const left = Math.min(x, window.innerWidth - anchoEstimado - 10);
+    const top = Math.min(y, window.innerHeight - altoEstimado - 10);
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+    menu.classList.add("visible");
+  }
+
+  function ocultarMenuContextual(){
+    document.getElementById("menuContextual").classList.remove("visible");
+    senderMenuContextual = null;
+  }
+
+  document.addEventListener("click", ocultarMenuContextual);
+  document.addEventListener("contextmenu", (e) => {
+    // Si el clic derecho fue fuera de un chat-list-item, cierra cualquier menú abierto.
+    if(!e.target.closest(".chat-list-item")) ocultarMenuContextual();
+  });
+
+  document.getElementById("btnBorrarChat").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const senderId = senderMenuContextual;
+    ocultarMenuContextual();
+    if(!senderId) return;
+    if(!confirm("¿Borrar por completo esta conversación? Se pierde todo el historial y no se puede deshacer.\\n\\nLa próxima vez que esta persona escriba, el bot empezará desde cero (como si nunca hubiera hablado con ella).")) return;
+
+    try {
+      const res = await fetch("/chats/borrar", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ senderId })
+      });
+      if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+      const data = await res.json();
+      if(data && !data.error){
+        if(senderSeleccionado === senderId){
+          senderSeleccionado = null;
+          ultimoHistorialJSON = null;
+          renderHead();
+          actualizarInputBar();
+          document.getElementById("chatMensajes").innerHTML = '<div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>';
+        }
+        await cargarConversaciones();
+      } else {
+        alert("No se pudo borrar: " + (data?.error || "error desconocido"));
+      }
+    } catch (err) {
+      alert("Error de conexión al borrar la conversación.");
+    }
+  });
 
   function renderHead(){
     const head = document.getElementById("chatHead");
@@ -2766,7 +3147,10 @@ ${estilosBase()}
     }
 
     if(conv.enlace_enviado){
-      bannerEnlace.textContent = "🔗 Ya se le mandó el enlace de calificación" + (conv.enlace_enviado_en ? " (" + formatearFecha(conv.enlace_enviado_en) + ")" : "") + " — activo el seguimiento especial.";
+      const estadoSeguimiento = conv.enlace_seguimiento_pendiente
+        ? "seguimiento especial activo"
+        : "ya respondió, seguimiento normal activo";
+      bannerEnlace.textContent = "🔗 Ya se le mandó el enlace de calificación" + (conv.enlace_enviado_en ? " (" + formatearFecha(conv.enlace_enviado_en) + ")" : "") + " — " + estadoSeguimiento + ".";
       bannerEnlace.classList.add("visible");
     } else {
       bannerEnlace.classList.remove("visible");
@@ -2836,6 +3220,65 @@ ${estilosBase()}
     this.style.height = Math.min(this.scrollHeight, 120) + "px";
   });
 
+  // --- Enviar una foto suelta desde el chat (ej. casos de éxito) ---
+  function leerArchivoComoBase64Chat(archivo){
+    return new Promise((resolve, reject) => {
+      const lector = new FileReader();
+      lector.onload = () => {
+        const resultado = lector.result;
+        resolve(resultado.substring(resultado.indexOf(",") + 1));
+      };
+      lector.onerror = () => reject(new Error("No se pudo leer el archivo."));
+      lector.readAsDataURL(archivo);
+    });
+  }
+
+  document.getElementById("btnAdjuntarFoto").addEventListener("click", () => {
+    if(!senderSeleccionado) return;
+    document.getElementById("inputFotoManual").click();
+  });
+
+  document.getElementById("inputFotoManual").addEventListener("change", async (e) => {
+    const archivo = e.target.files?.[0];
+    e.target.value = ""; // permite volver a elegir el mismo archivo después
+    if(!archivo || !senderSeleccionado) return;
+
+    const errorBox = document.getElementById("chatInputError");
+    const btnFoto = document.getElementById("btnAdjuntarFoto");
+    errorBox.classList.remove("visible");
+    errorBox.textContent = "";
+    btnFoto.disabled = true;
+    btnFoto.textContent = "⏳";
+
+    try {
+      const base64 = await leerArchivoComoBase64Chat(archivo);
+      const res = await fetch("/chats/enviar-foto", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ senderId: senderSeleccionado, base64, tipo: archivo.type })
+      });
+      if(res.status === 401){
+        window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname);
+        return;
+      }
+      const data = await res.json();
+      if(!res.ok){
+        errorBox.textContent = "❌ " + (data.error || "No se pudo enviar la foto.");
+        errorBox.classList.add("visible");
+      } else {
+        ultimoHistorialJSON = null;
+        await cargarHistorial();
+        await cargarConversaciones();
+      }
+    } catch (err) {
+      errorBox.textContent = "❌ Error de conexión al enviar la foto.";
+      errorBox.classList.add("visible");
+    } finally {
+      btnFoto.disabled = false;
+      btnFoto.textContent = "📷";
+    }
+  });
+
   document.getElementById("tabTodas").addEventListener("click", () => {
     filtroActual = "todas";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
@@ -2887,11 +3330,17 @@ ${estilosBase()}
       return;
     }
     const estabaAbajo = cont.scrollTop + cont.clientHeight >= cont.scrollHeight - 60;
-    cont.innerHTML = historial.map(m => \`
-      <div class="bubble-row \${m.role === "assistant" ? "assistant" : "user"}">
-        <div class="bubble">\${escapar(m.content)}</div>
-      </div>
-    \`).join("");
+    cont.innerHTML = historial.map(m => {
+      const esImagen = typeof m.content === "string" && m.content.startsWith("[[imagen]]");
+      const contenidoHTML = esImagen
+        ? \`<img src="\${m.content.slice(10)}" alt="imagen enviada" loading="lazy">\`
+        : escapar(m.content);
+      return \`
+        <div class="bubble-row \${m.role === "assistant" ? "assistant" : "user"}">
+          <div class="bubble\${esImagen ? " bubble-imagen" : ""}">\${contenidoHTML}</div>
+        </div>
+      \`;
+    }).join("");
     if(estabaAbajo || cont.dataset.primeraVez !== "hecho"){
       cont.scrollTop = cont.scrollHeight;
       cont.dataset.primeraVez = "hecho";
