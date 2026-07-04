@@ -2673,7 +2673,7 @@ app.get("/exportar/handoff.csv", requireAdminKey, async (req, res) => {
       const horasInactivo = Math.round((Date.now() - new Date(c.ultimo_mensaje_usuario).getTime()) / 3600000);
 
       return {
-        username: perfil?.username ? "@" + perfil.username : "",
+        username: perfil?.username || "",
         sender_id: c.sender_id,
         ultimo_mensaje_usuario: c.ultimo_mensaje_usuario,
         horas_inactivo: horasInactivo,
@@ -2724,7 +2724,7 @@ app.get("/exportar/calificados.csv", requireAdminKey, async (req, res) => {
         : false;
 
       return {
-        username: perfil?.username ? "@" + perfil.username : "",
+        username: perfil?.username || "",
         sender_id: c.sender_id,
         calificado_en: c.calificado_en || "",
         razon_calificacion: c.razon_calificacion || "",
@@ -2778,7 +2778,7 @@ app.get("/exportar/enlace.csv", requireAdminKey, async (req, res) => {
         : false;
 
       return {
-        username: perfil?.username ? "@" + perfil.username : "",
+        username: perfil?.username || "",
         sender_id: c.sender_id,
         enlace_enviado_en: c.enlace_enviado_en || "",
         califica: c.califica ? "sí" : "no",
