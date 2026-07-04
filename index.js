@@ -175,11 +175,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_seguimiento_pendiente: false };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0 };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_seguimiento_pendiente: false };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0 };
   }
 
   return data;
@@ -205,23 +205,6 @@ async function registrarMensajeUsuario(senderId) {
   await guardarConversacion(senderId, { ultimo_mensaje_usuario: new Date().toISOString() });
 }
 
-// La etiqueta "enlace_enviado" es PERMANENTE — una vez que se le manda el
-// enlace de calificación a un lead, queda marcado así para siempre (para
-// poder filtrarlo/exportarlo en /chats, sin importar qué pase después).
-// Lo que sí se apaga cuando el lead vuelve a escribir es
-// "enlace_seguimiento_pendiente": ese es el que decide si el PRÓXIMO
-// silencio dispara el seguimiento especial (enlace) o el normal. Así, si
-// el lead responde y luego se vuelve a quedar callado, recibe el
-// seguimiento normal — pero conserva la etiqueta de que en algún momento
-// se le mandó el enlace (a menos que el bot se lo reenvíe, lo cual vuelve
-// a activar el seguimiento especial).
-async function reiniciarSeguimientoEnlaceSiAplica(senderId) {
-  const conv = await obtenerConversacion(senderId);
-  if (conv.enlace_seguimiento_pendiente) {
-    await guardarConversacion(senderId, { enlace_seguimiento_pendiente: false });
-  }
-}
-
 async function cancelarSeguimientosPendientesDB(senderId) {
   const { error } = await supabase
     .from("seguimientos_programados")
@@ -232,12 +215,16 @@ async function cancelarSeguimientosPendientesDB(senderId) {
   if (error) console.error("❌ Error cancelando seguimientos en Supabase:", error.message);
 }
 
-// Programa el siguiente seguimiento automático para un usuario. Si ya se le
-// mandó el enlace de calificación (conv.enlace_enviado), usa la lista de
-// "seguimientos_enlace" contando las horas desde que se mandó el enlace; si
-// no, usa los "seguimientos" normales contando desde el último mensaje del
-// usuario. En ambos casos la ventana límite de 24h de Instagram se calcula
-// siempre a partir del último mensaje del usuario (así lo exige Meta).
+// Programa el siguiente seguimiento automático para un usuario. Mientras el
+// lead tenga la etiqueta "enlace_enviado" y todavía no se le hayan mandado
+// TODOS los pasos configurados en "seguimientos_enlace", se sigue usando esa
+// lista especial — incluso si el lead responde algo como "gracias" en el
+// medio (eso NO cancela el modo enlace, solo cancela el mensaje puntual que
+// estaba pendiente y este método lo vuelve a programar). Recién cuando ya se
+// mandaron todos los pasos del enlace, se pasa a usar los "seguimientos"
+// normales. La ventana límite de 24h de Instagram se calcula siempre a
+// partir del último mensaje del usuario (así lo exige Meta), pero las horas
+// de espera de los pasos del enlace se cuentan desde que se envió el enlace.
 async function programarSeguimientosDB(senderId) {
   await cancelarSeguimientosPendientesDB(senderId);
 
@@ -247,8 +234,11 @@ async function programarSeguimientosDB(senderId) {
   const ultimoMsg = new Date(conv.ultimo_mensaje_usuario).getTime();
   const limiteVentana = ultimoMsg + VENTANA_24H_MS - COLCHON_SEGURIDAD_MS;
 
-  const esSeguimientoEnlace = Boolean(conv.enlace_seguimiento_pendiente);
-  const pasos = esSeguimientoEnlace ? (configActual.seguimientos_enlace || []) : (configActual.seguimientos || []);
+  const pasosEnlaceConfig = configActual.seguimientos_enlace || [];
+  const pasosEnlaceYaEnviados = conv.enlace_pasos_enviados || 0;
+  const esSeguimientoEnlace = Boolean(conv.enlace_enviado) && pasosEnlaceYaEnviados < pasosEnlaceConfig.length;
+
+  const pasos = esSeguimientoEnlace ? pasosEnlaceConfig : (configActual.seguimientos || []);
   const tipo = esSeguimientoEnlace ? "enlace" : "normal";
   const referencia = (esSeguimientoEnlace && conv.enlace_enviado_en)
     ? new Date(conv.enlace_enviado_en).getTime()
@@ -256,6 +246,8 @@ async function programarSeguimientosDB(senderId) {
 
   const filas = [];
   for (let i = 0; i < pasos.length; i++) {
+    if (esSeguimientoEnlace && i < pasosEnlaceYaEnviados) continue; // ese paso ya se mandó antes
+
     const { horas, mensajes } = pasos[i];
     if (!Array.isArray(mensajes) || mensajes.length === 0) continue;
 
@@ -332,7 +324,17 @@ async function procesarSeguimientosPendientesDB() {
     try {
       console.log(`🔔 Enviando seguimiento (${tipo}, paso ${pasoIndex}, ${pasoConfig.horas} h) a ${senderId}: "${mensaje}"`);
       await enviarContenidoConMarcadores(senderId, mensaje);
-      await guardarConversacion(senderId, { rotacion });
+
+      const camposAGuardar = { rotacion };
+      if (esEnlace) {
+        // Avanza el contador de pasos del enlace ya enviados, para que
+        // programarSeguimientosDB sepa cuáles faltan y cuándo ya se mandaron
+        // todos (momento en el que se vuelve al seguimiento normal).
+        const yaEnviados = conv.enlace_pasos_enviados || 0;
+        camposAGuardar.enlace_pasos_enviados = Math.max(yaEnviados, pasoIndex + 1);
+      }
+      await guardarConversacion(senderId, camposAGuardar);
+
       await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
       procesados++;
     } catch (err) {
@@ -892,15 +894,16 @@ async function procesarBuffer(senderId) {
       // prompt es el que decide mandarlo cuando el lead ya cumplió las etapas.
       // Aquí solo lo detectamos dentro del texto que se acaba de enviar.
       // "enlace_enviado" es la etiqueta PERMANENTE (para filtrar/exportar en
-      // /chats, nunca se apaga). "enlace_seguimiento_pendiente" es la bandera
-      // que de verdad decide si el PRÓXIMO silencio dispara el seguimiento
-      // especial — esa sí se apaga en cuanto el lead vuelve a escribir.
+      // /chats, nunca se apaga). "enlace_pasos_enviados" se reinicia a 0 para
+      // arrancar de nuevo el seguimiento especial completo — que se mantiene
+      // activo aunque el lead responda algo en el medio, hasta que se manden
+      // TODOS los pasos configurados (ver programarSeguimientosDB).
       if (configActual.enlace_calificacion?.trim() && textoAEnviar.includes(configActual.enlace_calificacion.trim())) {
-        console.log(`🔗 Enlace de calificación detectado en la respuesta a ${senderId}. Se marca (permanente) y se activará el seguimiento especial.`);
+        console.log(`🔗 Enlace de calificación detectado en la respuesta a ${senderId}. Se marca (permanente) y arranca el seguimiento especial completo.`);
         await guardarConversacion(senderId, {
           enlace_enviado: true,
           enlace_enviado_en: new Date().toISOString(),
-          enlace_seguimiento_pendiente: true
+          enlace_pasos_enviados: 0
         });
       }
 
@@ -1002,10 +1005,11 @@ app.post("/webhook", async (req, res) => {
 
       await registrarMensajeUsuario(senderId);
       await cancelarSeguimientosPendientesDB(senderId);
-      // El lead volvió a escribir: si ya se le había mandado el enlace de
-      // calificación, se apaga esa etiqueta para volver al seguimiento normal
-      // (a menos que el bot le reenvíe el enlace más adelante).
-      await reiniciarSeguimientoEnlaceSiAplica(senderId);
+      // Nota: si el lead ya tiene el seguimiento especial del enlace en
+      // curso, NO se apaga aquí por responder — programarSeguimientosDB lo
+      // vuelve a programar automáticamente cuando el buffer termine, y solo
+      // cambia a seguimiento normal una vez que ya se mandaron todos los
+      // pasos configurados del enlace.
 
       encolarMensaje(senderId, mensaje);
     }
@@ -1178,11 +1182,13 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, enlace_enviado, enlace_enviado_en, enlace_seguimiento_pendiente")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados")
       .order("actualizado_en", { ascending: false })
       .limit(200);
 
     if (error) return res.status(500).json({ error: error.message });
+
+    const totalPasosEnlace = (configActual.seguimientos_enlace || []).length;
 
     const resumen = await Promise.all((data || []).map(async (c) => {
       const historial = Array.isArray(c.historial) ? c.historial : [];
@@ -1192,6 +1198,8 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
       const enVentana24h = c.ultimo_mensaje_usuario
         ? (Date.now() - new Date(c.ultimo_mensaje_usuario).getTime()) < VENTANA_24H_MS
         : false;
+
+      const pasosEnviados = c.enlace_pasos_enviados || 0;
 
       return {
         sender_id: c.sender_id,
@@ -1207,7 +1215,8 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         razon_calificacion: c.razon_calificacion || null,
         enlace_enviado: Boolean(c.enlace_enviado),
         enlace_enviado_en: c.enlace_enviado_en || null,
-        enlace_seguimiento_pendiente: Boolean(c.enlace_seguimiento_pendiente)
+        enlace_pasos_enviados: pasosEnviados,
+        enlace_seguimiento_activo: Boolean(c.enlace_enviado) && pasosEnviados < totalPasosEnlace
       };
     }));
 
@@ -2317,7 +2326,7 @@ ${estilosBase()}
       <div class="col">
         <div class="card">
           <h2>Enlace de calificación (calendario / formulario)</h2>
-          <p class="hint">Pega aquí el enlace exacto que tu prompt manda cuando un lead ya calificó (por ejemplo tu link de Calendly o de un formulario). El sistema NO lo envía — solo lo usa para detectar cuándo tu bot ya se lo mandó al cliente. En cuanto lo detecta en una respuesta, le pone la etiqueta 🔗 <b>para siempre</b> (no se quita aunque el lead vuelva a escribir) y activa el seguimiento especial de abajo en vez del seguimiento normal de silencio. Si el lead responde, el seguimiento especial se apaga (vuelve al normal), pero la etiqueta 🔗 se queda.</p>
+          <p class="hint">Pega aquí el enlace exacto que tu prompt manda cuando un lead ya calificó (por ejemplo tu link de Calendly o de un formulario). El sistema NO lo envía — solo lo usa para detectar cuándo tu bot ya se lo mandó al cliente. En cuanto lo detecta en una respuesta, le pone la etiqueta 🔗 <b>para siempre</b> (no se quita nunca) y activa el seguimiento especial de abajo. Ese seguimiento especial <b>se mantiene activo aunque el lead responda algo en el medio</b> (ej. "gracias") — solo se pasa al seguimiento normal una vez que ya se mandaron TODOS los pasos configurados abajo.</p>
           <label for="enlaceCalificacion">Enlace a detectar</label>
           <input type="text" id="enlaceCalificacion" placeholder="https://calendly.com/tu-usuario/...">
           <span class="enlace-tag">Debe coincidir tal cual aparece en el mensaje que manda el bot</span>
@@ -3147,9 +3156,9 @@ ${estilosBase()}
     }
 
     if(conv.enlace_enviado){
-      const estadoSeguimiento = conv.enlace_seguimiento_pendiente
-        ? "seguimiento especial activo"
-        : "ya respondió, seguimiento normal activo";
+      const estadoSeguimiento = conv.enlace_seguimiento_activo
+        ? "seguimiento especial en curso (paso " + ((conv.enlace_pasos_enviados || 0) + 1) + ")"
+        : "seguimiento especial terminado, ahora sigue el normal";
       bannerEnlace.textContent = "🔗 Ya se le mandó el enlace de calificación" + (conv.enlace_enviado_en ? " (" + formatearFecha(conv.enlace_enviado_en) + ")" : "") + " — " + estadoSeguimiento + ".";
       bannerEnlace.classList.add("visible");
     } else {
