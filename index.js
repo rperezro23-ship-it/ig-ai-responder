@@ -917,20 +917,31 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
 function normalizarParaComparar(texto) {
   return (texto || "")
     .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // quita acentos
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // quita acentos
+    .trim();
+}
+
+// Compara un mensaje ya normalizado contra una frase ya normalizada, según
+// el modo configurado:
+//   "contiene" (por defecto) -> la frase aparece en cualquier parte del mensaje.
+//   "exacta" -> el mensaje completo (sin espacios sobrantes) es ESA frase y
+//   nada más. Sirve para casos como una palabra clave de un CTA de video
+//   ("manda la palabra DIETA") donde no quieres que dispare si el cliente
+//   simplemente menciona "dieta" dentro de una frase más larga sobre otra cosa.
+function coincideFrase(mensajeNormalizado, fraseNormalizada, modo) {
+  if (!fraseNormalizada) return false;
+  if (modo === "exacta") return mensajeNormalizado === fraseNormalizada;
+  return mensajeNormalizado.includes(fraseNormalizada);
 }
 
 // Devuelve la lista de disparadores configurados cuyas palabras/frases
-// aparecen dentro del mensaje del cliente (comparación sin mayúsculas ni
-// acentos, tipo "contiene").
+// coinciden con el mensaje del cliente (sin mayúsculas ni acentos), según el
+// modo de coincidencia de cada disparador ("contiene" o "exacta").
 function buscarDisparadoresActivados(mensajeUsuario, disparadores) {
   const mensajeNormalizado = normalizarParaComparar(mensajeUsuario);
   return (disparadores || []).filter((d) => {
     if (!d.clave || !Array.isArray(d.frases)) return false;
-    return d.frases.some((frase) => {
-      const fraseNormalizada = normalizarParaComparar(frase);
-      return fraseNormalizada && mensajeNormalizado.includes(fraseNormalizada);
-    });
+    return d.frases.some((frase) => coincideFrase(mensajeNormalizado, normalizarParaComparar(frase), d.coincidencia));
   });
 }
 
@@ -974,10 +985,7 @@ function buscarTransicionActivada(mensajeUsuario, transiciones) {
   const mensajeNormalizado = normalizarParaComparar(mensajeUsuario);
   for (const t of (transiciones || [])) {
     if (typeof t.etapa_destino !== "string" || !Array.isArray(t.frases)) continue;
-    const coincide = t.frases.some((frase) => {
-      const fraseNormalizada = normalizarParaComparar(frase);
-      return fraseNormalizada && mensajeNormalizado.includes(fraseNormalizada);
-    });
+    const coincide = t.frases.some((frase) => coincideFrase(mensajeNormalizado, normalizarParaComparar(frase), t.coincidencia));
     if (coincide) return t;
   }
   return null;
@@ -2076,7 +2084,8 @@ function normalizarDisparadores(disparadores) {
       tipo: d.tipo,
       clave: d.clave.trim().toLowerCase(),
       frases: Array.isArray(d.frases) ? d.frases.map(f => String(f).trim()).filter(Boolean) : [],
-      pausa_segundos: Number.isFinite(d.pausa_segundos) && d.pausa_segundos >= 0 ? d.pausa_segundos : 2
+      pausa_segundos: Number.isFinite(d.pausa_segundos) && d.pausa_segundos >= 0 ? d.pausa_segundos : 2,
+      coincidencia: d.coincidencia === "exacta" ? "exacta" : "contiene"
     }))
     .filter(d => d.frases.length > 0);
 }
@@ -2090,7 +2099,8 @@ function normalizarTransiciones(transiciones) {
     .filter(t => t && typeof t.etapa_destino === "string")
     .map(t => ({
       etapa_destino: t.etapa_destino.trim().toLowerCase(),
-      frases: Array.isArray(t.frases) ? t.frases.map(f => String(f).trim()).filter(Boolean) : []
+      frases: Array.isArray(t.frases) ? t.frases.map(f => String(f).trim()).filter(Boolean) : [],
+      coincidencia: t.coincidencia === "exacta" ? "exacta" : "contiene"
     }))
     .filter(t => t.frases.length > 0);
 }
@@ -3009,6 +3019,11 @@ ${estilosBase()}
         </div>
         <label>Palabras o frases que lo activan (una por línea)</label>
         <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: precio&#10;cuanto cuesta&#10;inversion" style="margin-bottom:10px;">\${(d.frases || []).join("\\n")}</textarea>
+        <label>¿Cómo debe coincidir?</label>
+        <select class="\${prefijoClase}-coincidencia" data-i="\${i}" style="margin-bottom:10px;">
+          <option value="contiene"\${d.coincidencia !== "exacta" ? " selected" : ""}>Contiene la frase en cualquier parte del mensaje</option>
+          <option value="exacta"\${d.coincidencia === "exacta" ? " selected" : ""}>El mensaje es EXACTAMENTE esa palabra/frase (nada más) — ej. para un CTA de "mándame la palabra X"</option>
+        </select>
         <div class="row2" style="margin-bottom:10px;">
           <div>
             <label>Tipo</label>
@@ -3042,6 +3057,10 @@ ${estilosBase()}
     document.querySelectorAll(\`.\${prefijoClase}-frases\`).forEach((ta, i) => {
       if(!lista[i]) return;
       lista[i].frases = ta.value.split("\\n").map(f => f.trim()).filter(Boolean);
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-coincidencia\`).forEach((sel, i) => {
+      if(!lista[i]) return;
+      lista[i].coincidencia = sel.value;
     });
     document.querySelectorAll(\`.\${prefijoClase}-tipo\`).forEach((sel, i) => {
       if(!lista[i]) return;
@@ -3094,6 +3113,11 @@ ${estilosBase()}
         </div>
         <label>Palabras o frases que la activan (una por línea)</label>
         <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: si&#10;sí quiero&#10;me interesa" style="margin-bottom:10px;">\${(t.frases || []).join("\\n")}</textarea>
+        <label>¿Cómo debe coincidir?</label>
+        <select class="\${prefijoClase}-coincidencia" data-i="\${i}" style="margin-bottom:10px;">
+          <option value="contiene"\${t.coincidencia !== "exacta" ? " selected" : ""}>Contiene la frase en cualquier parte del mensaje</option>
+          <option value="exacta"\${t.coincidencia === "exacta" ? " selected" : ""}>El mensaje es EXACTAMENTE esa palabra/frase (nada más) — ej. para un CTA de "mándame la palabra X"</option>
+        </select>
         <label>Mover a la etapa</label>
         <select class="\${prefijoClase}-destino" data-i="\${i}">\${opcionesEtapaDestinoHTML(t.etapa_destino, incluirSalir)}</select>
       \`;
@@ -3110,6 +3134,10 @@ ${estilosBase()}
     document.querySelectorAll(\`.\${prefijoClase}-frases\`).forEach((ta, i) => {
       if(!lista[i]) return;
       lista[i].frases = ta.value.split("\\n").map(f => f.trim()).filter(Boolean);
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-coincidencia\`).forEach((sel, i) => {
+      if(!lista[i]) return;
+      lista[i].coincidencia = sel.value;
     });
     document.querySelectorAll(\`.\${prefijoClase}-destino\`).forEach((sel, i) => {
       if(!lista[i]) return;
@@ -3132,13 +3160,13 @@ ${estilosBase()}
       alert("Primero crea al menos una etapa para poder mandar al lead hacia ella.");
       return;
     }
-    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "" });
+    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene" });
     renderTransicionesGenerales();
   });
 
   document.getElementById("addDisparador").addEventListener("click", () => {
     leerDisparadoresDelDOM();
-    disparadores.push({ frases: [], tipo: "audio", clave: "", pausa_segundos: 2 });
+    disparadores.push({ frases: [], tipo: "audio", clave: "", pausa_segundos: 2, coincidencia: "contiene" });
     renderDisparadores();
   });
 
@@ -3263,7 +3291,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].disparadores) etapas[i].disparadores = [];
-      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", pausa_segundos: 2 });
+      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", pausa_segundos: 2, coincidencia: "contiene" });
       renderEtapas();
     }));
 
@@ -3278,7 +3306,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].transiciones) etapas[i].transiciones = [];
-      etapas[i].transiciones.push({ frases: [], etapa_destino: "" });
+      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene" });
       renderEtapas();
     }));
   }
