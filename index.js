@@ -881,7 +881,43 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
 }
 
 // ---------------------------------------------------------------
-// Calificación automática de leads: además de responder, la IA revisa
+// Disparadores automáticos: envío GARANTIZADO de un audio/foto cuando el
+// mensaje del cliente contiene ciertas palabras o frases — sin depender de
+// que la IA "decida" incluir el marcador (lo cual es inconsistente, porque
+// es una decisión probabilística del modelo, no una regla fija). Se
+// configuran en /panel. Si la IA ya mandó ese mismo audio/foto por su cuenta
+// (usando el marcador en su respuesta), el disparador NO lo repite.
+// ---------------------------------------------------------------
+
+function normalizarParaComparar(texto) {
+  return (texto || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, ""); // quita acentos
+}
+
+// Devuelve la lista de disparadores configurados cuyas palabras/frases
+// aparecen dentro del mensaje del cliente (comparación sin mayúsculas ni
+// acentos, tipo "contiene").
+function buscarDisparadoresActivados(mensajeUsuario, disparadores) {
+  const mensajeNormalizado = normalizarParaComparar(mensajeUsuario);
+  return (disparadores || []).filter((d) => {
+    if (!d.clave || !Array.isArray(d.frases)) return false;
+    return d.frases.some((frase) => {
+      const fraseNormalizada = normalizarParaComparar(frase);
+      return fraseNormalizada && mensajeNormalizado.includes(fraseNormalizada);
+    });
+  });
+}
+
+// Revisa si una lista de "partes" ya parseadas (ver parsearPartes) incluye
+// un audio/foto con esa clave — para no volver a mandarlo si la IA ya lo
+// incluyó ella misma en su respuesta.
+function partesIncluyenMedia(partes, tipo, clave) {
+  const claveNormalizada = (clave || "").toLowerCase();
+  return partes.some((p) => p.tipo === tipo && p.clave === claveNormalizada);
+}
+
+
 // si la conversación ya cumple con los criterios que definiste en
 // /panel (edad, objetivo, género, etc.) y marca la conversación como
 // "califica" la primera vez que se cumplen. Es una llamada aparte,
@@ -987,10 +1023,13 @@ async function procesarBuffer(senderId) {
     });
 
     const respuestaCruda = completion.choices[0]?.message?.content?.trim();
+    let partesRespuestaIA = [];
     if (respuestaCruda) {
       console.log(`🤖 Respuesta IA (cruda): "${respuestaCruda}"`);
 
       await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
+
+      partesRespuestaIA = parsearPartes(respuestaCruda);
 
       // Si el prompt decide mandar la respuesta en varias burbujas (con
       // [[pausa:N]]) o incluir un audio/foto pregrabada ([[audio:clave]] /
@@ -1035,6 +1074,44 @@ async function procesarBuffer(senderId) {
             });
           }
         }
+      }
+    }
+
+    // Disparadores automáticos: si el mensaje del cliente contiene alguna de
+    // las palabras/frases configuradas en /panel, se manda el audio/foto
+    // correspondiente de forma GARANTIZADA — sin depender de que la IA haya
+    // decidido incluir el marcador en su respuesta (que es inconsistente,
+    // porque es una decisión probabilística del modelo). Si la IA ya lo
+    // mandó ella misma, no se repite.
+    const disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, configActual.disparadores || []);
+    for (const disparador of disparadoresActivados) {
+      if (partesIncluyenMedia(partesRespuestaIA, disparador.tipo, disparador.clave)) {
+        console.log(`ℹ️ Disparador "${disparador.clave}" activado por palabra clave, pero la IA ya lo mandó por su cuenta — se omite duplicado.`);
+        continue;
+      }
+
+      const almacen = disparador.tipo === "audio" ? configActual.audios : configActual.fotos;
+      const item = almacen?.[disparador.clave];
+      if (!item?.url) {
+        console.warn(`⚠️ El disparador apunta al ${disparador.tipo} "${disparador.clave}", pero no existe (o se borró) en /panel.`);
+        continue;
+      }
+
+      const esperaSegundos = Number.isFinite(disparador.pausa_segundos) ? disparador.pausa_segundos : 2;
+      if (esperaSegundos > 0) await sleep(esperaSegundos * 1000);
+
+      try {
+        if (disparador.tipo === "audio") {
+          console.log(`🎯 Disparador automático: enviando audio "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
+          await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${item.url}`);
+          await conReintento(() => enviarAudioInstagram(senderId, item.url));
+        } else {
+          console.log(`🎯 Disparador automático: enviando foto "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
+          await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${item.url}`);
+          await conReintento(() => enviarImagenInstagram(senderId, item.url));
+        }
+      } catch (err) {
+        console.error(`❌ Error enviando el disparador automático "${disparador.clave}" a ${senderId}:`, err.response?.data || err.message);
       }
     }
   } catch (err) {
@@ -1679,7 +1756,8 @@ let configActual = {
   seguimientos: SEGUIMIENTOS_CONFIG,
   seguimientos_enlace: SEGUIMIENTOS_ENLACE_DEFAULT,
   audios: {}, // { claveAudio: { url, nombre_original, ruta_archivo, subido_en } }
-  fotos: {}  // { claveFoto: { url, nombre_original, ruta_archivo, subido_en } }
+  fotos: {},  // { claveFoto: { url, nombre_original, ruta_archivo, subido_en } }
+  disparadores: [] // [{ frases: [], tipo: "audio"|"foto", clave, pausa_segundos }]
 };
 
 // Cliente de OpenAI: se reconstruye cada vez que cambia configActual.openai_api_key
@@ -1853,7 +1931,7 @@ app.get("/config", requireAdminKey, (req, res) => {
 app.post("/config", requireAdminKey, async (req, res) => {
   try {
     const { ai_prompt, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
-            calificacion_activa, criterios_calificacion, enlace_calificacion } = req.body || {};
+            calificacion_activa, criterios_calificacion, enlace_calificacion, disparadores } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -1867,6 +1945,19 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof calificacion_activa === "boolean") nuevaConfig.calificacion_activa = calificacion_activa;
     if (typeof criterios_calificacion === "string") nuevaConfig.criterios_calificacion = criterios_calificacion.trim();
     if (typeof enlace_calificacion === "string") nuevaConfig.enlace_calificacion = enlace_calificacion.trim();
+    if (Array.isArray(disparadores)) {
+      // Se valida cada disparador: tipo debe ser audio/foto, clave y al
+      // menos una frase no vacía, y la pausa un número >= 0.
+      nuevaConfig.disparadores = disparadores
+        .filter(d => d && (d.tipo === "audio" || d.tipo === "foto") && typeof d.clave === "string" && d.clave.trim())
+        .map(d => ({
+          tipo: d.tipo,
+          clave: d.clave.trim().toLowerCase(),
+          frases: Array.isArray(d.frases) ? d.frases.map(f => String(f).trim()).filter(Boolean) : [],
+          pausa_segundos: Number.isFinite(d.pausa_segundos) && d.pausa_segundos >= 0 ? d.pausa_segundos : 2
+        }))
+        .filter(d => d.frases.length > 0);
+    }
 
     const guardado = await guardarConfigDB(nuevaConfig);
     res.json({ mensaje: "✅ Configuración guardada", config: configParaFrontend(guardado) });
@@ -2481,6 +2572,13 @@ ${estilosBase()}
           <button class="add-paso" id="btnSubirFoto" type="button" style="margin-top:12px;">⬆ Subir foto</button>
           <p class="hint" id="fotoSubidaMsg" style="margin:10px 0 0;"></p>
         </div>
+
+        <div class="card card-destacada">
+          <h2>🎯 Disparadores automáticos (envío garantizado)</h2>
+          <p class="hint">La IA no siempre es consistente decidiendo cuándo incluir un <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en su respuesta — a veces sí, a veces no. Acá puedes configurar palabras o frases que, en cuanto aparezcan en el mensaje del cliente, manden ese audio/foto <b>SIEMPRE, por código, sin depender de la IA</b>. Si la IA ya lo mandó por su cuenta en esa misma respuesta, no se duplica.</p>
+          <div id="listaDisparadores"></div>
+          <button class="add-paso" id="addDisparador" type="button">+ Agregar disparador</button>
+        </div>
       </div>
 
       <div class="col">
@@ -2628,6 +2726,91 @@ ${estilosBase()}
     });
   }
 
+  // --- Disparadores automáticos: envío garantizado de audio/foto por palabras clave ---
+  let disparadores = [];
+  let audiosDisponibles = {};
+  let fotosDisponibles = {};
+
+  function opcionesClaveHTML(tipo, claveSeleccionada){
+    const almacen = tipo === "audio" ? audiosDisponibles : fotosDisponibles;
+    const claves = Object.keys(almacen || {});
+    if(claves.length === 0){
+      return '<option value="">(no hay ninguno subido todavía)</option>';
+    }
+    return claves.map(c => \`<option value="\${c}"\${c === claveSeleccionada ? " selected" : ""}>\${c}</option>\`).join("");
+  }
+
+  function renderDisparadores(){
+    const cont = document.getElementById("listaDisparadores");
+    if(disparadores.length === 0){
+      cont.innerHTML = '<p class="hint" style="margin:0 0 12px;">Todavía no hay disparadores configurados.</p>';
+    } else {
+      cont.innerHTML = "";
+      disparadores.forEach((d, i) => {
+        const div = document.createElement("div");
+        div.className = "paso";
+        div.innerHTML = \`
+          <div class="paso-head">
+            <span class="eyebrow-num">DISPARADOR \${i + 1}</span>
+            <button type="button" class="quitar-disparador" data-i="\${i}">quitar</button>
+          </div>
+          <label>Palabras o frases que lo activan (una por línea, si el mensaje del cliente contiene cualquiera de ellas, se dispara)</label>
+          <textarea class="disparador-frases" data-i="\${i}" rows="3" placeholder="ej: precio&#10;cuanto cuesta&#10;inversion" style="margin-bottom:10px;">\${(d.frases || []).join("\\n")}</textarea>
+          <div class="row2" style="margin-bottom:10px;">
+            <div>
+              <label>Tipo</label>
+              <select class="disparador-tipo" data-i="\${i}">
+                <option value="audio"\${d.tipo === "audio" ? " selected" : ""}>🎤 Audio</option>
+                <option value="foto"\${d.tipo === "foto" ? " selected" : ""}>🖼️ Foto</option>
+              </select>
+            </div>
+            <div>
+              <label>Espera antes de enviarlo (segundos)</label>
+              <input type="number" step="0.5" min="0" class="disparador-pausa" data-i="\${i}" value="\${d.pausa_segundos ?? 2}">
+            </div>
+          </div>
+          <label>Cuál mandar</label>
+          <select class="disparador-clave" data-i="\${i}">\${opcionesClaveHTML(d.tipo, d.clave)}</select>
+        \`;
+        cont.appendChild(div);
+      });
+      cont.querySelectorAll(".quitar-disparador").forEach(b => b.addEventListener("click", e => {
+        leerDisparadoresDelDOM();
+        disparadores.splice(+e.target.dataset.i, 1);
+        renderDisparadores();
+      }));
+      cont.querySelectorAll(".disparador-tipo").forEach(sel => sel.addEventListener("change", e => {
+        leerDisparadoresDelDOM();
+        renderDisparadores();
+      }));
+    }
+  }
+
+  document.getElementById("addDisparador").addEventListener("click", () => {
+    leerDisparadoresDelDOM();
+    disparadores.push({ frases: [], tipo: "audio", clave: "", pausa_segundos: 2 });
+    renderDisparadores();
+  });
+
+  function leerDisparadoresDelDOM(){
+    document.querySelectorAll(".disparador-frases").forEach((ta, i) => {
+      if(!disparadores[i]) return;
+      disparadores[i].frases = ta.value.split("\\n").map(f => f.trim()).filter(Boolean);
+    });
+    document.querySelectorAll(".disparador-tipo").forEach((sel, i) => {
+      if(!disparadores[i]) return;
+      disparadores[i].tipo = sel.value;
+    });
+    document.querySelectorAll(".disparador-pausa").forEach((input, i) => {
+      if(!disparadores[i]) return;
+      disparadores[i].pausa_segundos = parseFloat(input.value) || 0;
+    });
+    document.querySelectorAll(".disparador-clave").forEach((sel, i) => {
+      if(!disparadores[i]) return;
+      disparadores[i].clave = sel.value;
+    });
+  }
+
   async function cargarConfig(){
     const cfg = await llamarGET("/config");
     const msg = document.getElementById("saveMsg");
@@ -2649,8 +2832,12 @@ ${estilosBase()}
     renderPasos();
     pasosEnlace = Array.isArray(cfg.seguimientos_enlace) ? JSON.parse(JSON.stringify(cfg.seguimientos_enlace)) : [];
     renderPasosEnlace();
+    audiosDisponibles = cfg.audios || {};
+    fotosDisponibles = cfg.fotos || {};
     renderAudios(cfg.audios || {});
     renderFotos(cfg.fotos || {});
+    disparadores = Array.isArray(cfg.disparadores) ? JSON.parse(JSON.stringify(cfg.disparadores)) : [];
+    renderDisparadores();
     document.getElementById("btnGuardar").disabled = false;
   }
 
@@ -2684,7 +2871,7 @@ ${estilosBase()}
         const data = await llamarPOST("/audios/eliminar", { clave });
         if(data && !data.error){
           const cfgActualizado = await llamarGET("/config");
-          if(cfgActualizado) renderAudios(cfgActualizado.audios || {});
+          if(cfgActualizado){ audiosDisponibles = cfgActualizado.audios || {}; renderAudios(audiosDisponibles); renderDisparadores(); }
         } else {
           alert("No se pudo eliminar: " + (data?.error || "error desconocido"));
           btn.disabled = false; btn.textContent = "quitar";
@@ -2731,7 +2918,7 @@ ${estilosBase()}
         document.getElementById("audioNombre").value = "";
         inputArchivo.value = "";
         const cfgActualizado = await llamarGET("/config");
-        if(cfgActualizado) renderAudios(cfgActualizado.audios || {});
+        if(cfgActualizado){ audiosDisponibles = cfgActualizado.audios || {}; renderAudios(audiosDisponibles); renderDisparadores(); }
       } else {
         msg.style.color = "var(--red)";
         msg.textContent = "❌ " + (data?.error || "No se pudo subir el audio.");
@@ -2774,7 +2961,7 @@ ${estilosBase()}
         const data = await llamarPOST("/fotos/eliminar", { clave });
         if(data && !data.error){
           const cfgActualizado = await llamarGET("/config");
-          if(cfgActualizado) renderFotos(cfgActualizado.fotos || {});
+          if(cfgActualizado){ fotosDisponibles = cfgActualizado.fotos || {}; renderFotos(fotosDisponibles); renderDisparadores(); }
         } else {
           alert("No se pudo eliminar: " + (data?.error || "error desconocido"));
           btn.disabled = false; btn.textContent = "quitar";
@@ -2806,7 +2993,7 @@ ${estilosBase()}
         document.getElementById("fotoNombre").value = "";
         inputArchivo.value = "";
         const cfgActualizado = await llamarGET("/config");
-        if(cfgActualizado) renderFotos(cfgActualizado.fotos || {});
+        if(cfgActualizado){ fotosDisponibles = cfgActualizado.fotos || {}; renderFotos(fotosDisponibles); renderDisparadores(); }
       } else {
         msg.style.color = "var(--red)";
         msg.textContent = "❌ " + (data?.error || "No se pudo subir la foto.");
@@ -2833,8 +3020,13 @@ ${estilosBase()}
   document.getElementById("btnGuardar").addEventListener("click", async () => {
     leerPasosDelDOM();
     leerPasosEnlaceDelDOM();
+    leerDisparadoresDelDOM();
     if(pasos.length === 0){
       if(!confirm("No hay ningún paso de seguimiento normal configurado. ¿Seguro que quieres guardar así (se quedará sin seguimientos automáticos)?")) return;
+    }
+    const disparadoresSinClave = disparadores.filter(d => !d.clave);
+    if(disparadoresSinClave.length > 0){
+      if(!confirm("Hay " + disparadoresSinClave.length + " disparador(es) sin ningún audio/foto seleccionado (o no tienes ninguno subido todavía). Se van a ignorar al guardar. ¿Continuar?")) return;
     }
     const body = {
       ai_prompt: document.getElementById("prompt").value,
@@ -2845,7 +3037,8 @@ ${estilosBase()}
       seguimientos_enlace: pasosEnlace,
       calificacion_activa: document.getElementById("calificacionActiva").checked,
       criterios_calificacion: document.getElementById("criteriosCalificacion").value,
-      enlace_calificacion: document.getElementById("enlaceCalificacion").value
+      enlace_calificacion: document.getElementById("enlaceCalificacion").value,
+      disparadores: disparadores
     };
     const nuevaClave = document.getElementById("openaiKey").value.trim();
     if(nuevaClave) body.openai_api_key = nuevaClave;
