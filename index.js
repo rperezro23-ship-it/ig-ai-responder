@@ -2659,6 +2659,14 @@ ${estilosBase()}
     background:rgba(201,155,255,.03);
   }
   .etapa-card-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px; }
+  .etapa-card-head-botones{ display:flex; align-items:center; gap:8px; flex-shrink:0; }
+  .etapa-mover-arriba, .etapa-mover-abajo{
+    background:var(--surface-3); border:1px solid var(--border); color:var(--muted);
+    border-radius:8px; width:30px; height:30px; cursor:pointer; font-size:13px;
+    display:flex; align-items:center; justify-content:center; transition:color .12s, border-color .12s;
+  }
+  .etapa-mover-arriba:hover:not(:disabled), .etapa-mover-abajo:hover:not(:disabled){ color:#C99BFF; border-color:rgba(201,155,255,.4); }
+  .etapa-mover-arriba:disabled, .etapa-mover-abajo:disabled{ opacity:.3; cursor:default; }
   .etapa-card-head .eyebrow-num{ font-family:var(--mono); font-size:12px; color:#C99BFF; }
   .etapa-subseccion{ border-top:1px dashed var(--border); margin-top:16px; padding-top:16px; }
   .etapa-subseccion-titulo{ font-family:var(--display); font-weight:600; font-size:13.5px; margin:0 0 10px; color:var(--muted); }
@@ -2786,41 +2794,6 @@ ${estilosBase()}
           <div id="listaDisparadores"></div>
           <button class="add-paso" id="addDisparador" type="button">+ Agregar disparador general</button>
         </div>
-      </div>
-
-      <div class="col">
-        <div class="card card-etapas">
-          <h2>🧭 Etapas de la conversación</h2>
-          <p class="hint">
-            Cada lead puede estar en una <b>etapa</b> (o en ninguna, y entonces usa el prompt general de la izquierda).
-            Sirve para que preguntas de "sí/no" no se crucen entre distintos momentos de la conversación: si en la
-            etapa "precio" un "sí" debe hacer una cosa y en la etapa "agendar" otro "sí" debe hacer algo distinto,
-            cada etapa solo conoce SU propio prompt — la IA no ve las demás preguntas sí/no al mismo tiempo.
-          </p>
-          <p class="hint">
-            Hay <b>dos formas</b> de mover a un lead de etapa:<br><br>
-            <b>1) Por palabra clave (garantizado, recomendado):</b> defines frases — igual que los disparadores de
-            audio/foto — y en cuanto el cliente escribe alguna de ellas, el sistema cambia de etapa POR CÓDIGO, sin
-            depender de que la IA decida algo. Esta es la forma confiable de avanzar el flujo.<br><br>
-            <b>2) Por marcador en el prompt (manual/adicional):</b> el prompt puede incluir
-            <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:clave]]</code>
-            al final de una respuesta para casos más matizados que no se puedan reducir a una palabra clave fija — pero
-            esto SÍ depende de que la IA decida ponerlo, así que puede fallar.
-            También puedes cambiar la etapa de un lead a mano desde <a href="/chats">Chats</a>.
-          </p>
-
-          <div class="etapa-subseccion" style="border-top:none; margin-top:0; padding-top:0;">
-            <p class="etapa-subseccion-titulo">🔀 Transiciones generales (para ENTRAR a una etapa, cuando el lead todavía no tiene ninguna)</p>
-            <p class="hint" style="margin:0 0 10px;">Si el cliente escribe alguna de estas frases mientras todavía no está en ninguna etapa, entra GARANTIZADO a la etapa que elijas — sin depender del prompt general.</p>
-            <div id="listaTransicionesGenerales"></div>
-            <button class="add-paso" id="addTransicionGeneral" type="button">+ Agregar transición general</button>
-          </div>
-
-          <div style="height:1px; background:var(--border); margin:22px 0;"></div>
-
-          <div id="listaEtapas"></div>
-          <button class="add-paso" id="addEtapa" type="button">+ Agregar etapa</button>
-        </div>
 
         <div class="card">
           <h2>Enlace de calificación (calendario / formulario)</h2>
@@ -2844,6 +2817,45 @@ ${estilosBase()}
           <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en cualquiera de estos mensajes.</p>
           <div id="pasos"></div>
           <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="card card-etapas">
+          <h2>🧭 Etapas de la conversación</h2>
+          <p class="hint">
+            Cada lead puede estar en una <b>etapa</b> (o en ninguna, y entonces usa el prompt general de la izquierda).
+            Sirve para que preguntas de "sí/no" no se crucen entre distintos momentos de la conversación: si en la
+            etapa "precio" un "sí" debe hacer una cosa y en la etapa "agendar" otro "sí" debe hacer algo distinto,
+            cada etapa solo conoce SU propio prompt — la IA no ve las demás preguntas sí/no al mismo tiempo.
+          </p>
+          <p class="hint">
+            Hay <b>dos formas</b> de mover a un lead de etapa:<br><br>
+            <b>1) Por palabra clave (garantizado, recomendado):</b> defines frases — igual que los disparadores de
+            audio/foto — y en cuanto el cliente escribe alguna de ellas, el sistema cambia de etapa POR CÓDIGO, sin
+            depender de que la IA decida algo. Esta es la forma confiable de avanzar el flujo.<br><br>
+            <b>2) Por marcador en el prompt (manual/adicional):</b> el prompt puede incluir
+            <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:clave]]</code>
+            al final de una respuesta para casos más matizados que no se puedan reducir a una palabra clave fija — pero
+            esto SÍ depende de que la IA decida ponerlo, así que puede fallar.
+            También puedes cambiar la etapa de un lead a mano desde <a href="/chats">Chats</a>.
+          </p>
+          <p class="hint">
+            Usa las flechas ▲▼ de cada tarjeta para reordenar tus etapas (por ejemplo, para meter una etapa nueva
+            antes de la primera) sin tener que borrar y volver a crear nada.
+          </p>
+
+          <div class="etapa-subseccion" style="border-top:none; margin-top:0; padding-top:0;">
+            <p class="etapa-subseccion-titulo">🔀 Transiciones generales (para ENTRAR a una etapa, cuando el lead todavía no tiene ninguna)</p>
+            <p class="hint" style="margin:0 0 10px;">Si el cliente escribe alguna de estas frases mientras todavía no está en ninguna etapa, entra GARANTIZADO a la etapa que elijas — sin depender del prompt general.</p>
+            <div id="listaTransicionesGenerales"></div>
+            <button class="add-paso" id="addTransicionGeneral" type="button">+ Agregar transición general</button>
+          </div>
+
+          <div style="height:1px; background:var(--border); margin:22px 0;"></div>
+
+          <div id="listaEtapas"></div>
+          <button class="add-paso" id="addEtapa" type="button">+ Agregar etapa</button>
         </div>
       </div>
     </div>
@@ -3151,8 +3163,12 @@ ${estilosBase()}
       div.className = "etapa-card";
       div.innerHTML = \`
         <div class="etapa-card-head">
-          <span class="eyebrow-num">ETAPA \${i + 1}</span>
-          <button type="button" class="etapa-quitar" data-i="\${i}">quitar etapa</button>
+          <span class="eyebrow-num">ETAPA \${i + 1}\${et.nombre ? " · " + et.nombre.replace(/</g,"&lt;") : ""}</span>
+          <div class="etapa-card-head-botones">
+            <button type="button" class="etapa-mover-arriba" data-i="\${i}" title="Mover arriba" \${i === 0 ? "disabled" : ""}>▲</button>
+            <button type="button" class="etapa-mover-abajo" data-i="\${i}" title="Mover abajo" \${i === etapas.length - 1 ? "disabled" : ""}>▼</button>
+            <button type="button" class="etapa-quitar" data-i="\${i}">quitar etapa</button>
+          </div>
         </div>
         <div class="row2" style="margin-bottom:12px;">
           <div>
@@ -3187,6 +3203,22 @@ ${estilosBase()}
     cont.querySelectorAll(".etapa-quitar").forEach(b => b.addEventListener("click", e => {
       leerEtapasDelDOM();
       etapas.splice(+e.target.dataset.i, 1);
+      renderEtapas();
+    }));
+
+    cont.querySelectorAll(".etapa-mover-arriba").forEach(b => b.addEventListener("click", e => {
+      leerEtapasDelDOM();
+      const i = +e.target.dataset.i;
+      if(i <= 0) return;
+      [etapas[i - 1], etapas[i]] = [etapas[i], etapas[i - 1]];
+      renderEtapas();
+    }));
+
+    cont.querySelectorAll(".etapa-mover-abajo").forEach(b => b.addEventListener("click", e => {
+      leerEtapasDelDOM();
+      const i = +e.target.dataset.i;
+      if(i >= etapas.length - 1) return;
+      [etapas[i], etapas[i + 1]] = [etapas[i + 1], etapas[i]];
       renderEtapas();
     }));
 
