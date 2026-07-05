@@ -739,9 +739,28 @@ async function enviarImagenInstagram(senderId, urlImagen) {
 }
 
 // Pequeña espera asíncrona, usada por el envío secuencial de mensajes para
-// respetar los marcadores [[pausa:N]] (ver más abajo).
+// respetar los marcadores [[pausa:N]] (ver más abajo) y por los reintentos.
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// El envío de adjuntos (audio/foto) a la API de Instagram a veces falla de
+// forma intermitente del lado de Meta ("Upload failed", code 100) sin que
+// haya nada mal con el archivo. Este helper reintenta una vez más antes de
+// darse por vencido, con una breve espera en medio.
+async function conReintento(fn, intentos = 1, esperaMs = 1500) {
+  let ultimoError;
+  for (let i = 0; i <= intentos; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      ultimoError = err;
+      if (i === intentos) break;
+      console.warn(`⚠️ Falló el intento ${i + 1} de enviar el adjunto, reintentando en ${esperaMs}ms:`, err.response?.data || err.message);
+      await sleep(esperaMs);
+    }
+  }
+  throw ultimoError;
 }
 
 // Marcadores dentro de un texto que, en vez de mandarse todos pegados en un
@@ -842,11 +861,11 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
     if (parte.tipo === "audio") {
       console.log(`🎤 Enviando audio pregrabado "${parte.clave}" a ${senderId}`);
       await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${item.url}`);
-      await enviarAudioInstagram(senderId, item.url);
+      await conReintento(() => enviarAudioInstagram(senderId, item.url));
     } else {
       console.log(`📷 Enviando foto pregrabada "${parte.clave}" a ${senderId}`);
       await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${item.url}`);
-      await enviarImagenInstagram(senderId, item.url);
+      await conReintento(() => enviarImagenInstagram(senderId, item.url));
     }
     algoSeMando = true;
   }
@@ -1375,7 +1394,7 @@ app.post("/chats/enviar-foto", requireAdminKey, async (req, res) => {
     const { data: urlData } = supabase.storage.from("fotos").getPublicUrl(rutaArchivo);
     const url = urlData.publicUrl;
 
-    await enviarImagenInstagram(senderId, url);
+    await conReintento(() => enviarImagenInstagram(senderId, url));
     await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${url}`);
     await cancelarSeguimientosPendientesDB(senderId);
 
@@ -1419,7 +1438,7 @@ app.post("/chats/enviar-audio", requireAdminKey, async (req, res) => {
     const { data: urlData } = supabase.storage.from("audios").getPublicUrl(rutaArchivo);
     const url = urlData.publicUrl;
 
-    await enviarAudioInstagram(senderId, url);
+    await conReintento(() => enviarAudioInstagram(senderId, url));
     await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${url}`);
     await cancelarSeguimientosPendientesDB(senderId);
 
