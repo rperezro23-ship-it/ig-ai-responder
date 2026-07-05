@@ -738,59 +738,117 @@ async function enviarImagenInstagram(senderId, urlImagen) {
   );
 }
 
-// Marcadores dentro de un texto que, en vez de mandarse como texto plano,
-// se resuelven a contenido multimedia pregrabado: [[audio:clave]] manda un
-// audio ya subido en /panel, [[foto:clave]] manda una foto ya subida. Sirve
-// tanto para la respuesta principal de la IA como para los mensajes de
+// Pequeña espera asíncrona, usada por el envío secuencial de mensajes para
+// respetar los marcadores [[pausa:N]] (ver más abajo).
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Marcadores dentro de un texto que, en vez de mandarse todos pegados en un
+// solo mensaje, se resuelven como una SECUENCIA de mensajes independientes:
+//   [[audio:clave]]  -> manda un audio ya subido en /panel
+//   [[foto:clave]]   -> manda una foto ya subida en /panel
+//   [[pausa:N]]      -> no manda nada, solo espera N segundos antes de mandar
+//                       lo que sigue como un mensaje NUEVO (burbuja aparte)
+// Sirve tanto para la respuesta principal de la IA como para los mensajes de
 // seguimiento automático (normal o del enlace) — cualquier mensaje de texto
-// del sistema puede llevar estos marcadores.
-// Devuelve el texto que sí se mandó como texto (sin los marcadores), útil
-// para lógicas que necesitan revisar el contenido textual real enviado
-// (ej. la detección del enlace de calificación).
-const MARCADOR_MULTIMEDIA_REGEX = /\[\[(audio|foto):([a-zA-Z0-9_-]+)\]\]/gi;
+// del sistema puede llevar estos marcadores. Ejemplo de uso en el prompt:
+//   "Perfecto, te dejo el enlace por aquí 👇[[pausa:8]]https://calendly.com/..."
+// manda primero el texto, espera 8 segundos, y luego manda el enlace solo,
+// en su propio mensaje (para que no salga todo pegado en un mismo bloque).
+const MARCADOR_MULTIMEDIA_REGEX = /\[\[(audio|foto|pausa):([a-zA-Z0-9_.-]+)\]\]/gi;
 
-async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
-  const coincidencias = [...contenidoCrudo.matchAll(MARCADOR_MULTIMEDIA_REGEX)];
-  const textoLimpio = contenidoCrudo.replace(MARCADOR_MULTIMEDIA_REGEX, "").trim();
+// Convierte el contenido crudo (con marcadores) en una lista ordenada de
+// "partes" a mandar en secuencia, respetando el orden en el que aparecen en
+// el string original: { tipo:"texto", valor }, { tipo:"audio"|"foto", clave }
+// o { tipo:"pausa", segundos }.
+function parsearPartes(contenidoCrudo) {
+  const partes = [];
+  let ultimoIndice = 0;
+  const regex = new RegExp(MARCADOR_MULTIMEDIA_REGEX.source, "gi");
+  let match;
 
-  if (textoLimpio) {
-    await agregarAlHistorialDB(senderId, "assistant", textoLimpio);
-    await enviarMensajeInstagram(senderId, textoLimpio);
+  while ((match = regex.exec(contenidoCrudo)) !== null) {
+    const textoPrevio = contenidoCrudo.slice(ultimoIndice, match.index).trim();
+    if (textoPrevio) partes.push({ tipo: "texto", valor: textoPrevio });
+
+    const tipoMarcador = match[1].toLowerCase();
+    const valorMarcador = match[2];
+
+    if (tipoMarcador === "pausa") {
+      const segundos = parseFloat(valorMarcador);
+      if (Number.isFinite(segundos) && segundos > 0) {
+        partes.push({ tipo: "pausa", segundos });
+      }
+    } else {
+      partes.push({ tipo: tipoMarcador, clave: valorMarcador.toLowerCase() });
+    }
+
+    ultimoIndice = match.index + match[0].length;
   }
 
-  let algoSeMando = Boolean(textoLimpio);
+  const textoFinal = contenidoCrudo.slice(ultimoIndice).trim();
+  if (textoFinal) partes.push({ tipo: "texto", valor: textoFinal });
 
-  for (const coincidencia of coincidencias) {
-    const tipo = coincidencia[1].toLowerCase();   // "audio" | "foto"
-    const clave = coincidencia[2].toLowerCase();
-    const almacen = tipo === "audio" ? configActual.audios : configActual.fotos;
-    const item = almacen?.[clave];
+  return partes;
+}
 
-    if (!item?.url) {
-      console.warn(`⚠️ Se pidió el ${tipo} "${clave}" pero no está configurado en /panel. Se ignora ese marcador.`);
+// Manda un contenido crudo (con marcadores [[audio:..]], [[foto:..]] y
+// [[pausa:N]]) como una secuencia de mensajes independientes, respetando las
+// pausas indicadas entre cada uno. Se usa tanto para la respuesta principal
+// de la IA como para los mensajes de seguimiento automático (normal o del
+// enlace). Devuelve el texto de todas las partes de texto que se mandaron
+// (unidas con salto de línea), útil para lógicas que necesitan revisar el
+// contenido textual real enviado (ej. la detección del enlace de calificación).
+async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
+  const partes = parsearPartes(contenidoCrudo);
+
+  const textosEnviados = [];
+  let algoSeMando = false;
+
+  for (const parte of partes) {
+    if (parte.tipo === "pausa") {
+      await sleep(parte.segundos * 1000);
       continue;
     }
 
-    if (tipo === "audio") {
-      console.log(`🎤 Enviando audio pregrabado "${clave}" a ${senderId}`);
-      await agregarAlHistorialDB(senderId, "assistant", `🎤 [Audio enviado: ${clave}]`);
+    if (parte.tipo === "texto") {
+      await agregarAlHistorialDB(senderId, "assistant", parte.valor);
+      await enviarMensajeInstagram(senderId, parte.valor);
+      textosEnviados.push(parte.valor);
+      algoSeMando = true;
+      continue;
+    }
+
+    // tipo === "audio" | "foto"
+    const almacen = parte.tipo === "audio" ? configActual.audios : configActual.fotos;
+    const item = almacen?.[parte.clave];
+
+    if (!item?.url) {
+      console.warn(`⚠️ Se pidió el ${parte.tipo} "${parte.clave}" pero no está configurado en /panel. Se ignora ese marcador.`);
+      continue;
+    }
+
+    if (parte.tipo === "audio") {
+      console.log(`🎤 Enviando audio pregrabado "${parte.clave}" a ${senderId}`);
+      await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${item.url}`);
       await enviarAudioInstagram(senderId, item.url);
     } else {
-      console.log(`📷 Enviando foto pregrabada "${clave}" a ${senderId}`);
+      console.log(`📷 Enviando foto pregrabada "${parte.clave}" a ${senderId}`);
       await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${item.url}`);
       await enviarImagenInstagram(senderId, item.url);
     }
     algoSeMando = true;
   }
 
-  // Si había marcadores pero ninguno se pudo resolver (todos mal escritos o
-  // audios/fotos borrados) y no quedó texto, no se manda nada — ya se avisó
-  // por consola. Evita mandarle al cliente el marcador crudo tipo "[[audio:x]]".
+  // Si solo había marcadores mal escritos, pausas sueltas o nada rescatable,
+  // no se manda nada — ya se avisó por consola. Evita mandarle al cliente
+  // marcadores crudos tipo "[[audio:x]]" o dejar todo en silencio sin pista.
   if (!algoSeMando) {
-    console.warn(`⚠️ No se pudo mandar nada a ${senderId}: el mensaje solo tenía marcadores multimedia que no existen en /panel.`);
+    console.warn(`⚠️ No se pudo mandar nada a ${senderId}: el contenido solo tenía marcadores multimedia que no existen en /panel, o pausas sin contenido alrededor.`);
   }
 
-  return textoLimpio;
+  return textosEnviados.join("\n");
 }
 
 // ---------------------------------------------------------------
@@ -881,11 +939,11 @@ async function procesarBuffer(senderId) {
 
       await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
 
-      // Si el prompt decide mandar un audio o foto pregrabada en vez de (o
-      // además de) texto — ej. "[[audio:peso]]" o "[[foto:antes_despues1]]" —
-      // este helper lo detecta, manda cada parte por su lado (texto primero,
-      // luego cada archivo) y devuelve el texto real que se mandó, para la
-      // detección del enlace de calificación más abajo.
+      // Si el prompt decide mandar la respuesta en varias burbujas (con
+      // [[pausa:N]]) o incluir un audio/foto pregrabada ([[audio:clave]] /
+      // [[foto:clave]]), este helper lo detecta, manda cada parte por su
+      // lado en orden (respetando las pausas) y devuelve el texto real que
+      // se mandó, para la detección del enlace de calificación más abajo.
       const textoAEnviar = await enviarContenidoConMarcadores(senderId, respuestaCruda);
 
       console.log(`✅ Respondido a ${senderId} (una sola respuesta por ${mensajesAResponder.length} línea(s))`);
@@ -1290,6 +1348,50 @@ app.post("/chats/enviar-foto", requireAdminKey, async (req, res) => {
     res.json({ ok: true, url });
   } catch (err) {
     console.error(`❌ Error enviando foto manual a ${req.body?.senderId}:`, err.response?.data || err.message);
+    const mensajeError = err.response?.data?.error?.message || err.message;
+    res.status(500).json({ error: mensajeError });
+  }
+});
+
+// Envía un audio grabado desde el micrófono en /chats (respuesta humana con
+// nota de voz, en vez de escribir texto). Se sube al bucket "audios" bajo
+// una subcarpeta "manual/" para no mezclarse con los audios pregrabados con
+// nombre/clave que se usan desde /panel. Se guarda en el historial con el
+// marcador [[audio]]url (igual que los audios pregrabados) para que se vea
+// como una nota de voz reproducible dentro de /chats.
+app.post("/chats/enviar-audio", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId, base64, tipo } = req.body || {};
+    if (!senderId || !base64) {
+      return res.status(400).json({ error: "Falta el destinatario o el audio." });
+    }
+
+    const extension = (tipo && tipo.includes("/")) ? tipo.split("/")[1].split(";")[0].replace(/;.*$/, "") : "webm";
+    const rutaArchivo = `manual/${senderId}_${Date.now()}.${extension}`;
+    const buffer = Buffer.from(base64, "base64");
+
+    if (buffer.length > 15 * 1024 * 1024) {
+      return res.status(400).json({ error: "El audio pesa más de 15MB, prueba con una grabación más corta." });
+    }
+
+    const { error: errorSubida } = await supabase.storage
+      .from("audios")
+      .upload(rutaArchivo, buffer, { contentType: tipo || "audio/webm", upsert: true });
+
+    if (errorSubida) {
+      return res.status(500).json({ error: "No se pudo subir el audio: " + errorSubida.message + ". ¿Existe el bucket 'audios' y es público? Revisa migracion_supabase.sql." });
+    }
+
+    const { data: urlData } = supabase.storage.from("audios").getPublicUrl(rutaArchivo);
+    const url = urlData.publicUrl;
+
+    await enviarAudioInstagram(senderId, url);
+    await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${url}`);
+    await cancelarSeguimientosPendientesDB(senderId);
+
+    res.json({ ok: true, url });
+  } catch (err) {
+    console.error(`❌ Error enviando audio manual a ${req.body?.senderId}:`, err.response?.data || err.message);
     const mensajeError = err.response?.data?.error?.message || err.message;
     res.status(500).json({ error: mensajeError });
   }
@@ -2204,6 +2306,11 @@ ${estilosBase()}
     background:rgba(63,199,232,.1); border:1px solid rgba(63,199,232,.28); border-radius:6px;
     padding:3px 8px; margin-top:8px;
   }
+  .pausa-tag{
+    display:inline-block; font-family:var(--mono); font-size:11.5px; color:var(--green);
+    background:var(--green-soft); border:1px solid rgba(49,217,124,.28); border-radius:6px;
+    padding:3px 8px; margin-top:8px;
+  }
   @media (max-width:860px){ .savebar{ left:0; padding:18px 18px 20px; } .save-btn{ flex:1; } }
 </style>
 </head>
@@ -2245,7 +2352,7 @@ ${estilosBase()}
 
         <div class="card">
           <h2>Mensaje del bot</h2>
-          <p class="hint">Instrucciones que sigue la IA para responder a los clientes. Sé específico: tono, qué información dar, qué evitar. Si el lead ya cumplió los criterios de calificación, este mismo prompt es el que debe mandarle el enlace del formulario o calendario correspondiente.</p>
+          <p class="hint">Instrucciones que sigue la IA para responder a los clientes. Sé específico: tono, qué información dar, qué evitar. Si el lead ya cumplió los criterios de calificación, este mismo prompt es el que debe mandarle el enlace del formulario o calendario correspondiente. También puedes usar <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> dentro de la respuesta para partirla en varios mensajes separados (burbujas distintas), esperando N segundos entre cada uno — por ejemplo: <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">Hola, ¿cómo estás?[[pausa:8]]¿Qué tal te fue con el entrenamiento?</code> manda dos mensajes separados con 8 segundos de por medio, simulando que estás escribiendo en el momento. También sirve para mandar un audio o foto pregrabada después de un texto, por ejemplo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">Te dejo un audio explicando esto[[pausa:5]][[audio:peso]]</code>.</p>
           <label for="prompt">Prompt del sistema</label>
           <textarea id="prompt" rows="8" placeholder="Eres el asistente de..."></textarea>
         </div>
@@ -2287,7 +2394,7 @@ ${estilosBase()}
 
         <div class="card">
           <h2>Audios y fotos pregrabados</h2>
-          <p class="hint">Sube audios y fotos, y ponles un nombre corto (sin espacios). Úsalos en tu <b>prompt</b> o en los mensajes de <b>seguimientos</b> (a la derecha) con los marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:nombre]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:nombre]]</code> — por ejemplo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:antes_despues1]]</code>. Le llegan al cliente como un mensaje de audio o imagen normal de Instagram. Si el mensaje tiene texto además del marcador, primero se envía el texto y luego el archivo.</p>
+          <p class="hint">Sube audios y fotos, y ponles un nombre corto (sin espacios). Úsalos en tu <b>prompt</b> o en los mensajes de <b>seguimientos</b> (a la derecha) con los marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:nombre]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:nombre]]</code> — por ejemplo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:antes_despues1]]</code>. Le llegan al cliente como un mensaje de audio o imagen normal de Instagram. Si el mensaje tiene texto además del marcador, primero se envía el texto y luego el archivo — usa <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> entre ambos si quieres que pase N segundos de espera antes de mandar el archivo, en vez de mandarlo pegado justo después del texto.</p>
 
           <p style="font-family:var(--display); font-weight:600; font-size:14.5px; margin:18px 0 10px;">🎤 Audios</p>
           <div id="listaAudios" style="margin-bottom:14px;"></div>
@@ -2330,18 +2437,20 @@ ${estilosBase()}
           <label for="enlaceCalificacion">Enlace a detectar</label>
           <input type="text" id="enlaceCalificacion" placeholder="https://calendly.com/tu-usuario/...">
           <span class="enlace-tag">Debe coincidir tal cual aparece en el mensaje que manda el bot</span>
+          <br>
+          <span class="pausa-tag">Tip: en tu prompt escribe algo como "Perfecto, te dejo el enlace por aquí 👇[[pausa:6]]https://tu-enlace..." para que el enlace llegue solo, en su propio mensaje.</span>
 
           <div style="height:1px; background:var(--border); margin:24px 0;"></div>
 
           <h2 style="margin-bottom:5px;">Seguimiento especial a ese enlace</h2>
-          <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de arriba. Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. Útil para algo como "¿pudiste agendar tu espacio?". También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en estos mensajes.</p>
+          <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de arriba. Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. Útil para algo como "¿pudiste agendar tu espacio?". También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en estos mensajes.</p>
           <div id="pasosEnlace"></div>
           <button class="add-paso" id="addPasoEnlace" type="button">+ Agregar paso de seguimiento al enlace</button>
         </div>
 
         <div class="card">
           <h2>Seguimientos automáticos</h2>
-          <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación (ver seguimiento especial a la izquierda). También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en cualquiera de estos mensajes.</p>
+          <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación (ver seguimiento especial a la izquierda). También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en cualquiera de estos mensajes.</p>
           <div id="pasos"></div>
           <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
         </div>
@@ -2806,8 +2915,13 @@ ${estilosBase()}
   }
   .btn-adjuntar:hover{ color:var(--green); border-color:var(--green); }
   .btn-adjuntar:disabled{ opacity:.5; cursor:default; }
+  .btn-adjuntar.grabando{
+    background:var(--red-soft); color:var(--red); border-color:rgba(255,93,93,.4);
+    width:auto; padding:0 12px; font-family:var(--mono); font-size:13px; font-weight:600;
+  }
   .bubble-imagen{ padding:5px !important; background:transparent !important; }
   .bubble-imagen img{ max-width:220px; max-height:280px; border-radius:12px; display:block; object-fit:cover; }
+  .bubble-imagen audio{ display:block; height:38px; width:220px; }
   .menu-contextual{
     position:fixed; z-index:1000; background:var(--surface-3); border:1px solid var(--border);
     border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,.4); padding:6px; min-width:230px; display:none;
@@ -2934,6 +3048,7 @@ ${estilosBase()}
         <div class="chat-input-bar" id="chatInputBar">
           <button class="btn-adjuntar" id="btnAdjuntarFoto" title="Enviar una foto">📷</button>
           <input type="file" id="inputFotoManual" accept="image/*" style="display:none;">
+          <button class="btn-adjuntar" id="btnGrabarAudio" title="Grabar y enviar un audio">🎤</button>
           <textarea id="mensajeManual" rows="1" placeholder="Escribe una respuesta manual…"></textarea>
           <button class="btn-enviar" id="btnEnviarManual">Enviar</button>
         </div>
@@ -3288,6 +3403,110 @@ ${estilosBase()}
     }
   });
 
+  // --- Grabar y enviar un audio directo desde el micrófono ---
+  let mediaRecorder = null;
+  let audioChunksGrabacion = [];
+  let streamGrabacionActual = null;
+  let grabandoAudio = false;
+  let grabacionTimerInterval = null;
+  let grabacionSegundos = 0;
+  const btnGrabarAudio = document.getElementById("btnGrabarAudio");
+
+  async function iniciarGrabacionAudio(){
+    const errorBox = document.getElementById("chatInputError");
+    errorBox.classList.remove("visible");
+    errorBox.textContent = "";
+
+    try {
+      streamGrabacionActual = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      errorBox.textContent = "❌ No se pudo acceder al micrófono: " + err.message;
+      errorBox.classList.add("visible");
+      return;
+    }
+
+    audioChunksGrabacion = [];
+    mediaRecorder = new MediaRecorder(streamGrabacionActual);
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksGrabacion.push(e.data); };
+    mediaRecorder.start();
+
+    grabandoAudio = true;
+    grabacionSegundos = 0;
+    btnGrabarAudio.classList.add("grabando");
+    btnGrabarAudio.textContent = "⏹ 0:00";
+    grabacionTimerInterval = setInterval(() => {
+      grabacionSegundos++;
+      const m = Math.floor(grabacionSegundos / 60);
+      const s = String(grabacionSegundos % 60).padStart(2, "0");
+      btnGrabarAudio.textContent = "⏹ " + m + ":" + s;
+    }, 1000);
+  }
+
+  async function detenerYEnviarGrabacion(){
+    clearInterval(grabacionTimerInterval);
+    grabandoAudio = false;
+    btnGrabarAudio.classList.remove("grabando");
+    btnGrabarAudio.disabled = true;
+    btnGrabarAudio.textContent = "⏳";
+
+    const blob = await new Promise((resolve) => {
+      mediaRecorder.onstop = () => {
+        resolve(new Blob(audioChunksGrabacion, { type: mediaRecorder.mimeType || "audio/webm" }));
+      };
+      mediaRecorder.stop();
+    });
+
+    if (streamGrabacionActual) streamGrabacionActual.getTracks().forEach(t => t.stop());
+
+    const errorBox = document.getElementById("chatInputError");
+
+    if (blob.size === 0) {
+      btnGrabarAudio.disabled = false;
+      btnGrabarAudio.textContent = "🎤";
+      return;
+    }
+
+    try {
+      const base64 = await new Promise((resolve, reject) => {
+        const lector = new FileReader();
+        lector.onload = () => resolve(lector.result.substring(lector.result.indexOf(",") + 1));
+        lector.onerror = () => reject(new Error("No se pudo procesar el audio grabado."));
+        lector.readAsDataURL(blob);
+      });
+
+      const res = await fetch("/chats/enviar-audio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ senderId: senderSeleccionado, base64, tipo: blob.type })
+      });
+      if(res.status === 401){
+        window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname);
+        return;
+      }
+      const data = await res.json();
+      if(!res.ok){
+        errorBox.textContent = "❌ " + (data.error || "No se pudo enviar el audio.");
+        errorBox.classList.add("visible");
+      } else {
+        ultimoHistorialJSON = null;
+        await cargarHistorial();
+        await cargarConversaciones();
+      }
+    } catch (err) {
+      errorBox.textContent = "❌ Error enviando el audio: " + err.message;
+      errorBox.classList.add("visible");
+    } finally {
+      btnGrabarAudio.disabled = false;
+      btnGrabarAudio.textContent = "🎤";
+    }
+  }
+
+  btnGrabarAudio.addEventListener("click", () => {
+    if(!senderSeleccionado) return;
+    if(!grabandoAudio) iniciarGrabacionAudio();
+    else detenerYEnviarGrabacion();
+  });
+
   document.getElementById("tabTodas").addEventListener("click", () => {
     filtroActual = "todas";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
@@ -3341,12 +3560,18 @@ ${estilosBase()}
     const estabaAbajo = cont.scrollTop + cont.clientHeight >= cont.scrollHeight - 60;
     cont.innerHTML = historial.map(m => {
       const esImagen = typeof m.content === "string" && m.content.startsWith("[[imagen]]");
-      const contenidoHTML = esImagen
-        ? \`<img src="\${m.content.slice(10)}" alt="imagen enviada" loading="lazy">\`
-        : escapar(m.content);
+      const esAudio = typeof m.content === "string" && m.content.startsWith("[[audio]]");
+      let contenidoHTML;
+      if (esImagen) {
+        contenidoHTML = \`<img src="\${m.content.slice(10)}" alt="imagen enviada" loading="lazy">\`;
+      } else if (esAudio) {
+        contenidoHTML = \`<audio controls src="\${m.content.slice(9)}"></audio>\`;
+      } else {
+        contenidoHTML = escapar(m.content);
+      }
       return \`
         <div class="bubble-row \${m.role === "assistant" ? "assistant" : "user"}">
-          <div class="bubble\${esImagen ? " bubble-imagen" : ""}">\${contenidoHTML}</div>
+          <div class="bubble\${(esImagen || esAudio) ? " bubble-imagen" : ""}">\${contenidoHTML}</div>
         </div>
       \`;
     }).join("");
