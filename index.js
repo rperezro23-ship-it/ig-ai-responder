@@ -960,6 +960,29 @@ function obtenerEtapaConfig(claveEtapa) {
   return (configActual.etapas || []).find(e => e.clave === claveEtapa) || null;
 }
 
+// Transiciones automáticas de etapa por palabra clave: igual que los
+// disparadores de audio/foto, esto NO depende de que la IA decida poner el
+// marcador [[etapa:clave]] en su respuesta (que es inconsistente, porque es
+// una decisión probabilística del modelo). Si el mensaje del cliente
+// contiene alguna de las frases configuradas, se cambia de etapa GARANTIZADO
+// por código. El marcador [[etapa:clave]] sigue funcionando también, como
+// mecanismo adicional/manual para casos que no se puedan reducir a una
+// palabra clave fija.
+//
+// etapa_destino === "" significa "salir de etapas" (volver al prompt general).
+function buscarTransicionActivada(mensajeUsuario, transiciones) {
+  const mensajeNormalizado = normalizarParaComparar(mensajeUsuario);
+  for (const t of (transiciones || [])) {
+    if (typeof t.etapa_destino !== "string" || !Array.isArray(t.frases)) continue;
+    const coincide = t.frases.some((frase) => {
+      const fraseNormalizada = normalizarParaComparar(frase);
+      return fraseNormalizada && mensajeNormalizado.includes(fraseNormalizada);
+    });
+    if (coincide) return t;
+  }
+  return null;
+}
+
 // si la conversación ya cumple con los criterios que definiste en
 // /panel (edad, objetivo, género, etc.) y marca la conversación como
 // "califica" la primera vez que se cumplen. Es una llamada aparte,
@@ -1057,7 +1080,29 @@ async function procesarBuffer(senderId) {
     // el lead esté en una etapa, se usa el prompt propio de esa etapa en vez
     // del prompt general — así la IA solo "ve" el contexto de sí/no que le
     // corresponde a ese punto de la conversación, y no el de otras etapas.
-    const etapaConfig = obtenerEtapaConfig(conv.etapa);
+    let etapaActualClave = conv.etapa || null;
+    let etapaConfig = obtenerEtapaConfig(etapaActualClave);
+
+    // Transición GARANTIZADA de etapa por palabra clave (ver buscarTransicionActivada):
+    // si el mensaje del cliente coincide con alguna frase configurada para la
+    // etapa actual (o, si no hay ninguna etapa activa, con las transiciones
+    // generales), se cambia de etapa por código ANTES de generar la respuesta
+    // — así la respuesta ya sale con el prompt de la nueva etapa, sin
+    // depender de que la IA decida poner el marcador [[etapa:...]].
+    const listaTransiciones = etapaConfig ? (etapaConfig.transiciones || []) : (configActual.transiciones_generales || []);
+    const transicion = buscarTransicionActivada(mensajeCompleto, listaTransiciones);
+    if (transicion && transicion.etapa_destino !== (etapaActualClave || "")) {
+      const nuevaEtapaConfig = transicion.etapa_destino ? obtenerEtapaConfig(transicion.etapa_destino) : null;
+      if (transicion.etapa_destino === "" || nuevaEtapaConfig) {
+        console.log(`🧭 Transición automática (palabra clave) de ${senderId}: "${etapaActualClave || "general"}" -> "${transicion.etapa_destino || "general"}"`);
+        etapaActualClave = transicion.etapa_destino || null;
+        etapaConfig = nuevaEtapaConfig;
+        await guardarConversacion(senderId, { etapa: etapaActualClave });
+      } else {
+        console.warn(`⚠️ Una transición apunta a la etapa "${transicion.etapa_destino}" pero no existe (o se borró) en /panel. Se ignora.`);
+      }
+    }
+
     const promptSistema = etapaConfig ? etapaConfig.prompt : configActual.ai_prompt;
 
     if (etapaConfig) {
@@ -1845,7 +1890,8 @@ let configActual = {
   audios: {}, // { claveAudio: { url, nombre_original, ruta_archivo, subido_en } }
   fotos: {},  // { claveFoto: { url, nombre_original, ruta_archivo, subido_en } }
   disparadores: [], // [{ frases: [], tipo: "audio"|"foto", clave, pausa_segundos }]  <- generales (fallback)
-  etapas: []  // [{ clave, nombre, prompt, disparadores: [...] }]  <- prompts y disparadores propios por etapa
+  etapas: [],  // [{ clave, nombre, prompt, disparadores: [...], transiciones: [...] }]
+  transiciones_generales: []  // [{ frases: [], etapa_destino }]  <- entrar a una etapa por palabra clave sin depender de la IA
 };
 
 // Cliente de OpenAI: se reconstruye cada vez que cambia configActual.openai_api_key
@@ -1890,6 +1936,7 @@ async function cargarConfigDesdeDB() {
       configActual.seguimientos = [...(configActual.seguimientos || [])].sort((a, b) => a.horas - b.horas);
       configActual.seguimientos_enlace = [...(configActual.seguimientos_enlace || [])].sort((a, b) => a.horas - b.horas);
       if (!Array.isArray(configActual.etapas)) configActual.etapas = [];
+      if (!Array.isArray(configActual.transiciones_generales)) configActual.transiciones_generales = [];
       actualizarClienteOpenAI();
       console.log("✅ Configuración cargada desde Supabase.");
     } else {
@@ -1905,6 +1952,7 @@ async function guardarConfigDB(nuevaConfig) {
   configActual.seguimientos = [...(configActual.seguimientos || [])].sort((a, b) => a.horas - b.horas);
   configActual.seguimientos_enlace = [...(configActual.seguimientos_enlace || [])].sort((a, b) => a.horas - b.horas);
   if (!Array.isArray(configActual.etapas)) configActual.etapas = [];
+  if (!Array.isArray(configActual.transiciones_generales)) configActual.transiciones_generales = [];
   actualizarClienteOpenAI();
 
   const { error } = await supabase
@@ -2033,6 +2081,20 @@ function normalizarDisparadores(disparadores) {
     .filter(d => d.frases.length > 0);
 }
 
+// Valida y normaliza un array de transiciones de etapa por palabra clave
+// (usado tanto para las generales como para las propias de cada etapa).
+// etapa_destino === "" es válido: significa "salir de etapas" (general).
+function normalizarTransiciones(transiciones) {
+  if (!Array.isArray(transiciones)) return [];
+  return transiciones
+    .filter(t => t && typeof t.etapa_destino === "string")
+    .map(t => ({
+      etapa_destino: t.etapa_destino.trim().toLowerCase(),
+      frases: Array.isArray(t.frases) ? t.frases.map(f => String(f).trim()).filter(Boolean) : []
+    }))
+    .filter(t => t.frases.length > 0);
+}
+
 // Valida y normaliza el array de etapas que llega desde /panel.
 function normalizarEtapas(etapas) {
   if (!Array.isArray(etapas)) return [];
@@ -2042,15 +2104,24 @@ function normalizarEtapas(etapas) {
       clave: e.clave.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_-]/g, "_"),
       nombre: typeof e.nombre === "string" ? e.nombre.trim() : "",
       prompt: typeof e.prompt === "string" ? e.prompt.trim() : "",
-      disparadores: normalizarDisparadores(e.disparadores)
+      disparadores: normalizarDisparadores(e.disparadores),
+      transiciones: normalizarTransiciones(e.transiciones)
     }))
     .filter(e => e.clave);
+}
+
+// Quita transiciones (generales o de una etapa) que apunten a una clave de
+// etapa que ya no existe — puede pasar si se borró una etapa después de
+// haber configurado una transición hacia ella. "" (salir/general) siempre
+// es un destino válido.
+function filtrarDestinosDeTransicionValidos(transiciones, clavesValidas) {
+  return (transiciones || []).filter(t => t.etapa_destino === "" || clavesValidas.has(t.etapa_destino));
 }
 
 app.post("/config", requireAdminKey, async (req, res) => {
   try {
     const { ai_prompt, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
-            calificacion_activa, criterios_calificacion, enlace_calificacion, disparadores, etapas } = req.body || {};
+            calificacion_activa, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -2066,6 +2137,21 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof enlace_calificacion === "string") nuevaConfig.enlace_calificacion = enlace_calificacion.trim();
     if (Array.isArray(disparadores)) nuevaConfig.disparadores = normalizarDisparadores(disparadores);
     if (Array.isArray(etapas)) nuevaConfig.etapas = normalizarEtapas(etapas);
+    if (Array.isArray(transiciones_generales)) nuevaConfig.transiciones_generales = normalizarTransiciones(transiciones_generales);
+
+    // Descarta transiciones (generales o por etapa) que apunten a una etapa
+    // que ya no existe en el guardado actual.
+    const etapasFinales = nuevaConfig.etapas || configActual.etapas || [];
+    const clavesValidas = new Set(etapasFinales.map(e => e.clave));
+    if (nuevaConfig.transiciones_generales) {
+      nuevaConfig.transiciones_generales = filtrarDestinosDeTransicionValidos(nuevaConfig.transiciones_generales, clavesValidas);
+    }
+    if (nuevaConfig.etapas) {
+      nuevaConfig.etapas = nuevaConfig.etapas.map(e => ({
+        ...e,
+        transiciones: filtrarDestinosDeTransicionValidos(e.transiciones, clavesValidas)
+      }));
+    }
 
     const guardado = await guardarConfigDB(nuevaConfig);
     res.json({ mensaje: "✅ Configuración guardada", config: configParaFrontend(guardado) });
@@ -2712,14 +2798,26 @@ ${estilosBase()}
             cada etapa solo conoce SU propio prompt — la IA no ve las demás preguntas sí/no al mismo tiempo.
           </p>
           <p class="hint">
-            Para que un lead <b>entre</b> a una etapa, el prompt (general o de otra etapa) debe incluir
+            Hay <b>dos formas</b> de mover a un lead de etapa:<br><br>
+            <b>1) Por palabra clave (garantizado, recomendado):</b> defines frases — igual que los disparadores de
+            audio/foto — y en cuanto el cliente escribe alguna de ellas, el sistema cambia de etapa POR CÓDIGO, sin
+            depender de que la IA decida algo. Esta es la forma confiable de avanzar el flujo.<br><br>
+            <b>2) Por marcador en el prompt (manual/adicional):</b> el prompt puede incluir
             <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:clave]]</code>
-            al final de la respuesta correspondiente — por ejemplo, en el prompt general:
-            "Perfecto, cuéntame cuál es tu objetivo principal[[etapa:objetivo]]". Desde ahí en adelante, ese lead usa
-            el prompt de la etapa "objetivo" hasta que algún mensaje incluya otro
-            <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:otra_clave]]</code>.
+            al final de una respuesta para casos más matizados que no se puedan reducir a una palabra clave fija — pero
+            esto SÍ depende de que la IA decida ponerlo, así que puede fallar.
             También puedes cambiar la etapa de un lead a mano desde <a href="/chats">Chats</a>.
           </p>
+
+          <div class="etapa-subseccion" style="border-top:none; margin-top:0; padding-top:0;">
+            <p class="etapa-subseccion-titulo">🔀 Transiciones generales (para ENTRAR a una etapa, cuando el lead todavía no tiene ninguna)</p>
+            <p class="hint" style="margin:0 0 10px;">Si el cliente escribe alguna de estas frases mientras todavía no está en ninguna etapa, entra GARANTIZADO a la etapa que elijas — sin depender del prompt general.</p>
+            <div id="listaTransicionesGenerales"></div>
+            <button class="add-paso" id="addTransicionGeneral" type="button">+ Agregar transición general</button>
+          </div>
+
+          <div style="height:1px; background:var(--border); margin:22px 0;"></div>
+
           <div id="listaEtapas"></div>
           <button class="add-paso" id="addEtapa" type="button">+ Agregar etapa</button>
         </div>
@@ -2953,6 +3051,78 @@ ${estilosBase()}
     leerDisparadoresDeContenedor(disparadores, "disp-gen");
   }
 
+  // --- Transiciones automáticas de etapa por palabra clave (generales y por etapa) ---
+  function opcionesEtapaDestinoHTML(claveSeleccionada, incluirSalir){
+    let opciones = "";
+    if(incluirSalir){
+      opciones += \`<option value=""\${claveSeleccionada === "" ? " selected" : ""}>↩ Salir de etapas (usar prompt general)</option>\`;
+    }
+    const claves = etapas.filter(e => e.clave);
+    if(claves.length === 0 && !incluirSalir){
+      return '<option value="">(crea al menos una etapa primero)</option>';
+    }
+    opciones += claves.map(e => \`<option value="\${e.clave}"\${e.clave === claveSeleccionada ? " selected" : ""}>\${(e.nombre || e.clave).replace(/</g,"&lt;")}</option>\`).join("");
+    return opciones;
+  }
+
+  function renderTransicionesEnContenedor(cont, lista, prefijoClase, alCambiar, incluirSalir){
+    if(lista.length === 0){
+      cont.innerHTML = '<p class="hint" style="margin:0 0 12px;">Todavía no hay transiciones configuradas.</p>';
+      return;
+    }
+    cont.innerHTML = "";
+    lista.forEach((t, i) => {
+      const div = document.createElement("div");
+      div.className = "paso";
+      div.innerHTML = \`
+        <div class="paso-head">
+          <span class="eyebrow-num">TRANSICIÓN \${i + 1}</span>
+          <button type="button" class="\${prefijoClase}-quitar" data-i="\${i}">quitar</button>
+        </div>
+        <label>Palabras o frases que la activan (una por línea)</label>
+        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: si&#10;sí quiero&#10;me interesa" style="margin-bottom:10px;">\${(t.frases || []).join("\\n")}</textarea>
+        <label>Mover a la etapa</label>
+        <select class="\${prefijoClase}-destino" data-i="\${i}">\${opcionesEtapaDestinoHTML(t.etapa_destino, incluirSalir)}</select>
+      \`;
+      cont.appendChild(div);
+    });
+    cont.querySelectorAll(\`.\${prefijoClase}-quitar\`).forEach(b => b.addEventListener("click", e => {
+      alCambiar();
+      lista.splice(+e.target.dataset.i, 1);
+      renderTransicionesEnContenedor(cont, lista, prefijoClase, alCambiar, incluirSalir);
+    }));
+  }
+
+  function leerTransicionesDeContenedor(lista, prefijoClase){
+    document.querySelectorAll(\`.\${prefijoClase}-frases\`).forEach((ta, i) => {
+      if(!lista[i]) return;
+      lista[i].frases = ta.value.split("\\n").map(f => f.trim()).filter(Boolean);
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-destino\`).forEach((sel, i) => {
+      if(!lista[i]) return;
+      lista[i].etapa_destino = sel.value;
+    });
+  }
+
+  let transicionesGenerales = [];
+
+  function renderTransicionesGenerales(){
+    renderTransicionesEnContenedor(document.getElementById("listaTransicionesGenerales"), transicionesGenerales, "trans-gen", leerTransicionesGeneralesDelDOM, false);
+  }
+  function leerTransicionesGeneralesDelDOM(){
+    leerTransicionesDeContenedor(transicionesGenerales, "trans-gen");
+  }
+
+  document.getElementById("addTransicionGeneral").addEventListener("click", () => {
+    leerTransicionesGeneralesDelDOM();
+    if(etapas.filter(e => e.clave).length === 0){
+      alert("Primero crea al menos una etapa para poder mandar al lead hacia ella.");
+      return;
+    }
+    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "" });
+    renderTransicionesGenerales();
+  });
+
   document.getElementById("addDisparador").addEventListener("click", () => {
     leerDisparadoresDelDOM();
     disparadores.push({ frases: [], tipo: "audio", clave: "", pausa_segundos: 2 });
@@ -3003,6 +3173,13 @@ ${estilosBase()}
           <div class="etapa-disparadores" data-i="\${i}"></div>
           <button type="button" class="add-paso etapa-add-disparador" data-i="\${i}">+ Agregar disparador de esta etapa</button>
         </div>
+
+        <div class="etapa-subseccion">
+          <p class="etapa-subseccion-titulo">🔀 Transiciones automáticas de SALIDA de esta etapa (por palabra clave, garantizado)</p>
+          <p class="hint" style="margin:0 0 10px;">Mientras el lead esté en ESTA etapa, si escribe alguna de estas frases, se mueve GARANTIZADO a la etapa que elijas (o vuelve al prompt general) — sin depender de que la IA ponga el marcador [[etapa:...]].</p>
+          <div class="etapa-transiciones" data-i="\${i}"></div>
+          <button type="button" class="add-paso etapa-add-transicion" data-i="\${i}">+ Agregar transición de esta etapa</button>
+        </div>
       \`;
       cont.appendChild(div);
     });
@@ -3027,6 +3204,21 @@ ${estilosBase()}
       etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", pausa_segundos: 2 });
       renderEtapas();
     }));
+
+    cont.querySelectorAll(".etapa-transiciones").forEach(subcont => {
+      const i = +subcont.dataset.i;
+      if(!etapas[i].transiciones) etapas[i].transiciones = [];
+      const prefijo = "etapa" + i + "-trans";
+      renderTransicionesEnContenedor(subcont, etapas[i].transiciones, prefijo, () => leerTransicionesDeContenedor(etapas[i].transiciones, prefijo), true);
+    });
+
+    cont.querySelectorAll(".etapa-add-transicion").forEach(b => b.addEventListener("click", (e) => {
+      leerEtapasDelDOM();
+      const i = +e.target.dataset.i;
+      if(!etapas[i].transiciones) etapas[i].transiciones = [];
+      etapas[i].transiciones.push({ frases: [], etapa_destino: "" });
+      renderEtapas();
+    }));
   }
 
   function leerEtapasDelDOM(){
@@ -3037,6 +3229,11 @@ ${estilosBase()}
       const i = +subcont.dataset.i;
       if(!etapas[i]) return;
       leerDisparadoresDeContenedor(etapas[i].disparadores || [], "etapa" + i + "-disp");
+    });
+    document.querySelectorAll(".etapa-transiciones").forEach(subcont => {
+      const i = +subcont.dataset.i;
+      if(!etapas[i]) return;
+      leerTransicionesDeContenedor(etapas[i].transiciones || [], "etapa" + i + "-trans");
     });
   }
 
@@ -3074,7 +3271,9 @@ ${estilosBase()}
     disparadores = Array.isArray(cfg.disparadores) ? JSON.parse(JSON.stringify(cfg.disparadores)) : [];
     renderDisparadores();
     etapas = Array.isArray(cfg.etapas) ? JSON.parse(JSON.stringify(cfg.etapas)) : [];
+    transicionesGenerales = Array.isArray(cfg.transiciones_generales) ? JSON.parse(JSON.stringify(cfg.transiciones_generales)) : [];
     renderEtapas();
+    renderTransicionesGenerales();
     document.getElementById("btnGuardar").disabled = false;
   }
 
@@ -3255,6 +3454,7 @@ ${estilosBase()}
     leerPasosEnlaceDelDOM();
     leerDisparadoresDelDOM();
     leerEtapasDelDOM();
+    leerTransicionesGeneralesDelDOM();
 
     if(pasos.length === 0){
       if(!confirm("No hay ningún paso de seguimiento normal configurado. ¿Seguro que quieres guardar así (se quedará sin seguimientos automáticos)?")) return;
@@ -3285,7 +3485,8 @@ ${estilosBase()}
       criterios_calificacion: document.getElementById("criteriosCalificacion").value,
       enlace_calificacion: document.getElementById("enlaceCalificacion").value,
       disparadores: disparadores,
-      etapas: etapas
+      etapas: etapas,
+      transiciones_generales: transicionesGenerales
     };
     const nuevaClave = document.getElementById("openaiKey").value.trim();
     if(nuevaClave) body.openai_api_key = nuevaClave;
@@ -3299,6 +3500,7 @@ ${estilosBase()}
       document.getElementById("openaiKey").value = "";
       if(data.config) pintarEstadoClave(data.config);
       if(data.config && Array.isArray(data.config.etapas)) { etapas = JSON.parse(JSON.stringify(data.config.etapas)); renderEtapas(); }
+      if(data.config && Array.isArray(data.config.transiciones_generales)) { transicionesGenerales = JSON.parse(JSON.stringify(data.config.transiciones_generales)); renderTransicionesGenerales(); }
     }
     setTimeout(() => { msg.textContent = ""; }, 2500);
   });
