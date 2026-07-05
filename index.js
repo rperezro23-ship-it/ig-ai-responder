@@ -756,7 +756,10 @@ function sleep(ms) {
 //   "Perfecto, te dejo el enlace por aquí 👇[[pausa:8]]https://calendly.com/..."
 // manda primero el texto, espera 8 segundos, y luego manda el enlace solo,
 // en su propio mensaje (para que no salga todo pegado en un mismo bloque).
-const MARCADOR_MULTIMEDIA_REGEX = /\[\[(audio|foto|pausa):([a-zA-Z0-9_.-]+)\]\]/gi;
+// Nota: el regex es tolerante a espacios extra que a veces mete la IA por su
+// cuenta (ej. "[[ audio: clave ]]" o "[[pausa: 5]]") — así no se pierde el
+// marcador solo porque el modelo lo escribió con un espacio de más.
+const MARCADOR_MULTIMEDIA_REGEX = /\[\[\s*(audio|foto|pausa)\s*:\s*([a-zA-Z0-9_.-]+)\s*\]\]/gi;
 
 // Convierte el contenido crudo (con marcadores) en una lista ordenada de
 // "partes" a mandar en secuencia, respetando el orden en el que aparecen en
@@ -813,6 +816,13 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
     }
 
     if (parte.tipo === "texto") {
+      // Si queda algo parecido a un marcador sin cerrar/mal escrito (ej. la
+      // IA olvidó un corchete o puso mal la clave), lo avisamos en consola
+      // con el texto exacto — así se puede ver en los logs de Render qué
+      // generó el modelo cuando el marcador "no se toma".
+      if (/\[\[/.test(parte.valor) || /\]\]/.test(parte.valor)) {
+        console.warn(`⚠️ Posible marcador mal formado en la respuesta a ${senderId} (se mandó como texto normal): "${parte.valor}"`);
+      }
       await agregarAlHistorialDB(senderId, "assistant", parte.valor);
       await enviarMensajeInstagram(senderId, parte.valor);
       textosEnviados.push(parte.valor);
