@@ -981,14 +981,72 @@ function obtenerEtapaConfig(claveEtapa) {
 // palabra clave fija.
 //
 // etapa_destino === "" significa "salir de etapas" (volver al prompt general).
+// Las transiciones con coincidencia === "condicion" NO se evalúan aquí (son
+// más costosas, requieren IA) — se revisan aparte en evaluarTransicionesPorCondicion,
+// y solo como fallback si ninguna transición por palabra clave coincidió.
 function buscarTransicionActivada(mensajeUsuario, transiciones) {
   const mensajeNormalizado = normalizarParaComparar(mensajeUsuario);
   for (const t of (transiciones || [])) {
-    if (typeof t.etapa_destino !== "string" || !Array.isArray(t.frases)) continue;
+    if (typeof t.etapa_destino !== "string") continue;
+    if (t.coincidencia === "condicion") continue;
+    if (!Array.isArray(t.frases)) continue;
     const coincide = t.frases.some((frase) => coincideFrase(mensajeNormalizado, normalizarParaComparar(frase), t.coincidencia));
     if (coincide) return t;
   }
   return null;
+}
+
+// Evalúa transiciones de tipo "condición" (ej. "el cliente mencionó tener 40
+// años o más") usando la IA, ya que esto no se puede reducir a una simple
+// coincidencia de texto. Para no multiplicar las llamadas a OpenAI, se
+// evalúan TODAS las condiciones de la lista en una sola llamada, y se
+// devuelve la primera que resulte verdadera (respetando el orden en que
+// están configuradas). Solo se llama cuando ninguna transición por palabra
+// clave coincidió primero (ver buscarTransicionActivada), así que no agrega
+// costo a las etapas que no usan este modo.
+async function evaluarTransicionesPorCondicion(mensajeUsuario, historial, transicionesCondicion) {
+  if (!transicionesCondicion || transicionesCondicion.length === 0) return null;
+
+  try {
+    const contexto = sanitizarHistorialParaIA(historial).slice(-6)
+      .map(m => `${m.role === "user" ? "Cliente" : "Asistente"}: ${m.content}`)
+      .join("\n");
+
+    const listaCondiciones = transicionesCondicion.map((t, idx) => `${idx}. ${t.condicion.trim()}`).join("\n");
+
+    const resp = await openaiClient.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      max_tokens: 150,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "Eres un evaluador que decide si el ÚLTIMO mensaje del cliente (dado el contexto reciente de la " +
+            "conversación) cumple alguna de las siguientes condiciones. Evalúa cada condición de forma " +
+            "independiente, basándote en lo que el cliente ha dicho de forma explícita o razonablemente " +
+            "implícita. Si no hay información suficiente para confirmar una condición, considérala NO cumplida. " +
+            "Responde ÚNICAMENTE un JSON con este formato exacto, sin texto adicional: " +
+            '{"cumple": [true o false, ...]} con un valor por cada condición, EN EL MISMO ORDEN en que se listan.\n\n' +
+            "Condiciones:\n" + listaCondiciones
+        },
+        { role: "user", content: `Contexto reciente de la conversación:\n${contexto}\n\nÚltimo mensaje del cliente: "${mensajeUsuario}"` }
+      ]
+    });
+
+    const texto = resp.choices[0]?.message?.content?.trim();
+    const parsed = JSON.parse(texto);
+    const resultados = Array.isArray(parsed.cumple) ? parsed.cumple : [];
+
+    for (let i = 0; i < transicionesCondicion.length; i++) {
+      if (resultados[i] === true) return transicionesCondicion[i];
+    }
+    return null;
+  } catch (err) {
+    console.error("⚠️ Error evaluando transición por condición:", err.response?.data || err.message);
+    return null;
+  }
 }
 
 // si la conversación ya cumple con los criterios que definiste en
@@ -1098,11 +1156,23 @@ async function procesarBuffer(senderId) {
     // — así la respuesta ya sale con el prompt de la nueva etapa, sin
     // depender de que la IA decida poner el marcador [[etapa:...]].
     const listaTransiciones = etapaConfig ? (etapaConfig.transiciones || []) : (configActual.transiciones_generales || []);
-    const transicion = buscarTransicionActivada(mensajeCompleto, listaTransiciones);
+    let transicion = buscarTransicionActivada(mensajeCompleto, listaTransiciones);
+
+    // Si ninguna transición por palabra clave coincidió, se revisan las de
+    // tipo "condición" (más costosas, requieren una llamada a la IA) — así
+    // las etapas que no usan este modo no pagan ese costo extra en cada mensaje.
+    if (!transicion) {
+      const transicionesCondicion = listaTransiciones.filter(t => t.coincidencia === "condicion" && t.condicion);
+      if (transicionesCondicion.length > 0) {
+        transicion = await evaluarTransicionesPorCondicion(mensajeCompleto, historial, transicionesCondicion);
+      }
+    }
+
     if (transicion && transicion.etapa_destino !== (etapaActualClave || "")) {
       const nuevaEtapaConfig = transicion.etapa_destino ? obtenerEtapaConfig(transicion.etapa_destino) : null;
       if (transicion.etapa_destino === "" || nuevaEtapaConfig) {
-        console.log(`🧭 Transición automática (palabra clave) de ${senderId}: "${etapaActualClave || "general"}" -> "${transicion.etapa_destino || "general"}"`);
+        const origenTransicion = transicion.coincidencia === "condicion" ? "condición" : "palabra clave";
+        console.log(`🧭 Transición automática (${origenTransicion}) de ${senderId}: "${etapaActualClave || "general"}" -> "${transicion.etapa_destino || "general"}"`);
         etapaActualClave = transicion.etapa_destino || null;
         etapaConfig = nuevaEtapaConfig;
         await guardarConversacion(senderId, { etapa: etapaActualClave });
@@ -2093,16 +2163,23 @@ function normalizarDisparadores(disparadores) {
 // Valida y normaliza un array de transiciones de etapa por palabra clave
 // (usado tanto para las generales como para las propias de cada etapa).
 // etapa_destino === "" es válido: significa "salir de etapas" (general).
+// coincidencia puede ser "contiene", "exacta" (comparación de texto) o
+// "condicion" (la evalúa la IA contra una descripción en lenguaje natural,
+// ej. "el cliente mencionó tener 40 años o más" — ver evaluarTransicionesPorCondicion).
 function normalizarTransiciones(transiciones) {
   if (!Array.isArray(transiciones)) return [];
   return transiciones
     .filter(t => t && typeof t.etapa_destino === "string")
-    .map(t => ({
-      etapa_destino: t.etapa_destino.trim().toLowerCase(),
-      frases: Array.isArray(t.frases) ? t.frases.map(f => String(f).trim()).filter(Boolean) : [],
-      coincidencia: t.coincidencia === "exacta" ? "exacta" : "contiene"
-    }))
-    .filter(t => t.frases.length > 0);
+    .map(t => {
+      const coincidencia = (t.coincidencia === "exacta" || t.coincidencia === "condicion") ? t.coincidencia : "contiene";
+      return {
+        etapa_destino: t.etapa_destino.trim().toLowerCase(),
+        frases: Array.isArray(t.frases) ? t.frases.map(f => String(f).trim()).filter(Boolean) : [],
+        condicion: typeof t.condicion === "string" ? t.condicion.trim() : "",
+        coincidencia
+      };
+    })
+    .filter(t => t.coincidencia === "condicion" ? Boolean(t.condicion) : t.frases.length > 0);
 }
 
 // Valida y normaliza el array de etapas que llega desde /panel.
@@ -2841,15 +2918,19 @@ ${estilosBase()}
             cada etapa solo conoce SU propio prompt — la IA no ve las demás preguntas sí/no al mismo tiempo.
           </p>
           <p class="hint">
-            Hay <b>dos formas</b> de mover a un lead de etapa:<br><br>
-            <b>1) Por palabra clave (garantizado, recomendado):</b> defines frases — igual que los disparadores de
-            audio/foto — y en cuanto el cliente escribe alguna de ellas, el sistema cambia de etapa POR CÓDIGO, sin
-            depender de que la IA decida algo. Esta es la forma confiable de avanzar el flujo.<br><br>
-            <b>2) Por marcador en el prompt (manual/adicional):</b> el prompt puede incluir
-            <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:clave]]</code>
-            al final de una respuesta para casos más matizados que no se puedan reducir a una palabra clave fija — pero
-            esto SÍ depende de que la IA decida ponerlo, así que puede fallar.
-            También puedes cambiar la etapa de un lead a mano desde <a href="/chats">Chats</a>.
+            Hay <b>tres formas</b> de mover a un lead de etapa (las configuras dentro de cada transición):<br><br>
+            <b>1) Palabra exacta:</b> el mensaje del cliente debe ser ESA palabra/frase y nada más — ideal para un CTA
+            de video tipo "mándame la palabra DIETA", donde no quieres que dispare si solo menciona "dieta" hablando
+            de otra cosa.<br><br>
+            <b>2) Contiene la frase:</b> dispara aunque la palabra esté en medio de una oración más larga.<br><br>
+            <b>3) Según una condición (la evalúa la IA):</b> para cosas que no son una palabra fija, como "el cliente
+            dijo que tiene 40 años o más" o "ya mencionó cuál es su objetivo". La IA revisa el mensaje y el contexto
+            reciente y decide si se cumple — solo se usa cuando ninguna transición por palabra coincidió primero, así
+            que no le agrega costo a las etapas que no la necesitan.<br><br>
+            También existe el marcador <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:clave]]</code>
+            dentro del prompt, como método manual/adicional — pero como depende de que la IA decida ponerlo, puede
+            fallar; las tres formas de arriba son las confiables. También puedes cambiar la etapa de un lead a mano
+            desde <a href="/chats">Chats</a>.
           </p>
           <p class="hint">
             Toma el ícono ⠿ de cada tarjeta y arrástrala arriba o abajo para reordenar tus etapas (por ejemplo,
@@ -3106,18 +3187,26 @@ ${estilosBase()}
     lista.forEach((t, i) => {
       const div = document.createElement("div");
       div.className = "paso";
+      const esCondicion = t.coincidencia === "condicion";
+      const campoActivador = esCondicion ? \`
+        <label>Condición a evaluar (en lenguaje natural — la revisa la IA en cada mensaje)</label>
+        <textarea class="\${prefijoClase}-condicion" data-i="\${i}" rows="2" placeholder='Ej: "El cliente mencionó tener 40 años de edad o más"' style="margin-bottom:10px;">\${(t.condicion || "").replace(/</g,"&lt;")}</textarea>
+      \` : \`
+        <label>Palabras o frases que la activan (una por línea)</label>
+        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: si&#10;sí quiero&#10;me interesa" style="margin-bottom:10px;">\${(t.frases || []).join("\\n")}</textarea>
+      \`;
       div.innerHTML = \`
         <div class="paso-head">
           <span class="eyebrow-num">TRANSICIÓN \${i + 1}</span>
           <button type="button" class="\${prefijoClase}-quitar" data-i="\${i}">quitar</button>
         </div>
-        <label>Palabras o frases que la activan (una por línea)</label>
-        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: si&#10;sí quiero&#10;me interesa" style="margin-bottom:10px;">\${(t.frases || []).join("\\n")}</textarea>
-        <label>¿Cómo debe coincidir?</label>
+        <label>¿Cómo debe activarse?</label>
         <select class="\${prefijoClase}-coincidencia" data-i="\${i}" style="margin-bottom:10px;">
-          <option value="contiene"\${t.coincidencia !== "exacta" ? " selected" : ""}>Contiene la frase en cualquier parte del mensaje</option>
+          <option value="contiene"\${t.coincidencia !== "exacta" && t.coincidencia !== "condicion" ? " selected" : ""}>Contiene la frase en cualquier parte del mensaje</option>
           <option value="exacta"\${t.coincidencia === "exacta" ? " selected" : ""}>El mensaje es EXACTAMENTE esa palabra/frase (nada más) — ej. para un CTA de "mándame la palabra X"</option>
+          <option value="condicion"\${esCondicion ? " selected" : ""}>Según una condición (la evalúa la IA) — ej. edad, objetivo, lo que haya dicho antes</option>
         </select>
+        \${campoActivador}
         <label>Mover a la etapa</label>
         <select class="\${prefijoClase}-destino" data-i="\${i}">\${opcionesEtapaDestinoHTML(t.etapa_destino, incluirSalir)}</select>
       \`;
@@ -3128,18 +3217,34 @@ ${estilosBase()}
       lista.splice(+e.target.dataset.i, 1);
       renderTransicionesEnContenedor(cont, lista, prefijoClase, alCambiar, incluirSalir);
     }));
+    cont.querySelectorAll(\`.\${prefijoClase}-coincidencia\`).forEach(sel => sel.addEventListener("change", () => {
+      alCambiar();
+      renderTransicionesEnContenedor(cont, lista, prefijoClase, alCambiar, incluirSalir);
+    }));
   }
 
+  // Se lee por "data-i" (no por posición en la lista de elementos) porque el
+  // campo de activación cambia según el modo: una transición en modo
+  // "condición" no tiene textarea de frases, y viceversa — si se leyera por
+  // posición, los valores de una transición podrían mezclarse con los de otra.
   function leerTransicionesDeContenedor(lista, prefijoClase){
-    document.querySelectorAll(\`.\${prefijoClase}-frases\`).forEach((ta, i) => {
-      if(!lista[i]) return;
-      lista[i].frases = ta.value.split("\\n").map(f => f.trim()).filter(Boolean);
-    });
-    document.querySelectorAll(\`.\${prefijoClase}-coincidencia\`).forEach((sel, i) => {
+    document.querySelectorAll(\`.\${prefijoClase}-coincidencia\`).forEach((sel) => {
+      const i = +sel.dataset.i;
       if(!lista[i]) return;
       lista[i].coincidencia = sel.value;
     });
-    document.querySelectorAll(\`.\${prefijoClase}-destino\`).forEach((sel, i) => {
+    document.querySelectorAll(\`.\${prefijoClase}-frases\`).forEach((ta) => {
+      const i = +ta.dataset.i;
+      if(!lista[i]) return;
+      lista[i].frases = ta.value.split("\\n").map(f => f.trim()).filter(Boolean);
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-condicion\`).forEach((ta) => {
+      const i = +ta.dataset.i;
+      if(!lista[i]) return;
+      lista[i].condicion = ta.value.trim();
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-destino\`).forEach((sel) => {
+      const i = +sel.dataset.i;
       if(!lista[i]) return;
       lista[i].etapa_destino = sel.value;
     });
@@ -3160,7 +3265,7 @@ ${estilosBase()}
       alert("Primero crea al menos una etapa para poder mandar al lead hacia ella.");
       return;
     }
-    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene" });
+    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene", condicion: "" });
     renderTransicionesGenerales();
   });
 
@@ -3306,7 +3411,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].transiciones) etapas[i].transiciones = [];
-      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene" });
+      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene", condicion: "" });
       renderEtapas();
     }));
   }
