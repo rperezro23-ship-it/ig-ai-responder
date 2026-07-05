@@ -2809,7 +2809,7 @@ ${estilosBase()}
         <label>Horas de silencio antes de disparar</label>
         <input type="number" step="0.1" min="0" class="paso-horas" data-i="\${i}" value="\${paso.horas}" style="margin-bottom:10px;">
         <label>Mensajes (uno por línea, rotan entre ellos)</label>
-        <textarea class="paso-mensajes" data-i="\${i}" rows="3">\${(paso.mensajes || []).join("\n")}</textarea>
+        <textarea class="paso-mensajes" data-i="\${i}" rows="3">\${(paso.mensajes || []).join("\\n")}</textarea>
       \`;
       cont.appendChild(div);
     });
@@ -2826,7 +2826,7 @@ ${estilosBase()}
   function leerPasosDelDOM(){
     document.querySelectorAll(".paso-horas").forEach((input, i) => { pasos[i].horas = parseFloat(input.value) || 0; });
     document.querySelectorAll(".paso-mensajes").forEach((ta, i) => {
-      pasos[i].mensajes = ta.value.split("\n").map(m => m.trim()).filter(Boolean);
+      pasos[i].mensajes = ta.value.split("\\n").map(m => m.trim()).filter(Boolean);
     });
   }
 
@@ -2847,7 +2847,7 @@ ${estilosBase()}
         <label>Horas desde que se envió el enlace, antes de disparar</label>
         <input type="number" step="0.1" min="0" class="paso-enlace-horas" data-i="\${i}" value="\${paso.horas}" style="margin-bottom:10px;">
         <label>Mensajes (uno por línea, rotan entre ellos)</label>
-        <textarea class="paso-enlace-mensajes" data-i="\${i}" rows="3">\${(paso.mensajes || []).join("\n")}</textarea>
+        <textarea class="paso-enlace-mensajes" data-i="\${i}" rows="3">\${(paso.mensajes || []).join("\\n")}</textarea>
       \`;
       cont.appendChild(div);
     });
@@ -2864,7 +2864,7 @@ ${estilosBase()}
   function leerPasosEnlaceDelDOM(){
     document.querySelectorAll(".paso-enlace-horas").forEach((input, i) => { pasosEnlace[i].horas = parseFloat(input.value) || 0; });
     document.querySelectorAll(".paso-enlace-mensajes").forEach((ta, i) => {
-      pasosEnlace[i].mensajes = ta.value.split("\n").map(m => m.trim()).filter(Boolean);
+      pasosEnlace[i].mensajes = ta.value.split("\\n").map(m => m.trim()).filter(Boolean);
     });
   }
 
@@ -2897,7 +2897,7 @@ ${estilosBase()}
           <button type="button" class="\${prefijoClase}-quitar" data-i="\${i}">quitar</button>
         </div>
         <label>Palabras o frases que lo activan (una por línea)</label>
-        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: precio&#10;cuanto cuesta&#10;inversion" style="margin-bottom:10px;">\${(d.frases || []).join("\n")}</textarea>
+        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: precio&#10;cuanto cuesta&#10;inversion" style="margin-bottom:10px;">\${(d.frases || []).join("\\n")}</textarea>
         <div class="row2" style="margin-bottom:10px;">
           <div>
             <label>Tipo</label>
@@ -2930,7 +2930,7 @@ ${estilosBase()}
   function leerDisparadoresDeContenedor(lista, prefijoClase){
     document.querySelectorAll(\`.\${prefijoClase}-frases\`).forEach((ta, i) => {
       if(!lista[i]) return;
-      lista[i].frases = ta.value.split("\n").map(f => f.trim()).filter(Boolean);
+      lista[i].frases = ta.value.split("\\n").map(f => f.trim()).filter(Boolean);
     });
     document.querySelectorAll(\`.\${prefijoClase}-tipo\`).forEach((sel, i) => {
       if(!lista[i]) return;
@@ -3148,7 +3148,7 @@ ${estilosBase()}
       const data = await llamarPOST("/audios/subir", { nombre, base64, tipo: archivo.type });
       if(data && !data.error){
         msg.style.color = "var(--green)";
-        msg.textContent = "✓ Audio \"" + data.clave + "\" subido correctamente. Úsalo como [[audio:" + data.clave + "]]";
+        msg.textContent = "✓ Audio \\"" + data.clave + "\\" subido correctamente. Úsalo como [[audio:" + data.clave + "]]";
         document.getElementById("audioNombre").value = "";
         inputArchivo.value = "";
         const cfgActualizado = await llamarGET("/config");
@@ -3222,7 +3222,7 @@ ${estilosBase()}
       const data = await llamarPOST("/fotos/subir", { nombre, base64, tipo: archivo.type });
       if(data && !data.error){
         msg.style.color = "var(--green)";
-        msg.textContent = "✓ Foto \"" + data.clave + "\" subida correctamente. Úsala como [[foto:" + data.clave + "]]";
+        msg.textContent = "✓ Foto \\"" + data.clave + "\\" subida correctamente. Úsala como [[foto:" + data.clave + "]]";
         document.getElementById("fotoNombre").value = "";
         inputArchivo.value = "";
         const cfgActualizado = await llamarGET("/config");
@@ -3727,7 +3727,7 @@ ${estilosBase()}
     const senderId = senderMenuContextual;
     ocultarMenuContextual();
     if(!senderId) return;
-    if(!confirm("¿Borrar por completo esta conversación? Se pierde todo el historial y no se puede deshacer.\n\nLa próxima vez que esta persona escriba, el bot empezará desde cero (como si nunca hubiera hablado con ella).")) return;
+    if(!confirm("¿Borrar por completo esta conversación? Se pierde todo el historial y no se puede deshacer.\\n\\nLa próxima vez que esta persona escriba, el bot empezará desde cero (como si nunca hubiera hablado con ella).")) return;
 
     try {
       const res = await fetch("/chats/borrar", {
