@@ -3103,7 +3103,7 @@ ${estilosBase()}
         <label>¿Cómo debe coincidir?</label>
         <select class="\${prefijoClase}-coincidencia" data-i="\${i}" style="margin-bottom:10px;">
           <option value="contiene"\${d.coincidencia !== "exacta" ? " selected" : ""}>Contiene la frase en cualquier parte del mensaje</option>
-          <option value="exacta"\${d.coincidencia === "exacta" ? " selected" : ""}>El mensaje es EXACTAMENTE esa palabra/frase (nada más) — ej. para un CTA de "mándame la palabra X"</option>
+          <option value="exacta"\${d.coincidencia === "exacta" ? " selected" : ""}>El mensaje es EXACTAMENTE esa palabra/frase</option>
         </select>
         <div class="row2" style="margin-bottom:10px;">
           <div>
@@ -3203,8 +3203,8 @@ ${estilosBase()}
         <label>¿Cómo debe activarse?</label>
         <select class="\${prefijoClase}-coincidencia" data-i="\${i}" style="margin-bottom:10px;">
           <option value="contiene"\${t.coincidencia !== "exacta" && t.coincidencia !== "condicion" ? " selected" : ""}>Contiene la frase en cualquier parte del mensaje</option>
-          <option value="exacta"\${t.coincidencia === "exacta" ? " selected" : ""}>El mensaje es EXACTAMENTE esa palabra/frase (nada más) — ej. para un CTA de "mándame la palabra X"</option>
-          <option value="condicion"\${esCondicion ? " selected" : ""}>Según una condición (la evalúa la IA) — ej. edad, objetivo, lo que haya dicho antes</option>
+          <option value="exacta"\${t.coincidencia === "exacta" ? " selected" : ""}>El mensaje es EXACTAMENTE esa palabra/frase</option>
+          <option value="condicion"\${esCondicion ? " selected" : ""}>Según una condición (la evalúa la IA)</option>
         </select>
         \${campoActivador}
         <label>Mover a la etapa</label>
