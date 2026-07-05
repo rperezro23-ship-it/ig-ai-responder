@@ -2656,18 +2656,19 @@ ${estilosBase()}
   .card.card-etapas{ border-color:rgba(201,155,255,.35); }
   .etapa-card{
     border:1px solid rgba(201,155,255,.28); border-radius:13px; padding:18px; margin-bottom:14px;
-    background:rgba(201,155,255,.03);
+    background:rgba(201,155,255,.03); transition:opacity .12s, border-color .12s, background .12s;
   }
+  .etapa-card.arrastrando{ opacity:.4; }
+  .etapa-card.arrastrando-sobre{ border-color:#C99BFF; background:rgba(201,155,255,.09); }
   .etapa-card-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px; }
-  .etapa-card-head-botones{ display:flex; align-items:center; gap:8px; flex-shrink:0; }
-  .etapa-mover-arriba, .etapa-mover-abajo{
-    background:var(--surface-3); border:1px solid var(--border); color:var(--muted);
-    border-radius:8px; width:30px; height:30px; cursor:pointer; font-size:13px;
-    display:flex; align-items:center; justify-content:center; transition:color .12s, border-color .12s;
+  .etapa-card-head-izq{ display:flex; align-items:center; gap:10px; min-width:0; }
+  .etapa-drag-handle{
+    cursor:grab; color:var(--muted); font-size:18px; line-height:1; flex-shrink:0;
+    padding:4px 6px; border-radius:6px; user-select:none;
   }
-  .etapa-mover-arriba:hover:not(:disabled), .etapa-mover-abajo:hover:not(:disabled){ color:#C99BFF; border-color:rgba(201,155,255,.4); }
-  .etapa-mover-arriba:disabled, .etapa-mover-abajo:disabled{ opacity:.3; cursor:default; }
-  .etapa-card-head .eyebrow-num{ font-family:var(--mono); font-size:12px; color:#C99BFF; }
+  .etapa-drag-handle:hover{ color:#C99BFF; background:rgba(201,155,255,.1); }
+  .etapa-drag-handle:active{ cursor:grabbing; }
+  .etapa-card-head .eyebrow-num{ font-family:var(--mono); font-size:12px; color:#C99BFF; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .etapa-subseccion{ border-top:1px dashed var(--border); margin-top:16px; padding-top:16px; }
   .etapa-subseccion-titulo{ font-family:var(--display); font-weight:600; font-size:13.5px; margin:0 0 10px; color:var(--muted); }
   @media (max-width:860px){ .savebar{ left:0; padding:18px 18px 20px; } .save-btn{ flex:1; } }
@@ -2841,8 +2842,8 @@ ${estilosBase()}
             También puedes cambiar la etapa de un lead a mano desde <a href="/chats">Chats</a>.
           </p>
           <p class="hint">
-            Usa las flechas ▲▼ de cada tarjeta para reordenar tus etapas (por ejemplo, para meter una etapa nueva
-            antes de la primera) sin tener que borrar y volver a crear nada.
+            Toma el ícono ⠿ de cada tarjeta y arrástrala arriba o abajo para reordenar tus etapas (por ejemplo,
+            para meter una etapa nueva antes de la primera) sin tener que borrar y volver a crear nada.
           </p>
 
           <div class="etapa-subseccion" style="border-top:none; margin-top:0; padding-top:0;">
@@ -3143,6 +3144,7 @@ ${estilosBase()}
 
   // --- Etapas de la conversación ---
   let etapas = [];
+  let indiceEtapaArrastrando = null;
 
   function slugify(txt){
     return (txt || "").trim().toLowerCase()
@@ -3151,7 +3153,6 @@ ${estilosBase()}
   }
 
   function renderEtapas(){
-    leerEtapasDelDOM();
     const cont = document.getElementById("listaEtapas");
     if(etapas.length === 0){
       cont.innerHTML = '<p class="hint" style="margin:0 0 12px;">Todavía no has creado ninguna etapa. Mientras no tengas etapas, todo el bot usa el prompt general de la izquierda.</p>';
@@ -3161,14 +3162,14 @@ ${estilosBase()}
     etapas.forEach((et, i) => {
       const div = document.createElement("div");
       div.className = "etapa-card";
+      div.dataset.i = i;
       div.innerHTML = \`
         <div class="etapa-card-head">
-          <span class="eyebrow-num">ETAPA \${i + 1}\${et.nombre ? " · " + et.nombre.replace(/</g,"&lt;") : ""}</span>
-          <div class="etapa-card-head-botones">
-            <button type="button" class="etapa-mover-arriba" data-i="\${i}" title="Mover arriba" \${i === 0 ? "disabled" : ""}>▲</button>
-            <button type="button" class="etapa-mover-abajo" data-i="\${i}" title="Mover abajo" \${i === etapas.length - 1 ? "disabled" : ""}>▼</button>
-            <button type="button" class="etapa-quitar" data-i="\${i}">quitar etapa</button>
+          <div class="etapa-card-head-izq">
+            <span class="etapa-drag-handle" title="Arrastra para reordenar" draggable="true">⠿</span>
+            <span class="eyebrow-num">ETAPA \${i + 1}\${et.nombre ? " · " + et.nombre.replace(/</g,"&lt;") : ""}</span>
           </div>
+          <button type="button" class="etapa-quitar" data-i="\${i}">quitar etapa</button>
         </div>
         <div class="row2" style="margin-bottom:12px;">
           <div>
@@ -3206,21 +3207,50 @@ ${estilosBase()}
       renderEtapas();
     }));
 
-    cont.querySelectorAll(".etapa-mover-arriba").forEach(b => b.addEventListener("click", e => {
-      leerEtapasDelDOM();
-      const i = +e.target.dataset.i;
-      if(i <= 0) return;
-      [etapas[i - 1], etapas[i]] = [etapas[i], etapas[i - 1]];
-      renderEtapas();
-    }));
+    // --- Arrastrar y soltar para reordenar etapas ---
+    // El handle (⠿) es lo único con draggable="true"; al arrancar el
+    // arrastre desde ahí, el navegador arrastra la tarjeta completa
+    // (.etapa-card) porque es el elemento padre más cercano.
+    cont.querySelectorAll(".etapa-drag-handle").forEach(handle => {
+      handle.addEventListener("dragstart", (e) => {
+        const tarjeta = handle.closest(".etapa-card");
+        indiceEtapaArrastrando = +tarjeta.dataset.i;
+        tarjeta.classList.add("arrastrando");
+        e.dataTransfer.effectAllowed = "move";
+        try { e.dataTransfer.setData("text/plain", String(indiceEtapaArrastrando)); } catch (err) {}
+      });
+      handle.addEventListener("dragend", () => {
+        cont.querySelectorAll(".etapa-card").forEach(c => c.classList.remove("arrastrando", "arrastrando-sobre"));
+        indiceEtapaArrastrando = null;
+      });
+    });
 
-    cont.querySelectorAll(".etapa-mover-abajo").forEach(b => b.addEventListener("click", e => {
-      leerEtapasDelDOM();
-      const i = +e.target.dataset.i;
-      if(i >= etapas.length - 1) return;
-      [etapas[i], etapas[i + 1]] = [etapas[i + 1], etapas[i]];
-      renderEtapas();
-    }));
+    cont.querySelectorAll(".etapa-card").forEach(tarjeta => {
+      tarjeta.addEventListener("dragover", (e) => {
+        if(indiceEtapaArrastrando === null) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        tarjeta.classList.add("arrastrando-sobre");
+      });
+      tarjeta.addEventListener("dragleave", () => {
+        tarjeta.classList.remove("arrastrando-sobre");
+      });
+      tarjeta.addEventListener("drop", (e) => {
+        e.preventDefault();
+        tarjeta.classList.remove("arrastrando-sobre");
+        if(indiceEtapaArrastrando === null) return;
+        const indiceDestino = +tarjeta.dataset.i;
+        if(indiceDestino === indiceEtapaArrastrando){ indiceEtapaArrastrando = null; return; }
+
+        leerEtapasDelDOM();
+        const [movida] = etapas.splice(indiceEtapaArrastrando, 1);
+        let nuevaPosicion = indiceDestino;
+        if(indiceEtapaArrastrando < indiceDestino) nuevaPosicion -= 1;
+        etapas.splice(nuevaPosicion, 0, movida);
+        indiceEtapaArrastrando = null;
+        renderEtapas();
+      });
+    });
 
     cont.querySelectorAll(".etapa-disparadores").forEach(subcont => {
       const i = +subcont.dataset.i;
