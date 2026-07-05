@@ -175,11 +175,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0 };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0 };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null };
   }
 
   return data;
@@ -769,6 +769,8 @@ async function conReintento(fn, intentos = 1, esperaMs = 1500) {
 //   [[foto:clave]]   -> manda una foto ya subida en /panel
 //   [[pausa:N]]      -> no manda nada, solo espera N segundos antes de mandar
 //                       lo que sigue como un mensaje NUEVO (burbuja aparte)
+//   [[etapa:clave]]  -> no manda nada, solo cambia la ETAPA actual de la
+//                       conversación (ver sección de Etapas más abajo)
 // Sirve tanto para la respuesta principal de la IA como para los mensajes de
 // seguimiento automático (normal o del enlace) — cualquier mensaje de texto
 // del sistema puede llevar estos marcadores. Ejemplo de uso en el prompt:
@@ -778,12 +780,12 @@ async function conReintento(fn, intentos = 1, esperaMs = 1500) {
 // Nota: el regex es tolerante a espacios extra que a veces mete la IA por su
 // cuenta (ej. "[[ audio: clave ]]" o "[[pausa: 5]]") — así no se pierde el
 // marcador solo porque el modelo lo escribió con un espacio de más.
-const MARCADOR_MULTIMEDIA_REGEX = /\[\[\s*(audio|foto|pausa)\s*:\s*([a-zA-Z0-9_.-]+)\s*\]\]/gi;
+const MARCADOR_MULTIMEDIA_REGEX = /\[\[\s*(audio|foto|pausa|etapa)\s*:\s*([a-zA-Z0-9_.-]+)\s*\]\]/gi;
 
 // Convierte el contenido crudo (con marcadores) en una lista ordenada de
 // "partes" a mandar en secuencia, respetando el orden en el que aparecen en
-// el string original: { tipo:"texto", valor }, { tipo:"audio"|"foto", clave }
-// o { tipo:"pausa", segundos }.
+// el string original: { tipo:"texto", valor }, { tipo:"audio"|"foto", clave },
+// { tipo:"pausa", segundos } o { tipo:"etapa", clave }.
 function parsearPartes(contenidoCrudo) {
   const partes = [];
   let ultimoIndice = 0;
@@ -802,6 +804,8 @@ function parsearPartes(contenidoCrudo) {
       if (Number.isFinite(segundos) && segundos > 0) {
         partes.push({ tipo: "pausa", segundos });
       }
+    } else if (tipoMarcador === "etapa") {
+      partes.push({ tipo: "etapa", clave: valorMarcador.toLowerCase() });
     } else {
       partes.push({ tipo: tipoMarcador, clave: valorMarcador.toLowerCase() });
     }
@@ -815,13 +819,15 @@ function parsearPartes(contenidoCrudo) {
   return partes;
 }
 
-// Manda un contenido crudo (con marcadores [[audio:..]], [[foto:..]] y
-// [[pausa:N]]) como una secuencia de mensajes independientes, respetando las
-// pausas indicadas entre cada uno. Se usa tanto para la respuesta principal
-// de la IA como para los mensajes de seguimiento automático (normal o del
-// enlace). Devuelve el texto de todas las partes de texto que se mandaron
-// (unidas con salto de línea), útil para lógicas que necesitan revisar el
-// contenido textual real enviado (ej. la detección del enlace de calificación).
+// Manda un contenido crudo (con marcadores [[audio:..]], [[foto:..]],
+// [[pausa:N]] y [[etapa:..]]) como una secuencia de mensajes independientes,
+// respetando las pausas indicadas entre cada uno y aplicando el cambio de
+// etapa cuando corresponda (sin mandar nada al cliente por ese marcador).
+// Se usa tanto para la respuesta principal de la IA como para los mensajes
+// de seguimiento automático (normal o del enlace). Devuelve el texto de
+// todas las partes de texto que se mandaron (unidas con salto de línea),
+// útil para lógicas que necesitan revisar el contenido textual real enviado
+// (ej. la detección del enlace de calificación).
 async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
   const partes = parsearPartes(contenidoCrudo);
 
@@ -831,6 +837,17 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
   for (const parte of partes) {
     if (parte.tipo === "pausa") {
       await sleep(parte.segundos * 1000);
+      continue;
+    }
+
+    if (parte.tipo === "etapa") {
+      const etapaExiste = (configActual.etapas || []).some(e => e.clave === parte.clave);
+      if (!etapaExiste) {
+        console.warn(`⚠️ Se pidió cambiar a la etapa "${parte.clave}" pero no existe en /panel. Se ignora ese marcador.`);
+        continue;
+      }
+      console.log(`🧭 Cambiando la etapa de ${senderId} a "${parte.clave}"`);
+      await guardarConversacion(senderId, { etapa: parte.clave });
       continue;
     }
 
@@ -870,11 +887,12 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
     algoSeMando = true;
   }
 
-  // Si solo había marcadores mal escritos, pausas sueltas o nada rescatable,
-  // no se manda nada — ya se avisó por consola. Evita mandarle al cliente
-  // marcadores crudos tipo "[[audio:x]]" o dejar todo en silencio sin pista.
+  // Si solo había marcadores mal escritos, pausas/etapas sueltas o nada
+  // rescatable, no se manda nada — ya se avisó por consola. Evita mandarle
+  // al cliente marcadores crudos tipo "[[audio:x]]" o dejar todo en silencio
+  // sin pista.
   if (!algoSeMando) {
-    console.warn(`⚠️ No se pudo mandar nada a ${senderId}: el contenido solo tenía marcadores multimedia que no existen en /panel, o pausas sin contenido alrededor.`);
+    console.warn(`⚠️ No se pudo mandar nada a ${senderId}: el contenido solo tenía marcadores multimedia/etapa que no existen en /panel, o pausas sin contenido alrededor.`);
   }
 
   return textosEnviados.join("\n");
@@ -887,6 +905,13 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
 // es una decisión probabilística del modelo, no una regla fija). Se
 // configuran en /panel. Si la IA ya mandó ese mismo audio/foto por su cuenta
 // (usando el marcador en su respuesta), el disparador NO lo repite.
+//
+// A partir de las Etapas, estos disparadores "generales" son el FALLBACK:
+// primero se revisan los disparadores propios de la etapa activa de esa
+// conversación (si tiene una) y solo si NINGUNO de esos coincide, se cae a
+// revisar esta lista general. Así, una misma palabra puede significar cosas
+// distintas según en qué etapa esté el lead, y solo si la etapa no tiene
+// nada configurado para esa palabra se usa el comportamiento general.
 // ---------------------------------------------------------------
 
 function normalizarParaComparar(texto) {
@@ -917,6 +942,23 @@ function partesIncluyenMedia(partes, tipo, clave) {
   return partes.some((p) => p.tipo === tipo && p.clave === claveNormalizada);
 }
 
+// ---------------------------------------------------------------
+// Etapas de la conversación: cada lead puede estar en una "etapa" (guardada
+// en conversaciones.etapa). Mientras esté en una etapa, se usa el PROMPT
+// propio de esa etapa (en vez del prompt general de arriba) para que la IA
+// no se confunda con preguntas de sí/no de otras partes de la conversación
+// — por ejemplo, si en la etapa "precio" un "sí" significa una cosa y en la
+// etapa "agendar" un "sí" significa otra, cada etapa solo conoce su propio
+// contexto. El propio prompt de la etapa debe incluir el marcador
+// [[etapa:siguiente_clave]] cuando quiera avanzar a la siguiente etapa (o
+// [[etapa:clave]] hacia cualquier otra que exista). Si el lead no tiene
+// ninguna etapa asignada, se usa el prompt general de siempre.
+// ---------------------------------------------------------------
+
+function obtenerEtapaConfig(claveEtapa) {
+  if (!claveEtapa) return null;
+  return (configActual.etapas || []).find(e => e.clave === claveEtapa) || null;
+}
 
 // si la conversación ya cumple con los criterios que definiste en
 // /panel (edad, objetivo, género, etc.) y marca la conversación como
@@ -1011,10 +1053,21 @@ async function procesarBuffer(senderId) {
     const conv = await obtenerConversacion(senderId);
     const historial = conv.historial || [];
 
+    // Etapa activa de esta conversación (si tiene alguna asignada). Mientras
+    // el lead esté en una etapa, se usa el prompt propio de esa etapa en vez
+    // del prompt general — así la IA solo "ve" el contexto de sí/no que le
+    // corresponde a ese punto de la conversación, y no el de otras etapas.
+    const etapaConfig = obtenerEtapaConfig(conv.etapa);
+    const promptSistema = etapaConfig ? etapaConfig.prompt : configActual.ai_prompt;
+
+    if (etapaConfig) {
+      console.log(`🧭 ${senderId} está en la etapa "${etapaConfig.clave}" — se usa su prompt propio.`);
+    }
+
     const completion = await openaiClient.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
-        { role: "system", content: configActual.ai_prompt },
+        { role: "system", content: promptSistema },
         ...sanitizarHistorialParaIA(historial),
         { role: "user", content: mensajeCompleto }
       ],
@@ -1032,10 +1085,11 @@ async function procesarBuffer(senderId) {
       partesRespuestaIA = parsearPartes(respuestaCruda);
 
       // Si el prompt decide mandar la respuesta en varias burbujas (con
-      // [[pausa:N]]) o incluir un audio/foto pregrabada ([[audio:clave]] /
-      // [[foto:clave]]), este helper lo detecta, manda cada parte por su
-      // lado en orden (respetando las pausas) y devuelve el texto real que
-      // se mandó, para la detección del enlace de calificación más abajo.
+      // [[pausa:N]]), incluir un audio/foto pregrabada ([[audio:clave]] /
+      // [[foto:clave]]) o cambiar de etapa ([[etapa:clave]]), este helper lo
+      // detecta, aplica cada parte por su lado en orden (respetando las
+      // pausas) y devuelve el texto real que se mandó, para la detección del
+      // enlace de calificación más abajo.
       const textoAEnviar = await enviarContenidoConMarcadores(senderId, respuestaCruda);
 
       console.log(`✅ Respondido a ${senderId} (una sola respuesta por ${mensajesAResponder.length} línea(s))`);
@@ -1078,12 +1132,20 @@ async function procesarBuffer(senderId) {
     }
 
     // Disparadores automáticos: si el mensaje del cliente contiene alguna de
-    // las palabras/frases configuradas en /panel, se manda el audio/foto
-    // correspondiente de forma GARANTIZADA — sin depender de que la IA haya
-    // decidido incluir el marcador en su respuesta (que es inconsistente,
-    // porque es una decisión probabilística del modelo). Si la IA ya lo
-    // mandó ella misma, no se repite.
-    const disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, configActual.disparadores || []);
+    // las palabras/frases configuradas, se manda el audio/foto correspondiente
+    // de forma GARANTIZADA — sin depender de que la IA haya decidido incluir
+    // el marcador en su respuesta. Primero se revisan los disparadores propios
+    // de la ETAPA activa (si el lead tiene una); solo si ninguno de esos
+    // coincide, se cae a revisar los disparadores GENERALES de /panel. Si la
+    // IA ya mandó ese mismo audio/foto por su cuenta, no se repite.
+    const disparadoresDeEtapa = etapaConfig ? (etapaConfig.disparadores || []) : [];
+    let disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, disparadoresDeEtapa);
+    let disparadoresSonDeEtapa = disparadoresActivados.length > 0;
+
+    if (!disparadoresSonDeEtapa) {
+      disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, configActual.disparadores || []);
+    }
+
     for (const disparador of disparadoresActivados) {
       if (partesIncluyenMedia(partesRespuestaIA, disparador.tipo, disparador.clave)) {
         console.log(`ℹ️ Disparador "${disparador.clave}" activado por palabra clave, pero la IA ya lo mandó por su cuenta — se omite duplicado.`);
@@ -1101,12 +1163,13 @@ async function procesarBuffer(senderId) {
       if (esperaSegundos > 0) await sleep(esperaSegundos * 1000);
 
       try {
+        const origenLog = disparadoresSonDeEtapa ? `etapa "${etapaConfig.clave}"` : "general";
         if (disparador.tipo === "audio") {
-          console.log(`🎯 Disparador automático: enviando audio "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
+          console.log(`🎯 Disparador automático (${origenLog}): enviando audio "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
           await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${item.url}`);
           await conReintento(() => enviarAudioInstagram(senderId, item.url));
         } else {
-          console.log(`🎯 Disparador automático: enviando foto "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
+          console.log(`🎯 Disparador automático (${origenLog}): enviando foto "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
           await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${item.url}`);
           await conReintento(() => enviarImagenInstagram(senderId, item.url));
         }
@@ -1370,7 +1433,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa")
       .order("actualizado_en", { ascending: false })
       .limit(200);
 
@@ -1388,6 +1451,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         : false;
 
       const pasosEnviados = c.enlace_pasos_enviados || 0;
+      const etapaConfig = obtenerEtapaConfig(c.etapa);
 
       return {
         sender_id: c.sender_id,
@@ -1404,7 +1468,9 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         enlace_enviado: Boolean(c.enlace_enviado),
         enlace_enviado_en: c.enlace_enviado_en || null,
         enlace_pasos_enviados: pasosEnviados,
-        enlace_seguimiento_activo: Boolean(c.enlace_enviado) && pasosEnviados < totalPasosEnlace
+        enlace_seguimiento_activo: Boolean(c.enlace_enviado) && pasosEnviados < totalPasosEnlace,
+        etapa: c.etapa || null,
+        etapa_nombre: etapaConfig ? (etapaConfig.nombre || etapaConfig.clave) : null
       };
     }));
 
@@ -1438,6 +1504,27 @@ app.post("/chats/enviar", requireAdminKey, async (req, res) => {
     console.error(`❌ Error enviando mensaje manual a ${req.body?.senderId}:`, err.response?.data || err.message);
     const mensajeError = err.response?.data?.error?.message || err.message;
     res.status(500).json({ error: mensajeError });
+  }
+});
+
+// Cambia manualmente la etapa de una conversación desde /chats — útil para
+// corregir a mano si la IA no puso el marcador [[etapa:..]], o para arrancar
+// a un lead directamente en una etapa concreta. clave="" (vacío) quita la
+// etapa (vuelve al prompt general).
+app.post("/chats/etapa", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId, etapa } = req.body || {};
+    if (!senderId) return res.status(400).json({ error: "Falta el senderId." });
+
+    const clave = (etapa || "").trim().toLowerCase();
+    if (clave && !(configActual.etapas || []).some(e => e.clave === clave)) {
+      return res.status(400).json({ error: `La etapa "${clave}" no existe en /panel.` });
+    }
+
+    await guardarConversacion(senderId, { etapa: clave || null });
+    res.json({ ok: true, etapa: clave || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -1757,7 +1844,8 @@ let configActual = {
   seguimientos_enlace: SEGUIMIENTOS_ENLACE_DEFAULT,
   audios: {}, // { claveAudio: { url, nombre_original, ruta_archivo, subido_en } }
   fotos: {},  // { claveFoto: { url, nombre_original, ruta_archivo, subido_en } }
-  disparadores: [] // [{ frases: [], tipo: "audio"|"foto", clave, pausa_segundos }]
+  disparadores: [], // [{ frases: [], tipo: "audio"|"foto", clave, pausa_segundos }]  <- generales (fallback)
+  etapas: []  // [{ clave, nombre, prompt, disparadores: [...] }]  <- prompts y disparadores propios por etapa
 };
 
 // Cliente de OpenAI: se reconstruye cada vez que cambia configActual.openai_api_key
@@ -1801,6 +1889,7 @@ async function cargarConfigDesdeDB() {
       configActual = { ...configActual, ...data.valor };
       configActual.seguimientos = [...(configActual.seguimientos || [])].sort((a, b) => a.horas - b.horas);
       configActual.seguimientos_enlace = [...(configActual.seguimientos_enlace || [])].sort((a, b) => a.horas - b.horas);
+      if (!Array.isArray(configActual.etapas)) configActual.etapas = [];
       actualizarClienteOpenAI();
       console.log("✅ Configuración cargada desde Supabase.");
     } else {
@@ -1815,6 +1904,7 @@ async function guardarConfigDB(nuevaConfig) {
   configActual = { ...configActual, ...nuevaConfig };
   configActual.seguimientos = [...(configActual.seguimientos || [])].sort((a, b) => a.horas - b.horas);
   configActual.seguimientos_enlace = [...(configActual.seguimientos_enlace || [])].sort((a, b) => a.horas - b.horas);
+  if (!Array.isArray(configActual.etapas)) configActual.etapas = [];
   actualizarClienteOpenAI();
 
   const { error } = await supabase
@@ -1928,10 +2018,39 @@ app.get("/config", requireAdminKey, (req, res) => {
   res.json(configParaFrontend(configActual));
 });
 
+// Valida y normaliza un array de disparadores (usado tanto para los
+// generales como para los propios de cada etapa).
+function normalizarDisparadores(disparadores) {
+  if (!Array.isArray(disparadores)) return [];
+  return disparadores
+    .filter(d => d && (d.tipo === "audio" || d.tipo === "foto") && typeof d.clave === "string" && d.clave.trim())
+    .map(d => ({
+      tipo: d.tipo,
+      clave: d.clave.trim().toLowerCase(),
+      frases: Array.isArray(d.frases) ? d.frases.map(f => String(f).trim()).filter(Boolean) : [],
+      pausa_segundos: Number.isFinite(d.pausa_segundos) && d.pausa_segundos >= 0 ? d.pausa_segundos : 2
+    }))
+    .filter(d => d.frases.length > 0);
+}
+
+// Valida y normaliza el array de etapas que llega desde /panel.
+function normalizarEtapas(etapas) {
+  if (!Array.isArray(etapas)) return [];
+  return etapas
+    .filter(e => e && typeof e.clave === "string" && e.clave.trim())
+    .map(e => ({
+      clave: e.clave.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_-]/g, "_"),
+      nombre: typeof e.nombre === "string" ? e.nombre.trim() : "",
+      prompt: typeof e.prompt === "string" ? e.prompt.trim() : "",
+      disparadores: normalizarDisparadores(e.disparadores)
+    }))
+    .filter(e => e.clave);
+}
+
 app.post("/config", requireAdminKey, async (req, res) => {
   try {
     const { ai_prompt, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
-            calificacion_activa, criterios_calificacion, enlace_calificacion, disparadores } = req.body || {};
+            calificacion_activa, criterios_calificacion, enlace_calificacion, disparadores, etapas } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -1945,19 +2064,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof calificacion_activa === "boolean") nuevaConfig.calificacion_activa = calificacion_activa;
     if (typeof criterios_calificacion === "string") nuevaConfig.criterios_calificacion = criterios_calificacion.trim();
     if (typeof enlace_calificacion === "string") nuevaConfig.enlace_calificacion = enlace_calificacion.trim();
-    if (Array.isArray(disparadores)) {
-      // Se valida cada disparador: tipo debe ser audio/foto, clave y al
-      // menos una frase no vacía, y la pausa un número >= 0.
-      nuevaConfig.disparadores = disparadores
-        .filter(d => d && (d.tipo === "audio" || d.tipo === "foto") && typeof d.clave === "string" && d.clave.trim())
-        .map(d => ({
-          tipo: d.tipo,
-          clave: d.clave.trim().toLowerCase(),
-          frases: Array.isArray(d.frases) ? d.frases.map(f => String(f).trim()).filter(Boolean) : [],
-          pausa_segundos: Number.isFinite(d.pausa_segundos) && d.pausa_segundos >= 0 ? d.pausa_segundos : 2
-        }))
-        .filter(d => d.frases.length > 0);
-    }
+    if (Array.isArray(disparadores)) nuevaConfig.disparadores = normalizarDisparadores(disparadores);
+    if (Array.isArray(etapas)) nuevaConfig.etapas = normalizarEtapas(etapas);
 
     const guardado = await guardarConfigDB(nuevaConfig);
     res.json({ mensaje: "✅ Configuración guardada", config: configParaFrontend(guardado) });
@@ -2387,7 +2495,6 @@ app.get("/panel", requireAdminSesion, (req, res) => {
 ${FUENTES_HTML}
 ${estilosBase()}
 <style>
-  /* --- Estilos específicos del panel --- */
   body{ padding-bottom:0; }
   .switch-row{ display:flex; gap:10px; }
   .btn{
@@ -2455,6 +2562,20 @@ ${estilosBase()}
     background:var(--green-soft); border:1px solid rgba(49,217,124,.28); border-radius:6px;
     padding:3px 8px; margin-top:8px;
   }
+  .etapa-tag{
+    display:inline-block; font-family:var(--mono); font-size:11.5px; color:#C99BFF;
+    background:rgba(201,155,255,.1); border:1px solid rgba(201,155,255,.28); border-radius:6px;
+    padding:3px 8px; margin-top:8px;
+  }
+  .card.card-etapas{ border-color:rgba(201,155,255,.35); }
+  .etapa-card{
+    border:1px solid rgba(201,155,255,.28); border-radius:13px; padding:18px; margin-bottom:14px;
+    background:rgba(201,155,255,.03);
+  }
+  .etapa-card-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px; }
+  .etapa-card-head .eyebrow-num{ font-family:var(--mono); font-size:12px; color:#C99BFF; }
+  .etapa-subseccion{ border-top:1px dashed var(--border); margin-top:16px; padding-top:16px; }
+  .etapa-subseccion-titulo{ font-family:var(--display); font-weight:600; font-size:13.5px; margin:0 0 10px; color:var(--muted); }
   @media (max-width:860px){ .savebar{ left:0; padding:18px 18px 20px; } .save-btn{ flex:1; } }
 </style>
 </head>
@@ -2495,9 +2616,9 @@ ${estilosBase()}
         </div>
 
         <div class="card">
-          <h2>Mensaje del bot</h2>
-          <p class="hint">Instrucciones que sigue la IA para responder a los clientes. Sé específico: tono, qué información dar, qué evitar. Si el lead ya cumplió los criterios de calificación, este mismo prompt es el que debe mandarle el enlace del formulario o calendario correspondiente. También puedes usar <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> dentro de la respuesta para partirla en varios mensajes separados (burbujas distintas), esperando N segundos entre cada uno — por ejemplo: <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">Hola, ¿cómo estás?[[pausa:8]]¿Qué tal te fue con el entrenamiento?</code> manda dos mensajes separados con 8 segundos de por medio, simulando que estás escribiendo en el momento. También sirve para mandar un audio o foto pregrabada después de un texto, por ejemplo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">Te dejo un audio explicando esto[[pausa:5]][[audio:peso]]</code>.</p>
-          <label for="prompt">Prompt del sistema</label>
+          <h2>Mensaje del bot (general)</h2>
+          <p class="hint">Instrucciones que sigue la IA para responder a los clientes cuando <b>NO</b> están en ninguna etapa (ver "Etapas de la conversación" a la derecha). Sé específico: tono, qué información dar, qué evitar. También puedes usar <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> dentro de la respuesta para partirla en varios mensajes separados (burbujas distintas), esperando N segundos entre cada uno. También sirve para mandar un audio o foto pregrabada después de un texto, o para pasar al lead a una etapa con <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:clave]]</code> — por ejemplo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">Perfecto, cuéntame primero tu objetivo[[etapa:objetivo]]</code> manda ese mensaje y a partir de ahí el lead entra a la etapa "objetivo" (usará el prompt de esa etapa, no este).</p>
+          <label for="prompt">Prompt del sistema (general)</label>
           <textarea id="prompt" rows="8" placeholder="Eres el asistente de..."></textarea>
         </div>
 
@@ -2538,7 +2659,7 @@ ${estilosBase()}
 
         <div class="card">
           <h2>Audios y fotos pregrabados</h2>
-          <p class="hint">Sube audios y fotos, y ponles un nombre corto (sin espacios). Úsalos en tu <b>prompt</b> o en los mensajes de <b>seguimientos</b> (a la derecha) con los marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:nombre]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:nombre]]</code> — por ejemplo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:antes_despues1]]</code>. Le llegan al cliente como un mensaje de audio o imagen normal de Instagram. Si el mensaje tiene texto además del marcador, primero se envía el texto y luego el archivo — usa <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> entre ambos si quieres que pase N segundos de espera antes de mandar el archivo, en vez de mandarlo pegado justo después del texto.</p>
+          <p class="hint">Sube audios y fotos, y ponles un nombre corto (sin espacios). Úsalos en cualquier <b>prompt</b> (general o de una etapa) o en los mensajes de <b>seguimientos</b> con los marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:nombre]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:nombre]]</code>. Le llegan al cliente como un mensaje de audio o imagen normal de Instagram. Si el mensaje tiene texto además del marcador, primero se envía el texto y luego el archivo — usa <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> entre ambos si quieres que pase N segundos de espera antes de mandar el archivo.</p>
 
           <p style="font-family:var(--display); font-weight:600; font-size:14.5px; margin:18px 0 10px;">🎤 Audios</p>
           <div id="listaAudios" style="margin-bottom:14px;"></div>
@@ -2574,14 +2695,35 @@ ${estilosBase()}
         </div>
 
         <div class="card card-destacada">
-          <h2>🎯 Disparadores automáticos (envío garantizado)</h2>
-          <p class="hint">La IA no siempre es consistente decidiendo cuándo incluir un <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en su respuesta — a veces sí, a veces no. Acá puedes configurar palabras o frases que, en cuanto aparezcan en el mensaje del cliente, manden ese audio/foto <b>SIEMPRE, por código, sin depender de la IA</b>. Si la IA ya lo mandó por su cuenta en esa misma respuesta, no se duplica.</p>
+          <h2>🎯 Disparadores automáticos generales (envío garantizado)</h2>
+          <p class="hint">La IA no siempre es consistente decidiendo cuándo incluir un <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en su respuesta — a veces sí, a veces no. Acá puedes configurar palabras o frases que, en cuanto aparezcan en el mensaje del cliente, manden ese audio/foto <b>SIEMPRE, por código, sin depender de la IA</b>. Si la IA ya lo mandó ella misma en esa misma respuesta, no se duplica.<br><br><b>Estos disparadores son el respaldo general:</b> si el lead está en una etapa que tiene sus propios disparadores (ver "Etapas de la conversación"), primero se revisan los de esa etapa; solo si NINGUNO de esos coincide con lo que escribió el cliente, se cae a revisar esta lista de aquí.</p>
           <div id="listaDisparadores"></div>
-          <button class="add-paso" id="addDisparador" type="button">+ Agregar disparador</button>
+          <button class="add-paso" id="addDisparador" type="button">+ Agregar disparador general</button>
         </div>
       </div>
 
       <div class="col">
+        <div class="card card-etapas">
+          <h2>🧭 Etapas de la conversación</h2>
+          <p class="hint">
+            Cada lead puede estar en una <b>etapa</b> (o en ninguna, y entonces usa el prompt general de la izquierda).
+            Sirve para que preguntas de "sí/no" no se crucen entre distintos momentos de la conversación: si en la
+            etapa "precio" un "sí" debe hacer una cosa y en la etapa "agendar" otro "sí" debe hacer algo distinto,
+            cada etapa solo conoce SU propio prompt — la IA no ve las demás preguntas sí/no al mismo tiempo.
+          </p>
+          <p class="hint">
+            Para que un lead <b>entre</b> a una etapa, el prompt (general o de otra etapa) debe incluir
+            <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:clave]]</code>
+            al final de la respuesta correspondiente — por ejemplo, en el prompt general:
+            "Perfecto, cuéntame cuál es tu objetivo principal[[etapa:objetivo]]". Desde ahí en adelante, ese lead usa
+            el prompt de la etapa "objetivo" hasta que algún mensaje incluya otro
+            <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:otra_clave]]</code>.
+            También puedes cambiar la etapa de un lead a mano desde <a href="/chats">Chats</a>.
+          </p>
+          <div id="listaEtapas"></div>
+          <button class="add-paso" id="addEtapa" type="button">+ Agregar etapa</button>
+        </div>
+
         <div class="card">
           <h2>Enlace de calificación (calendario / formulario)</h2>
           <p class="hint">Pega aquí el enlace exacto que tu prompt manda cuando un lead ya calificó (por ejemplo tu link de Calendly o de un formulario). El sistema NO lo envía — solo lo usa para detectar cuándo tu bot ya se lo mandó al cliente. En cuanto lo detecta en una respuesta, le pone la etiqueta 🔗 <b>para siempre</b> (no se quita nunca) y activa el seguimiento especial de abajo. Ese seguimiento especial <b>se mantiene activo aunque el lead responda algo en el medio</b> (ej. "gracias") — solo se pasa al seguimiento normal una vez que ya se mandaron TODOS los pasos configurados abajo.</p>
@@ -2594,14 +2736,14 @@ ${estilosBase()}
           <div style="height:1px; background:var(--border); margin:24px 0;"></div>
 
           <h2 style="margin-bottom:5px;">Seguimiento especial a ese enlace</h2>
-          <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de arriba. Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. Útil para algo como "¿pudiste agendar tu espacio?". También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en estos mensajes.</p>
+          <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de arriba. Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en estos mensajes.</p>
           <div id="pasosEnlace"></div>
           <button class="add-paso" id="addPasoEnlace" type="button">+ Agregar paso de seguimiento al enlace</button>
         </div>
 
         <div class="card">
           <h2>Seguimientos automáticos</h2>
-          <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación (ver seguimiento especial a la izquierda). También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en cualquiera de estos mensajes.</p>
+          <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en cualquiera de estos mensajes.</p>
           <div id="pasos"></div>
           <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
         </div>
@@ -2667,7 +2809,7 @@ ${estilosBase()}
         <label>Horas de silencio antes de disparar</label>
         <input type="number" step="0.1" min="0" class="paso-horas" data-i="\${i}" value="\${paso.horas}" style="margin-bottom:10px;">
         <label>Mensajes (uno por línea, rotan entre ellos)</label>
-        <textarea class="paso-mensajes" data-i="\${i}" rows="3">\${(paso.mensajes || []).join("\\n")}</textarea>
+        <textarea class="paso-mensajes" data-i="\${i}" rows="3">\${(paso.mensajes || []).join("\n")}</textarea>
       \`;
       cont.appendChild(div);
     });
@@ -2684,7 +2826,7 @@ ${estilosBase()}
   function leerPasosDelDOM(){
     document.querySelectorAll(".paso-horas").forEach((input, i) => { pasos[i].horas = parseFloat(input.value) || 0; });
     document.querySelectorAll(".paso-mensajes").forEach((ta, i) => {
-      pasos[i].mensajes = ta.value.split("\\n").map(m => m.trim()).filter(Boolean);
+      pasos[i].mensajes = ta.value.split("\n").map(m => m.trim()).filter(Boolean);
     });
   }
 
@@ -2705,7 +2847,7 @@ ${estilosBase()}
         <label>Horas desde que se envió el enlace, antes de disparar</label>
         <input type="number" step="0.1" min="0" class="paso-enlace-horas" data-i="\${i}" value="\${paso.horas}" style="margin-bottom:10px;">
         <label>Mensajes (uno por línea, rotan entre ellos)</label>
-        <textarea class="paso-enlace-mensajes" data-i="\${i}" rows="3">\${(paso.mensajes || []).join("\\n")}</textarea>
+        <textarea class="paso-enlace-mensajes" data-i="\${i}" rows="3">\${(paso.mensajes || []).join("\n")}</textarea>
       \`;
       cont.appendChild(div);
     });
@@ -2722,11 +2864,11 @@ ${estilosBase()}
   function leerPasosEnlaceDelDOM(){
     document.querySelectorAll(".paso-enlace-horas").forEach((input, i) => { pasosEnlace[i].horas = parseFloat(input.value) || 0; });
     document.querySelectorAll(".paso-enlace-mensajes").forEach((ta, i) => {
-      pasosEnlace[i].mensajes = ta.value.split("\\n").map(m => m.trim()).filter(Boolean);
+      pasosEnlace[i].mensajes = ta.value.split("\n").map(m => m.trim()).filter(Boolean);
     });
   }
 
-  // --- Disparadores automáticos: envío garantizado de audio/foto por palabras clave ---
+  // --- Disparadores automáticos: helpers reutilizables (generales y por etapa) ---
   let disparadores = [];
   let audiosDisponibles = {};
   let fotosDisponibles = {};
@@ -2740,50 +2882,75 @@ ${estilosBase()}
     return claves.map(c => \`<option value="\${c}"\${c === claveSeleccionada ? " selected" : ""}>\${c}</option>\`).join("");
   }
 
-  function renderDisparadores(){
-    const cont = document.getElementById("listaDisparadores");
-    if(disparadores.length === 0){
+  function renderDisparadoresEnContenedor(cont, lista, prefijoClase, alCambiar){
+    if(lista.length === 0){
       cont.innerHTML = '<p class="hint" style="margin:0 0 12px;">Todavía no hay disparadores configurados.</p>';
-    } else {
-      cont.innerHTML = "";
-      disparadores.forEach((d, i) => {
-        const div = document.createElement("div");
-        div.className = "paso";
-        div.innerHTML = \`
-          <div class="paso-head">
-            <span class="eyebrow-num">DISPARADOR \${i + 1}</span>
-            <button type="button" class="quitar-disparador" data-i="\${i}">quitar</button>
-          </div>
-          <label>Palabras o frases que lo activan (una por línea, si el mensaje del cliente contiene cualquiera de ellas, se dispara)</label>
-          <textarea class="disparador-frases" data-i="\${i}" rows="3" placeholder="ej: precio&#10;cuanto cuesta&#10;inversion" style="margin-bottom:10px;">\${(d.frases || []).join("\\n")}</textarea>
-          <div class="row2" style="margin-bottom:10px;">
-            <div>
-              <label>Tipo</label>
-              <select class="disparador-tipo" data-i="\${i}">
-                <option value="audio"\${d.tipo === "audio" ? " selected" : ""}>🎤 Audio</option>
-                <option value="foto"\${d.tipo === "foto" ? " selected" : ""}>🖼️ Foto</option>
-              </select>
-            </div>
-            <div>
-              <label>Espera antes de enviarlo (segundos)</label>
-              <input type="number" step="0.5" min="0" class="disparador-pausa" data-i="\${i}" value="\${d.pausa_segundos ?? 2}">
-            </div>
-          </div>
-          <label>Cuál mandar</label>
-          <select class="disparador-clave" data-i="\${i}">\${opcionesClaveHTML(d.tipo, d.clave)}</select>
-        \`;
-        cont.appendChild(div);
-      });
-      cont.querySelectorAll(".quitar-disparador").forEach(b => b.addEventListener("click", e => {
-        leerDisparadoresDelDOM();
-        disparadores.splice(+e.target.dataset.i, 1);
-        renderDisparadores();
-      }));
-      cont.querySelectorAll(".disparador-tipo").forEach(sel => sel.addEventListener("change", e => {
-        leerDisparadoresDelDOM();
-        renderDisparadores();
-      }));
+      return;
     }
+    cont.innerHTML = "";
+    lista.forEach((d, i) => {
+      const div = document.createElement("div");
+      div.className = "paso";
+      div.innerHTML = \`
+        <div class="paso-head">
+          <span class="eyebrow-num">DISPARADOR \${i + 1}</span>
+          <button type="button" class="\${prefijoClase}-quitar" data-i="\${i}">quitar</button>
+        </div>
+        <label>Palabras o frases que lo activan (una por línea)</label>
+        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: precio&#10;cuanto cuesta&#10;inversion" style="margin-bottom:10px;">\${(d.frases || []).join("\n")}</textarea>
+        <div class="row2" style="margin-bottom:10px;">
+          <div>
+            <label>Tipo</label>
+            <select class="\${prefijoClase}-tipo" data-i="\${i}">
+              <option value="audio"\${d.tipo === "audio" ? " selected" : ""}>🎤 Audio</option>
+              <option value="foto"\${d.tipo === "foto" ? " selected" : ""}>🖼️ Foto</option>
+            </select>
+          </div>
+          <div>
+            <label>Espera antes de enviarlo (segundos)</label>
+            <input type="number" step="0.5" min="0" class="\${prefijoClase}-pausa" data-i="\${i}" value="\${d.pausa_segundos ?? 2}">
+          </div>
+        </div>
+        <label>Cuál mandar</label>
+        <select class="\${prefijoClase}-clave" data-i="\${i}">\${opcionesClaveHTML(d.tipo, d.clave)}</select>
+      \`;
+      cont.appendChild(div);
+    });
+    cont.querySelectorAll(\`.\${prefijoClase}-quitar\`).forEach(b => b.addEventListener("click", e => {
+      alCambiar();
+      lista.splice(+e.target.dataset.i, 1);
+      renderDisparadoresEnContenedor(cont, lista, prefijoClase, alCambiar);
+    }));
+    cont.querySelectorAll(\`.\${prefijoClase}-tipo\`).forEach(sel => sel.addEventListener("change", () => {
+      alCambiar();
+      renderDisparadoresEnContenedor(cont, lista, prefijoClase, alCambiar);
+    }));
+  }
+
+  function leerDisparadoresDeContenedor(lista, prefijoClase){
+    document.querySelectorAll(\`.\${prefijoClase}-frases\`).forEach((ta, i) => {
+      if(!lista[i]) return;
+      lista[i].frases = ta.value.split("\n").map(f => f.trim()).filter(Boolean);
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-tipo\`).forEach((sel, i) => {
+      if(!lista[i]) return;
+      lista[i].tipo = sel.value;
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-pausa\`).forEach((input, i) => {
+      if(!lista[i]) return;
+      lista[i].pausa_segundos = parseFloat(input.value) || 0;
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-clave\`).forEach((sel, i) => {
+      if(!lista[i]) return;
+      lista[i].clave = sel.value;
+    });
+  }
+
+  function renderDisparadores(){
+    renderDisparadoresEnContenedor(document.getElementById("listaDisparadores"), disparadores, "disp-gen", leerDisparadoresDelDOM);
+  }
+  function leerDisparadoresDelDOM(){
+    leerDisparadoresDeContenedor(disparadores, "disp-gen");
   }
 
   document.getElementById("addDisparador").addEventListener("click", () => {
@@ -2792,24 +2959,92 @@ ${estilosBase()}
     renderDisparadores();
   });
 
-  function leerDisparadoresDelDOM(){
-    document.querySelectorAll(".disparador-frases").forEach((ta, i) => {
-      if(!disparadores[i]) return;
-      disparadores[i].frases = ta.value.split("\\n").map(f => f.trim()).filter(Boolean);
+  // --- Etapas de la conversación ---
+  let etapas = [];
+
+  function slugify(txt){
+    return (txt || "").trim().toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+  }
+
+  function renderEtapas(){
+    leerEtapasDelDOM();
+    const cont = document.getElementById("listaEtapas");
+    if(etapas.length === 0){
+      cont.innerHTML = '<p class="hint" style="margin:0 0 12px;">Todavía no has creado ninguna etapa. Mientras no tengas etapas, todo el bot usa el prompt general de la izquierda.</p>';
+      return;
+    }
+    cont.innerHTML = "";
+    etapas.forEach((et, i) => {
+      const div = document.createElement("div");
+      div.className = "etapa-card";
+      div.innerHTML = \`
+        <div class="etapa-card-head">
+          <span class="eyebrow-num">ETAPA \${i + 1}</span>
+          <button type="button" class="etapa-quitar" data-i="\${i}">quitar etapa</button>
+        </div>
+        <div class="row2" style="margin-bottom:12px;">
+          <div>
+            <label>Nombre para mostrar</label>
+            <input type="text" class="etapa-nombre" data-i="\${i}" value="\${(et.nombre || "").replace(/"/g,"&quot;")}" placeholder="ej: Preguntando objetivo">
+          </div>
+          <div>
+            <label>Clave (para el marcador [[etapa:clave]])</label>
+            <input type="text" class="etapa-clave" data-i="\${i}" value="\${et.clave || ""}" placeholder="ej: objetivo">
+          </div>
+        </div>
+        <label>Prompt de esta etapa (reemplaza al general mientras el lead esté aquí)</label>
+        <textarea class="etapa-prompt" data-i="\${i}" rows="6" placeholder="Ej: Ahora solo pregunta cuál es su objetivo principal. Si responde que sí quiere que le expliques un plan, incluye [[etapa:plan]] al final. Si responde que no, sigue platicando sin insistir.">\${(et.prompt || "").replace(/</g,"&lt;")}</textarea>
+
+        <div class="etapa-subseccion">
+          <p class="etapa-subseccion-titulo">🎯 Disparadores propios de esta etapa (opcional)</p>
+          <p class="hint" style="margin:0 0 10px;">Si una palabra coincide aquí, se usa este audio/foto y NO se revisan los disparadores generales. Si el mensaje del cliente no coincide con ninguno de aquí, se cae a los disparadores generales de la izquierda.</p>
+          <div class="etapa-disparadores" data-i="\${i}"></div>
+          <button type="button" class="add-paso etapa-add-disparador" data-i="\${i}">+ Agregar disparador de esta etapa</button>
+        </div>
+      \`;
+      cont.appendChild(div);
     });
-    document.querySelectorAll(".disparador-tipo").forEach((sel, i) => {
-      if(!disparadores[i]) return;
-      disparadores[i].tipo = sel.value;
+
+    cont.querySelectorAll(".etapa-quitar").forEach(b => b.addEventListener("click", e => {
+      leerEtapasDelDOM();
+      etapas.splice(+e.target.dataset.i, 1);
+      renderEtapas();
+    }));
+
+    cont.querySelectorAll(".etapa-disparadores").forEach(subcont => {
+      const i = +subcont.dataset.i;
+      if(!etapas[i].disparadores) etapas[i].disparadores = [];
+      const prefijo = "etapa" + i + "-disp";
+      renderDisparadoresEnContenedor(subcont, etapas[i].disparadores, prefijo, () => leerDisparadoresDeContenedor(etapas[i].disparadores, prefijo));
     });
-    document.querySelectorAll(".disparador-pausa").forEach((input, i) => {
-      if(!disparadores[i]) return;
-      disparadores[i].pausa_segundos = parseFloat(input.value) || 0;
-    });
-    document.querySelectorAll(".disparador-clave").forEach((sel, i) => {
-      if(!disparadores[i]) return;
-      disparadores[i].clave = sel.value;
+
+    cont.querySelectorAll(".etapa-add-disparador").forEach(b => b.addEventListener("click", (e) => {
+      leerEtapasDelDOM();
+      const i = +e.target.dataset.i;
+      if(!etapas[i].disparadores) etapas[i].disparadores = [];
+      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", pausa_segundos: 2 });
+      renderEtapas();
+    }));
+  }
+
+  function leerEtapasDelDOM(){
+    document.querySelectorAll(".etapa-nombre").forEach((input, i) => { if(etapas[i]) etapas[i].nombre = input.value; });
+    document.querySelectorAll(".etapa-clave").forEach((input, i) => { if(etapas[i]) etapas[i].clave = slugify(input.value); });
+    document.querySelectorAll(".etapa-prompt").forEach((ta, i) => { if(etapas[i]) etapas[i].prompt = ta.value; });
+    document.querySelectorAll(".etapa-disparadores").forEach(subcont => {
+      const i = +subcont.dataset.i;
+      if(!etapas[i]) return;
+      leerDisparadoresDeContenedor(etapas[i].disparadores || [], "etapa" + i + "-disp");
     });
   }
+
+  document.getElementById("addEtapa").addEventListener("click", () => {
+    leerEtapasDelDOM();
+    etapas.push({ clave: "", nombre: "", prompt: "", disparadores: [] });
+    renderEtapas();
+  });
 
   async function cargarConfig(){
     const cfg = await llamarGET("/config");
@@ -2838,10 +3073,11 @@ ${estilosBase()}
     renderFotos(cfg.fotos || {});
     disparadores = Array.isArray(cfg.disparadores) ? JSON.parse(JSON.stringify(cfg.disparadores)) : [];
     renderDisparadores();
+    etapas = Array.isArray(cfg.etapas) ? JSON.parse(JSON.stringify(cfg.etapas)) : [];
+    renderEtapas();
     document.getElementById("btnGuardar").disabled = false;
   }
 
-  // --- Audios pregrabados: subir, listar, borrar ---
   function renderAudios(audios){
     const cont = document.getElementById("listaAudios");
     const claves = Object.keys(audios || {});
@@ -2871,7 +3107,7 @@ ${estilosBase()}
         const data = await llamarPOST("/audios/eliminar", { clave });
         if(data && !data.error){
           const cfgActualizado = await llamarGET("/config");
-          if(cfgActualizado){ audiosDisponibles = cfgActualizado.audios || {}; renderAudios(audiosDisponibles); renderDisparadores(); }
+          if(cfgActualizado){ audiosDisponibles = cfgActualizado.audios || {}; renderAudios(audiosDisponibles); renderDisparadores(); renderEtapas(); }
         } else {
           alert("No se pudo eliminar: " + (data?.error || "error desconocido"));
           btn.disabled = false; btn.textContent = "quitar";
@@ -2884,8 +3120,6 @@ ${estilosBase()}
     return new Promise((resolve, reject) => {
       const lector = new FileReader();
       lector.onload = () => {
-        // El resultado viene como "data:audio/mpeg;base64,AAAA..." — solo
-        // nos interesa la parte después de la coma.
         const resultado = lector.result;
         const base64 = resultado.substring(resultado.indexOf(",") + 1);
         resolve(base64);
@@ -2914,11 +3148,11 @@ ${estilosBase()}
       const data = await llamarPOST("/audios/subir", { nombre, base64, tipo: archivo.type });
       if(data && !data.error){
         msg.style.color = "var(--green)";
-        msg.textContent = "✓ Audio \\"" + data.clave + "\\" subido correctamente. Úsalo como [[audio:" + data.clave + "]]";
+        msg.textContent = "✓ Audio \"" + data.clave + "\" subido correctamente. Úsalo como [[audio:" + data.clave + "]]";
         document.getElementById("audioNombre").value = "";
         inputArchivo.value = "";
         const cfgActualizado = await llamarGET("/config");
-        if(cfgActualizado){ audiosDisponibles = cfgActualizado.audios || {}; renderAudios(audiosDisponibles); renderDisparadores(); }
+        if(cfgActualizado){ audiosDisponibles = cfgActualizado.audios || {}; renderAudios(audiosDisponibles); renderDisparadores(); renderEtapas(); }
       } else {
         msg.style.color = "var(--red)";
         msg.textContent = "❌ " + (data?.error || "No se pudo subir el audio.");
@@ -2931,7 +3165,6 @@ ${estilosBase()}
     }
   });
 
-  // --- Fotos pregrabadas: mismo patrón que los audios ---
   function renderFotos(fotos){
     const cont = document.getElementById("listaFotos");
     const claves = Object.keys(fotos || {});
@@ -2961,7 +3194,7 @@ ${estilosBase()}
         const data = await llamarPOST("/fotos/eliminar", { clave });
         if(data && !data.error){
           const cfgActualizado = await llamarGET("/config");
-          if(cfgActualizado){ fotosDisponibles = cfgActualizado.fotos || {}; renderFotos(fotosDisponibles); renderDisparadores(); }
+          if(cfgActualizado){ fotosDisponibles = cfgActualizado.fotos || {}; renderFotos(fotosDisponibles); renderDisparadores(); renderEtapas(); }
         } else {
           alert("No se pudo eliminar: " + (data?.error || "error desconocido"));
           btn.disabled = false; btn.textContent = "quitar";
@@ -2989,11 +3222,11 @@ ${estilosBase()}
       const data = await llamarPOST("/fotos/subir", { nombre, base64, tipo: archivo.type });
       if(data && !data.error){
         msg.style.color = "var(--green)";
-        msg.textContent = "✓ Foto \\"" + data.clave + "\\" subida correctamente. Úsala como [[foto:" + data.clave + "]]";
+        msg.textContent = "✓ Foto \"" + data.clave + "\" subida correctamente. Úsala como [[foto:" + data.clave + "]]";
         document.getElementById("fotoNombre").value = "";
         inputArchivo.value = "";
         const cfgActualizado = await llamarGET("/config");
-        if(cfgActualizado){ fotosDisponibles = cfgActualizado.fotos || {}; renderFotos(fotosDisponibles); renderDisparadores(); }
+        if(cfgActualizado){ fotosDisponibles = cfgActualizado.fotos || {}; renderFotos(fotosDisponibles); renderDisparadores(); renderEtapas(); }
       } else {
         msg.style.color = "var(--red)";
         msg.textContent = "❌ " + (data?.error || "No se pudo subir la foto.");
@@ -3021,13 +3254,26 @@ ${estilosBase()}
     leerPasosDelDOM();
     leerPasosEnlaceDelDOM();
     leerDisparadoresDelDOM();
+    leerEtapasDelDOM();
+
     if(pasos.length === 0){
       if(!confirm("No hay ningún paso de seguimiento normal configurado. ¿Seguro que quieres guardar así (se quedará sin seguimientos automáticos)?")) return;
     }
     const disparadoresSinClave = disparadores.filter(d => !d.clave);
     if(disparadoresSinClave.length > 0){
-      if(!confirm("Hay " + disparadoresSinClave.length + " disparador(es) sin ningún audio/foto seleccionado (o no tienes ninguno subido todavía). Se van a ignorar al guardar. ¿Continuar?")) return;
+      if(!confirm("Hay " + disparadoresSinClave.length + " disparador(es) general(es) sin ningún audio/foto seleccionado. Se van a ignorar al guardar. ¿Continuar?")) return;
     }
+    const etapasSinClave = etapas.filter(e => !e.clave);
+    if(etapasSinClave.length > 0){
+      alert("Hay " + etapasSinClave.length + " etapa(s) sin una clave válida. Ponles una clave antes de guardar.");
+      return;
+    }
+    const clavesDuplicadas = etapas.map(e => e.clave).filter((c, i, arr) => arr.indexOf(c) !== i);
+    if(clavesDuplicadas.length > 0){
+      alert("Hay etapas con la misma clave repetida: " + [...new Set(clavesDuplicadas)].join(", ") + ". Cada etapa necesita una clave única.");
+      return;
+    }
+
     const body = {
       ai_prompt: document.getElementById("prompt").value,
       min_delay: parseInt(document.getElementById("minDelay").value, 10),
@@ -3038,7 +3284,8 @@ ${estilosBase()}
       calificacion_activa: document.getElementById("calificacionActiva").checked,
       criterios_calificacion: document.getElementById("criteriosCalificacion").value,
       enlace_calificacion: document.getElementById("enlaceCalificacion").value,
-      disparadores: disparadores
+      disparadores: disparadores,
+      etapas: etapas
     };
     const nuevaClave = document.getElementById("openaiKey").value.trim();
     if(nuevaClave) body.openai_api_key = nuevaClave;
@@ -3051,6 +3298,7 @@ ${estilosBase()}
       msg.textContent = "✓ Guardado"; msg.className = "save-msg ok";
       document.getElementById("openaiKey").value = "";
       if(data.config) pintarEstadoClave(data.config);
+      if(data.config && Array.isArray(data.config.etapas)) { etapas = JSON.parse(JSON.stringify(data.config.etapas)); renderEtapas(); }
     }
     setTimeout(() => { msg.textContent = ""; }, 2500);
   });
@@ -3110,6 +3358,11 @@ ${estilosBase()}
   .enlace-badge{
     font-size:11px; margin-left:7px; flex-shrink:0;
   }
+  .etapa-chip{
+    display:inline-block; font-family:var(--mono); font-size:10.5px; color:#C99BFF;
+    background:rgba(201,155,255,.12); border:1px solid rgba(201,155,255,.3); border-radius:6px;
+    padding:2px 7px; margin-left:7px; flex-shrink:0; vertical-align:middle;
+  }
   .handoff-dot{
     width:8px; height:8px; border-radius:50%; background:var(--red); flex-shrink:0;
     display:inline-block; margin-left:7px; box-shadow:0 0 0 2px rgba(255,93,93,.18);
@@ -3130,6 +3383,14 @@ ${estilosBase()}
     border-bottom:1px solid rgba(63,199,232,.28); display:none; align-items:center; gap:8px;
   }
   .enlace-banner.visible{ display:flex; }
+  .etapa-banner{
+    background:rgba(201,155,255,.08); color:#C99BFF; font-size:13px; padding:11px 20px;
+    border-bottom:1px solid rgba(201,155,255,.25); display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  }
+  .etapa-banner select{
+    background:var(--surface-3); border:1px solid rgba(201,155,255,.35); color:var(--text);
+    border-radius:8px; padding:6px 10px; font-size:13px; font-family:var(--body);
+  }
   .chat-export{ padding:10px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
   .btn-exportar{
     display:block; text-align:center; background:var(--surface-3); color:var(--text);
@@ -3287,6 +3548,10 @@ ${estilosBase()}
         </div>
         <div class="califica-banner" id="calificaBanner"></div>
         <div class="enlace-banner" id="enlaceBanner"></div>
+        <div class="etapa-banner" id="etapaBanner" style="display:none;">
+          <span>🧭 Etapa actual:</span>
+          <select id="selectEtapa"><option value="">Sin etapa (general)</option></select>
+        </div>
         <div class="chat-messages" id="chatMensajes">
           <div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>
         </div>
@@ -3319,6 +3584,7 @@ ${estilosBase()}
   let senderSeleccionado = null;
   let ultimoHistorialJSON = null;
   let filtroActual = "todas";
+  let etapasDisponibles = [];
 
   function formatearFecha(iso){
     if(!iso) return "";
@@ -3336,8 +3602,6 @@ ${estilosBase()}
     return base.charAt(0).toUpperCase();
   }
 
-  // Genera el <img>; si la foto no carga (token vencido, permiso, etc.)
-  // se reemplaza sola por un círculo con la inicial del usuario.
   function avatarHTML(c, claseExtra){
     const inicial = inicialDe(c);
     if (c.profile_pic) {
@@ -3351,6 +3615,11 @@ ${estilosBase()}
     return c.username ? "@" + c.username : c.sender_id;
   }
 
+  async function cargarEtapasDisponibles(){
+    const cfg = await llamarGET("/config");
+    if(cfg && Array.isArray(cfg.etapas)) etapasDisponibles = cfg.etapas;
+  }
+
   function actualizarContadores(){
     const totalHandoff = conversaciones.filter(c => !c.en_ventana_24h).length;
     const totalCalifica = conversaciones.filter(c => c.califica).length;
@@ -3362,8 +3631,6 @@ ${estilosBase()}
     actualizarBotonExportar({ totalHandoff, totalCalifica, totalEnlace });
   }
 
-  // Un solo botón de exportar que cambia según la pestaña seleccionada.
-  // En "Todas" se oculta porque esa vista no se exporta.
   function actualizarBotonExportar({ totalHandoff, totalCalifica, totalEnlace }){
     const wrap = document.getElementById("chatExportWrap");
     const btn = document.getElementById("btnExportar");
@@ -3414,6 +3681,7 @@ ${estilosBase()}
             <span class="uname">\${escapar(nombreMostrar(c))}</span>
             \${c.califica ? '<span class="califica-badge" title="Califica">✅</span>' : ''}
             \${c.enlace_enviado ? '<span class="enlace-badge" title="Enlace enviado">🔗</span>' : ''}
+            \${c.etapa_nombre ? '<span class="etapa-chip" title="Etapa actual">' + escapar(c.etapa_nombre) + '</span>' : ''}
             \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
           </div>
           <div class="preview">\${c.ultimo_role === "assistant" ? "🤖 " : ""}\${escapar(c.ultimo_texto) || "(sin mensajes)"}</div>
@@ -3431,13 +3699,11 @@ ${estilosBase()}
     });
   }
 
-  // --- Menú contextual (clic derecho): borrar conversación y empezar de cero ---
   let senderMenuContextual = null;
 
   function mostrarMenuContextual(x, y, senderId){
     senderMenuContextual = senderId;
     const menu = document.getElementById("menuContextual");
-    // Se ajusta si se saldría de la pantalla por la derecha o por abajo.
     const anchoEstimado = 240, altoEstimado = 50;
     const left = Math.min(x, window.innerWidth - anchoEstimado - 10);
     const top = Math.min(y, window.innerHeight - altoEstimado - 10);
@@ -3453,7 +3719,6 @@ ${estilosBase()}
 
   document.addEventListener("click", ocultarMenuContextual);
   document.addEventListener("contextmenu", (e) => {
-    // Si el clic derecho fue fuera de un chat-list-item, cierra cualquier menú abierto.
     if(!e.target.closest(".chat-list-item")) ocultarMenuContextual();
   });
 
@@ -3462,7 +3727,7 @@ ${estilosBase()}
     const senderId = senderMenuContextual;
     ocultarMenuContextual();
     if(!senderId) return;
-    if(!confirm("¿Borrar por completo esta conversación? Se pierde todo el historial y no se puede deshacer.\\n\\nLa próxima vez que esta persona escriba, el bot empezará desde cero (como si nunca hubiera hablado con ella).")) return;
+    if(!confirm("¿Borrar por completo esta conversación? Se pierde todo el historial y no se puede deshacer.\n\nLa próxima vez que esta persona escriba, el bot empezará desde cero (como si nunca hubiera hablado con ella).")) return;
 
     try {
       const res = await fetch("/chats/borrar", {
@@ -3487,16 +3752,24 @@ ${estilosBase()}
     }
   });
 
+  function opcionesEtapaHTML(claveActual){
+    let html = '<option value="">Sin etapa (general)</option>';
+    html += etapasDisponibles.map(e => \`<option value="\${e.clave}"\${e.clave === claveActual ? " selected" : ""}>\${escapar(e.nombre || e.clave)}</option>\`).join("");
+    return html;
+  }
+
   function renderHead(){
     const head = document.getElementById("chatHead");
     const banner = document.getElementById("handoffBanner");
     const bannerCalifica = document.getElementById("calificaBanner");
     const bannerEnlace = document.getElementById("enlaceBanner");
+    const bannerEtapa = document.getElementById("etapaBanner");
     if(!senderSeleccionado){
       head.innerHTML = '<span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>';
       banner.classList.remove("visible");
       bannerCalifica.classList.remove("visible");
       bannerEnlace.classList.remove("visible");
+      bannerEtapa.style.display = "none";
       return;
     }
     const conv = conversaciones.find(c => c.sender_id === senderSeleccionado) || { sender_id: senderSeleccionado, en_ventana_24h: true };
@@ -3525,7 +3798,30 @@ ${estilosBase()}
     } else {
       bannerEnlace.classList.remove("visible");
     }
+
+    // Selector de etapa: siempre visible mientras haya una conversación
+    // seleccionada, sirve tanto para ver la etapa actual como para cambiarla
+    // a mano (útil si la IA no puso el marcador [[etapa:..]] correctamente).
+    bannerEtapa.style.display = "flex";
+    const selectEtapa = document.getElementById("selectEtapa");
+    selectEtapa.innerHTML = opcionesEtapaHTML(conv.etapa || "");
   }
+
+  document.getElementById("selectEtapa").addEventListener("change", async (e) => {
+    if(!senderSeleccionado) return;
+    const nuevaEtapa = e.target.value;
+    const res = await fetch("/chats/etapa", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ senderId: senderSeleccionado, etapa: nuevaEtapa })
+    });
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+    const data = await res.json();
+    if(data && !data.error){
+      await cargarConversaciones();
+    } else {
+      alert("No se pudo cambiar la etapa: " + (data?.error || "error desconocido"));
+    }
+  });
 
   function actualizarInputBar(){
     const bar = document.getElementById("chatInputBar");
@@ -3590,7 +3886,6 @@ ${estilosBase()}
     this.style.height = Math.min(this.scrollHeight, 120) + "px";
   });
 
-  // --- Enviar una foto suelta desde el chat (ej. casos de éxito) ---
   function leerArchivoComoBase64Chat(archivo){
     return new Promise((resolve, reject) => {
       const lector = new FileReader();
@@ -3610,7 +3905,7 @@ ${estilosBase()}
 
   document.getElementById("inputFotoManual").addEventListener("change", async (e) => {
     const archivo = e.target.files?.[0];
-    e.target.value = ""; // permite volver a elegir el mismo archivo después
+    e.target.value = "";
     if(!archivo || !senderSeleccionado) return;
 
     const errorBox = document.getElementById("chatInputError");
@@ -3649,7 +3944,6 @@ ${estilosBase()}
     }
   });
 
-  // --- Grabar y enviar un audio directo desde el micrófono ---
   let mediaRecorder = null;
   let audioChunksGrabacion = [];
   let streamGrabacionActual = null;
@@ -3843,6 +4137,7 @@ ${estilosBase()}
     if(senderSeleccionado) cargarHistorial();
   }, 4000);
 
+  cargarEtapasDisponibles();
   cargarConversaciones();
 </script>
 </body>
@@ -3892,7 +4187,6 @@ app.get("/exportar/handoff.csv", requireAdminKey, async (req, res) => {
       ...filas.map((f) => encabezados.map((h) => escaparCSV(f[h])).join(","))
     ];
 
-    // BOM al inicio para que Excel abra los acentos/emojis correctamente.
     const csv = "\uFEFF" + lineas.join("\r\n");
     const fechaArchivo = new Date().toISOString().slice(0, 10);
 
