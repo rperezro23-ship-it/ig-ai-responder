@@ -870,7 +870,7 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
 // ---------------------------------------------------------------
 async function evaluarCalificacion(historial, criterios) {
   try {
-    const transcripcion = historial
+    const transcripcion = sanitizarHistorialParaIA(historial)
       .map(m => `${m.role === "user" ? "Cliente" : "Asistente"}: ${m.content}`)
       .join("\n");
 
@@ -902,6 +902,30 @@ async function evaluarCalificacion(historial, criterios) {
     console.error("⚠️ Error evaluando calificación de lead:", err.response?.data || err.message);
     return null;
   }
+}
+
+// El historial que se guarda en Supabase incluye, para los audios y fotos ya
+// enviados, el formato interno "[[audio]]url" / "[[imagen]]url" (así los
+// puede reproducir /chats). El problema es que si ese historial se le manda
+// TAL CUAL a la IA como contexto de la conversación, la IA lo copia — y
+// termina escribiendo en su respuesta "[[audio]]https://..." (con la URL
+// real) en vez de "[[audio:clave]]" como le pedimos en el prompt. Por eso a
+// veces "se le olvida" el formato correcto: justo después de que ya se
+// mandó un audio/foto en esa conversación. Esta función limpia esas entradas
+// antes de mandarlas a OpenAI, dejando solo una nota humana de lo que pasó,
+// sin URLs ni marcadores que la IA pueda imitar.
+function sanitizarHistorialParaIA(historial) {
+  return (historial || []).map((m) => {
+    if (m.role === "assistant" && typeof m.content === "string") {
+      if (m.content.startsWith("[[imagen]]")) {
+        return { role: "assistant", content: "(Aquí se envió una foto.)" };
+      }
+      if (m.content.startsWith("[[audio]]")) {
+        return { role: "assistant", content: "(Aquí se envió un audio.)" };
+      }
+    }
+    return m;
+  });
 }
 
 async function procesarBuffer(senderId) {
@@ -936,7 +960,7 @@ async function procesarBuffer(senderId) {
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: configActual.ai_prompt },
-        ...historial,
+        ...sanitizarHistorialParaIA(historial),
         { role: "user", content: mensajeCompleto }
       ],
       max_tokens: 300,
