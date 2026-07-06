@@ -1230,14 +1230,28 @@ async function procesarBuffer(senderId) {
       }
     }
 
-    // Transición "silenciosa": solo cambia de etapa y NO genera ni manda
-    // ninguna respuesta en este mensaje (ni siquiera un audio/foto por
-    // disparador). Útil sobre todo para transiciones evaluadas por IA
-    // ("condición"), donde la etapa de destino no tiene contexto de lo que
-    // el cliente acaba de decir y generar una respuesta ahí mismo suele salir
-    // desconectado de la conversación. El mensaje del cliente sí se guarda en
-    // el historial, para que la IA tenga contexto la próxima vez que responda.
-    if (transicionAplicada && transicion.silenciosa) {
+    // Mensaje fijo al ENTRAR a una etapa: se manda tal cual, carácter por
+    // carácter (con sus marcadores [[audio:..]] / [[foto:..]] / [[pausa:N]]
+    // si los tiene), sin pasar por la IA en absoluto — a diferencia del
+    // prompt normal, esto es 100% garantizado, útil para mensajes donde
+    // necesitas control total del texto exacto (ej. con errores intencionales
+    // o un guion muy específico). Tiene prioridad sobre "silenciosa": si la
+    // etapa de destino tiene un mensaje fijo configurado, se manda ese,
+    // independientemente de cómo esté marcada la transición.
+    const mensajeFijoEtapa = (transicionAplicada && etapaConfig?.mensaje_fijo?.trim()) || null;
+
+    if (mensajeFijoEtapa) {
+      await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
+      console.log(`📌 Enviando mensaje fijo de la etapa "${etapaConfig.clave}" a ${senderId} (sin pasar por la IA).`);
+      await enviarContenidoConMarcadores(senderId, mensajeFijoEtapa);
+    } else if (transicionAplicada && transicion.silenciosa) {
+      // Transición "silenciosa": solo cambia de etapa y NO genera ni manda
+      // ninguna respuesta en este mensaje (ni siquiera un audio/foto por
+      // disparador). Útil sobre todo para transiciones evaluadas por IA
+      // ("condición"), donde la etapa de destino no tiene contexto de lo que
+      // el cliente acaba de decir y generar una respuesta ahí mismo suele salir
+      // desconectado de la conversación. El mensaje del cliente sí se guarda en
+      // el historial, para que la IA tenga contexto la próxima vez que responda.
       await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
       console.log(`🔇 Transición silenciosa aplicada para ${senderId} — no se genera respuesta en este mensaje.`);
     } else {
@@ -2268,6 +2282,7 @@ function normalizarEtapas(etapas) {
       clave: e.clave.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_-]/g, "_"),
       nombre: typeof e.nombre === "string" ? e.nombre.trim() : "",
       prompt: typeof e.prompt === "string" ? e.prompt.trim() : "",
+      mensaje_fijo: typeof e.mensaje_fijo === "string" ? e.mensaje_fijo.trim() : "",
       disparadores: normalizarDisparadores(e.disparadores),
       transiciones: normalizarTransiciones(e.transiciones)
     }))
@@ -3424,6 +3439,22 @@ ${estilosBase()}
         <textarea class="etapa-prompt" data-i="\${i}" rows="6" placeholder="Ej: Ahora solo pregunta cuál es su objetivo principal. Si responde que sí quiere que le expliques un plan, incluye [[etapa:plan]] al final. Si responde que no, sigue platicando sin insistir.">\${(et.prompt || "").replace(/</g,"&lt;")}</textarea>
 
         <div class="etapa-subseccion">
+          <p class="etapa-subseccion-titulo">📌 Mensaje fijo al ENTRAR a esta etapa (opcional)</p>
+          <p class="hint" style="margin:0 0 10px;">
+            Si lo llenas, en cuanto un lead entre a esta etapa (por palabra clave o por condición) se manda este
+            texto TAL CUAL, carácter por carácter — sin pasar por la IA en absoluto. Útil cuando necesitas un
+            control total del texto exacto (incluso con errores intencionales) o mandar un audio/foto justo al
+            entrar. Acepta los mismos marcadores de siempre:
+            <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:clave]]</code>,
+            <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:clave]]</code>,
+            <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code>.
+            Si lo dejas vacío, la etapa responde normal con su prompt de arriba (y con la IA). Tiene prioridad sobre
+            la opción "no responder nada" de la transición que trajo al lead aquí.
+          </p>
+          <textarea class="etapa-mensaje-fijo" data-i="\${i}" rows="3" placeholder="Ej: La salud es un tema importante, hay que solucionarlo cuanto antes[[audio:salud]]¿Te hace sentido esto?">\${(et.mensaje_fijo || "").replace(/</g,"&lt;")}</textarea>
+        </div>
+
+        <div class="etapa-subseccion">
           <p class="etapa-subseccion-titulo">🎯 Disparadores propios de esta etapa (opcional)</p>
           <p class="hint" style="margin:0 0 10px;">Si una palabra coincide aquí, se usa este audio/foto y NO se revisan los disparadores generales. Si el mensaje del cliente no coincide con ninguno de aquí, se cae a los disparadores generales de la izquierda.</p>
           <div class="etapa-disparadores" data-i="\${i}"></div>
@@ -3526,6 +3557,7 @@ ${estilosBase()}
     document.querySelectorAll(".etapa-nombre").forEach((input, i) => { if(etapas[i]) etapas[i].nombre = input.value; });
     document.querySelectorAll(".etapa-clave").forEach((input, i) => { if(etapas[i]) etapas[i].clave = slugify(input.value); });
     document.querySelectorAll(".etapa-prompt").forEach((ta, i) => { if(etapas[i]) etapas[i].prompt = ta.value; });
+    document.querySelectorAll(".etapa-mensaje-fijo").forEach((ta, i) => { if(etapas[i]) etapas[i].mensaje_fijo = ta.value; });
     document.querySelectorAll(".etapa-disparadores").forEach(subcont => {
       const i = +subcont.dataset.i;
       if(!etapas[i]) return;
@@ -3540,7 +3572,7 @@ ${estilosBase()}
 
   document.getElementById("addEtapa").addEventListener("click", () => {
     leerEtapasDelDOM();
-    etapas.push({ clave: "", nombre: "", prompt: "", disparadores: [] });
+    etapas.push({ clave: "", nombre: "", prompt: "", mensaje_fijo: "", disparadores: [], transiciones: [] });
     renderEtapas();
   });
 
