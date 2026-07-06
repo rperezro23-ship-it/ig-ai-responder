@@ -1242,7 +1242,14 @@ async function procesarBuffer(senderId) {
       console.log(`🔇 Transición silenciosa aplicada para ${senderId} — no se genera respuesta en este mensaje.`);
     } else {
 
-    const promptSistema = etapaConfig ? etapaConfig.prompt : configActual.ai_prompt;
+    const promptPropio = etapaConfig ? etapaConfig.prompt : configActual.ai_prompt;
+    // Las "reglas generales" se anteponen SIEMPRE (prompt general y cada
+    // etapa), para que el bot no pierda de vista quién es, su objetivo y qué
+    // NO debe hacer solo porque entró a una etapa con un prompt muy acotado
+    // (ej. una etapa que solo pregunta la edad no debería, por eso, ponerse a
+    // dar rutinas de ejercicio si el lead pregunta algo fuera de tema).
+    const reglasGenerales = configActual.contexto_base?.trim();
+    const promptSistema = reglasGenerales ? `${reglasGenerales}\n\n${promptPropio}` : promptPropio;
 
     if (etapaConfig) {
       console.log(`🧭 ${senderId} está en la etapa "${etapaConfig.clave}" — se usa su prompt propio.`);
@@ -2024,6 +2031,7 @@ app.post("/cuenta/eliminar", requireAdminKey, async (req, res) => {
 
 let configActual = {
   ai_prompt: AI_PROMPT,
+  contexto_base: "",
   min_delay: MIN_DELAY_SECONDS,
   max_delay: MAX_DELAY_SECONDS,
   max_historial: MAX_HISTORIAL,
@@ -2276,11 +2284,12 @@ function filtrarDestinosDeTransicionValidos(transiciones, clavesValidas) {
 
 app.post("/config", requireAdminKey, async (req, res) => {
   try {
-    const { ai_prompt, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
+    const { ai_prompt, contexto_base, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
             calificacion_activa, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
+    if (typeof contexto_base === "string") nuevaConfig.contexto_base = contexto_base.trim();
     if (Number.isFinite(min_delay) && min_delay >= 0) nuevaConfig.min_delay = min_delay;
     if (Number.isFinite(max_delay) && max_delay >= 0) nuevaConfig.max_delay = max_delay;
     if (Number.isFinite(max_historial) && max_historial > 0) nuevaConfig.max_historial = max_historial;
@@ -2864,6 +2873,25 @@ ${estilosBase()}
             <button type="button" class="btn-ojo" id="btnVerClave" title="Mostrar/ocultar">👁</button>
           </div>
           <p class="key-actual" id="keyActual">Cargando estado…</p>
+        </div>
+
+        <div class="card card-destacada">
+          <h2>🧱 Reglas generales (siempre activas)</h2>
+          <p class="hint">
+            Este texto se agrega <b>automáticamente antes</b> de cualquier prompt que use la IA — el general de abajo
+            y el de <b>cada una</b> de tus etapas — sin que tengas que repetirlo en cada una. Sirve para que el bot
+            nunca pierda de vista quién es, cuál es su objetivo, y qué NO debe hacer, incluso cuando está dentro de
+            una etapa con instrucciones muy acotadas (ej. una etapa que solo pregunta la edad no debería, aun así,
+            ponerse a dar rutinas de ejercicio o consejos técnicos si el lead pregunta algo fuera de tema).
+          </p>
+          <p class="hint">
+            Ejemplo: <i>"Eres el asistente de Roberto, entrenador fitness para hombres de 40-55 años. Tu único
+            objetivo en esta conversación es calificar al lead y agendar una llamada — nunca des rutinas de
+            ejercicio, planes de dieta detallados, ni consejos técnicos; si preguntan por eso, di que se ve en la
+            sesión con Roberto."</i>
+          </p>
+          <label for="contextoBase">Reglas generales</label>
+          <textarea id="contextoBase" rows="5" placeholder="Ej: Eres el asistente de... Tu único objetivo es... Nunca hagas..."></textarea>
         </div>
 
         <div class="card">
@@ -3526,6 +3554,7 @@ ${estilosBase()}
       return;
     }
     document.getElementById("prompt").value = cfg.ai_prompt || "";
+    document.getElementById("contextoBase").value = cfg.contexto_base || "";
     document.getElementById("minDelay").value = cfg.min_delay ?? 8;
     document.getElementById("maxDelay").value = cfg.max_delay ?? 15;
     document.getElementById("maxHistorial").value = cfg.max_historial ?? 20;
@@ -3749,6 +3778,7 @@ ${estilosBase()}
 
     const body = {
       ai_prompt: document.getElementById("prompt").value,
+      contexto_base: document.getElementById("contextoBase").value,
       min_delay: parseInt(document.getElementById("minDelay").value, 10),
       max_delay: parseInt(document.getElementById("maxDelay").value, 10),
       max_historial: parseInt(document.getElementById("maxHistorial").value, 10),
