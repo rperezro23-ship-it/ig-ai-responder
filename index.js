@@ -744,6 +744,40 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Instagram rechaza por completo cualquier mensaje de más de 1000 caracteres
+// (error "The length of the message sent is over 1000 characters"), y ese
+// rechazo hace que la respuesta se pierda del todo. Se usa un margen de
+// seguridad debajo del límite real para no rozarlo.
+const LIMITE_CARACTERES_INSTAGRAM = 950;
+
+// Divide un texto largo en varios mensajes que respeten el límite de
+// caracteres de Instagram. Es una red de seguridad: si el prompt no dejó
+// suficientemente claro que la IA debe ser breve y de todos modos genera una
+// respuesta muy larga, en vez de que Instagram la rechace y se pierda, se
+// manda en varias burbujas seguidas. Intenta cortar en saltos de párrafo o de
+// línea primero, y si no encuentra un buen punto de corte cerca del límite,
+// corta en el espacio más cercano (para no partir una palabra a la mitad).
+function dividirTextoLargo(texto, limite = LIMITE_CARACTERES_INSTAGRAM) {
+  if (texto.length <= limite) return [texto];
+
+  const partes = [];
+  let restante = texto;
+
+  while (restante.length > limite) {
+    let corte = restante.lastIndexOf("\n\n", limite);
+    if (corte < limite * 0.4) corte = restante.lastIndexOf("\n", limite);
+    if (corte < limite * 0.4) corte = restante.lastIndexOf(". ", limite);
+    if (corte < limite * 0.4) corte = restante.lastIndexOf(" ", limite);
+    if (corte < limite * 0.4) corte = limite; // no se encontró un buen punto de corte, se corta a la fuerza
+
+    partes.push(restante.slice(0, corte).trim());
+    restante = restante.slice(corte).trim();
+  }
+  if (restante) partes.push(restante);
+
+  return partes.filter(Boolean);
+}
+
 // El envío de adjuntos (audio/foto) a la API de Instagram a veces falla de
 // forma intermitente del lado de Meta ("Upload failed", code 100) sin que
 // haya nada mal con el archivo. Este helper reintenta una vez más antes de
@@ -859,10 +893,23 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
       if (/\[\[/.test(parte.valor) || /\]\]/.test(parte.valor)) {
         console.warn(`⚠️ Posible marcador mal formado en la respuesta a ${senderId} (se mandó como texto normal): "${parte.valor}"`);
       }
-      await agregarAlHistorialDB(senderId, "assistant", parte.valor);
-      await enviarMensajeInstagram(senderId, parte.valor);
-      textosEnviados.push(parte.valor);
-      algoSeMando = true;
+
+      // Red de seguridad: Instagram rechaza de golpe cualquier mensaje de
+      // más de 1000 caracteres (se pierde la respuesta completa). Si la IA
+      // generó algo más largo de lo esperado, se manda en varias burbujas.
+      const fragmentos = dividirTextoLargo(parte.valor);
+      if (fragmentos.length > 1) {
+        console.warn(`⚠️ La respuesta a ${senderId} tiene ${parte.valor.length} caracteres (arriba del límite de Instagram) — se divide en ${fragmentos.length} mensajes.`);
+      }
+
+      for (let idx = 0; idx < fragmentos.length; idx++) {
+        const fragmento = fragmentos[idx];
+        await agregarAlHistorialDB(senderId, "assistant", fragmento);
+        await enviarMensajeInstagram(senderId, fragmento);
+        textosEnviados.push(fragmento);
+        algoSeMando = true;
+        if (idx < fragmentos.length - 1) await sleep(900); // pausa breve y natural entre burbujas divididas
+      }
       continue;
     }
 
@@ -1168,6 +1215,7 @@ async function procesarBuffer(senderId) {
       }
     }
 
+    let transicionAplicada = false;
     if (transicion && transicion.etapa_destino !== (etapaActualClave || "")) {
       const nuevaEtapaConfig = transicion.etapa_destino ? obtenerEtapaConfig(transicion.etapa_destino) : null;
       if (transicion.etapa_destino === "" || nuevaEtapaConfig) {
@@ -1176,10 +1224,23 @@ async function procesarBuffer(senderId) {
         etapaActualClave = transicion.etapa_destino || null;
         etapaConfig = nuevaEtapaConfig;
         await guardarConversacion(senderId, { etapa: etapaActualClave });
+        transicionAplicada = true;
       } else {
         console.warn(`⚠️ Una transición apunta a la etapa "${transicion.etapa_destino}" pero no existe (o se borró) en /panel. Se ignora.`);
       }
     }
+
+    // Transición "silenciosa": solo cambia de etapa y NO genera ni manda
+    // ninguna respuesta en este mensaje (ni siquiera un audio/foto por
+    // disparador). Útil sobre todo para transiciones evaluadas por IA
+    // ("condición"), donde la etapa de destino no tiene contexto de lo que
+    // el cliente acaba de decir y generar una respuesta ahí mismo suele salir
+    // desconectado de la conversación. El mensaje del cliente sí se guarda en
+    // el historial, para que la IA tenga contexto la próxima vez que responda.
+    if (transicionAplicada && transicion.silenciosa) {
+      await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
+      console.log(`🔇 Transición silenciosa aplicada para ${senderId} — no se genera respuesta en este mensaje.`);
+    } else {
 
     const promptSistema = etapaConfig ? etapaConfig.prompt : configActual.ai_prompt;
 
@@ -1300,6 +1361,8 @@ async function procesarBuffer(senderId) {
         console.error(`❌ Error enviando el disparador automático "${disparador.clave}" a ${senderId}:`, err.response?.data || err.message);
       }
     }
+
+    } // fin del "else" de transición silenciosa
   } catch (err) {
     console.error(`❌ Error al responder:`, err.response?.data || err.message);
   }
@@ -1615,8 +1678,13 @@ app.post("/chats/enviar", requireAdminKey, async (req, res) => {
     }
 
     const texto = mensaje.trim();
-    await enviarMensajeInstagram(senderId, texto);
-    await agregarAlHistorialDB(senderId, "assistant", texto);
+    // Mismo límite de 1000 caracteres de Instagram que aplica a las respuestas
+    // automáticas — si el admin escribe algo más largo, se manda en varias burbujas.
+    const fragmentos = dividirTextoLargo(texto);
+    for (const fragmento of fragmentos) {
+      await enviarMensajeInstagram(senderId, fragmento);
+      await agregarAlHistorialDB(senderId, "assistant", fragmento);
+    }
 
     // Cancela seguimientos automáticos pendientes: ya hubo respuesta humana,
     // no queremos que el bot le mande un seguimiento encima.
@@ -2176,7 +2244,8 @@ function normalizarTransiciones(transiciones) {
         etapa_destino: t.etapa_destino.trim().toLowerCase(),
         frases: Array.isArray(t.frases) ? t.frases.map(f => String(f).trim()).filter(Boolean) : [],
         condicion: typeof t.condicion === "string" ? t.condicion.trim() : "",
-        coincidencia
+        coincidencia,
+        silenciosa: Boolean(t.silenciosa)
       };
     })
     .filter(t => t.coincidencia === "condicion" ? Boolean(t.condicion) : t.frases.length > 0);
@@ -3208,7 +3277,11 @@ ${estilosBase()}
         </select>
         \${campoActivador}
         <label>Mover a la etapa</label>
-        <select class="\${prefijoClase}-destino" data-i="\${i}">\${opcionesEtapaDestinoHTML(t.etapa_destino, incluirSalir)}</select>
+        <select class="\${prefijoClase}-destino" data-i="\${i}" style="margin-bottom:10px;">\${opcionesEtapaDestinoHTML(t.etapa_destino, incluirSalir)}</select>
+        <label style="display:flex; align-items:center; gap:9px; cursor:pointer; margin:0;">
+          <input type="checkbox" class="\${prefijoClase}-silenciosa" data-i="\${i}"\${t.silenciosa ? " checked" : ""} style="width:16px; height:16px; accent-color:#C99BFF; cursor:pointer;">
+          <span style="color:var(--text); font-size:13.5px; font-weight:500;">🔇 No responder nada al activarse (solo cambia de etapa)</span>
+        </label>
       \`;
       cont.appendChild(div);
     });
@@ -3248,6 +3321,11 @@ ${estilosBase()}
       if(!lista[i]) return;
       lista[i].etapa_destino = sel.value;
     });
+    document.querySelectorAll(\`.\${prefijoClase}-silenciosa\`).forEach((chk) => {
+      const i = +chk.dataset.i;
+      if(!lista[i]) return;
+      lista[i].silenciosa = chk.checked;
+    });
   }
 
   let transicionesGenerales = [];
@@ -3265,7 +3343,7 @@ ${estilosBase()}
       alert("Primero crea al menos una etapa para poder mandar al lead hacia ella.");
       return;
     }
-    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene", condicion: "" });
+    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene", condicion: "", silenciosa: false });
     renderTransicionesGenerales();
   });
 
@@ -3411,7 +3489,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].transiciones) etapas[i].transiciones = [];
-      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene", condicion: "" });
+      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene", condicion: "", silenciosa: false });
       renderEtapas();
     }));
   }
