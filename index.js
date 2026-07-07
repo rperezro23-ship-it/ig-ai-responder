@@ -1370,8 +1370,30 @@ async function procesarBuffer(senderId) {
     }
 
     for (const disparador of disparadoresActivados) {
-      if (partesIncluyenMedia(partesRespuestaIA, disparador.tipo, disparador.clave)) {
+      // El chequeo de "la IA ya lo mandó por su cuenta" solo aplica a
+      // audio/foto simples (referenciados por clave) — un disparador tipo
+      // "mensaje" es contenido libre combinado, así que siempre se manda.
+      if (disparador.tipo !== "mensaje" && partesIncluyenMedia(partesRespuestaIA, disparador.tipo, disparador.clave)) {
         console.log(`ℹ️ Disparador "${disparador.clave}" activado por palabra clave, pero la IA ya lo mandó por su cuenta — se omite duplicado.`);
+        continue;
+      }
+
+      const esperaSegundos = Number.isFinite(disparador.pausa_segundos) ? disparador.pausa_segundos : 2;
+      if (esperaSegundos > 0) await sleep(esperaSegundos * 1000);
+
+      const origenLog = disparadoresSonDeEtapa ? `etapa "${etapaConfig.clave}"` : "general";
+
+      if (disparador.tipo === "mensaje") {
+        if (!disparador.contenido?.trim()) {
+          console.warn(`⚠️ El disparador tipo "mensaje" (${origenLog}) no tiene contenido configurado, se ignora.`);
+          continue;
+        }
+        try {
+          console.log(`🎯 Disparador automático (${origenLog}): enviando mensaje combinado a ${senderId} (activado por palabra clave)`);
+          await enviarContenidoConMarcadores(senderId, disparador.contenido);
+        } catch (err) {
+          console.error(`❌ Error enviando el disparador tipo "mensaje" a ${senderId}:`, err.response?.data || err.message);
+        }
         continue;
       }
 
@@ -1382,11 +1404,7 @@ async function procesarBuffer(senderId) {
         continue;
       }
 
-      const esperaSegundos = Number.isFinite(disparador.pausa_segundos) ? disparador.pausa_segundos : 2;
-      if (esperaSegundos > 0) await sleep(esperaSegundos * 1000);
-
       try {
-        const origenLog = disparadoresSonDeEtapa ? `etapa "${etapaConfig.clave}"` : "general";
         if (disparador.tipo === "audio") {
           console.log(`🎯 Disparador automático (${origenLog}): enviando audio "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
           await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${item.url}`);
@@ -2253,19 +2271,26 @@ app.get("/config", requireAdminKey, (req, res) => {
 });
 
 // Valida y normaliza un array de disparadores (usado tanto para los
-// generales como para los propios de cada etapa).
+// generales como para los propios de cada etapa). tipo puede ser "audio" o
+// "foto" (mandan un audio/foto ya subido en /panel, referenciado por
+// "clave") o "mensaje" (manda un contenido libre con marcadores
+// [[audio:..]]/[[foto:..]]/[[pausa:N]] combinados, tal cual, sin pasar por
+// la IA — para poder combinar texto + fotos + audios + tiempos en un mismo
+// disparador).
 function normalizarDisparadores(disparadores) {
   if (!Array.isArray(disparadores)) return [];
   return disparadores
-    .filter(d => d && (d.tipo === "audio" || d.tipo === "foto") && typeof d.clave === "string" && d.clave.trim())
+    .filter(d => d && (d.tipo === "audio" || d.tipo === "foto" || d.tipo === "mensaje"))
     .map(d => ({
       tipo: d.tipo,
-      clave: d.clave.trim().toLowerCase(),
+      clave: typeof d.clave === "string" ? d.clave.trim().toLowerCase() : "",
+      contenido: typeof d.contenido === "string" ? d.contenido.trim() : "",
       frases: Array.isArray(d.frases) ? d.frases.map(f => String(f).trim()).filter(Boolean) : [],
       pausa_segundos: Number.isFinite(d.pausa_segundos) && d.pausa_segundos >= 0 ? d.pausa_segundos : 2,
       coincidencia: d.coincidencia === "exacta" ? "exacta" : "contiene"
     }))
-    .filter(d => d.frases.length > 0);
+    .filter(d => d.frases.length > 0)
+    .filter(d => d.tipo === "mensaje" ? Boolean(d.contenido) : Boolean(d.clave));
 }
 
 // Valida y normaliza un array de transiciones de etapa por palabra clave
@@ -3032,7 +3057,7 @@ ${estilosBase()}
 
         <div class="card card-destacada">
           <h2>🎯 Disparadores automáticos generales (envío garantizado)</h2>
-          <p class="hint">La IA no siempre es consistente decidiendo cuándo incluir un <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en su respuesta — a veces sí, a veces no. Acá puedes configurar palabras o frases que, en cuanto aparezcan en el mensaje del cliente, manden ese audio/foto <b>SIEMPRE, por código, sin depender de la IA</b>. Si la IA ya lo mandó ella misma en esa misma respuesta, no se duplica.<br><br><b>Estos disparadores son el respaldo general:</b> si el lead está en una etapa que tiene sus propios disparadores (ver "Etapas de la conversación"), primero se revisan los de esa etapa; solo si NINGUNO de esos coincide con lo que escribió el cliente, se cae a revisar esta lista de aquí.</p>
+          <p class="hint">La IA no siempre es consistente decidiendo cuándo incluir un <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en su respuesta — a veces sí, a veces no. Acá puedes configurar palabras o frases que, en cuanto aparezcan en el mensaje del cliente, manden algo <b>SIEMPRE, por código, sin depender de la IA</b>. Puedes elegir mandar un solo audio, una sola foto, o el tipo <b>📝 Mensaje</b> para combinar texto + fotos + audios + pausas en una sola secuencia (con los mismos marcadores de siempre). Si la IA ya lo mandó ella misma en esa misma respuesta (solo aplica a audio/foto simples), no se duplica.<br><br><b>Estos disparadores son el respaldo general:</b> si el lead está en una etapa que tiene sus propios disparadores (ver "Etapas de la conversación"), primero se revisan los de esa etapa; solo si NINGUNO de esos coincide con lo que escribió el cliente, se cae a revisar esta lista de aquí.</p>
           <div id="listaDisparadores"></div>
           <button class="add-paso" id="addDisparador" type="button">+ Agregar disparador general</button>
         </div>
@@ -3253,6 +3278,14 @@ ${estilosBase()}
     lista.forEach((d, i) => {
       const div = document.createElement("div");
       div.className = "paso";
+      const esMensaje = d.tipo === "mensaje";
+      const campoContenido = esMensaje ? \`
+        <label>Contenido del mensaje (acepta <code style="background:var(--surface-3); padding:1px 5px; border-radius:4px; font-family:var(--mono); font-size:12px;">[[audio:clave]]</code>, <code style="background:var(--surface-3); padding:1px 5px; border-radius:4px; font-family:var(--mono); font-size:12px;">[[foto:clave]]</code>, <code style="background:var(--surface-3); padding:1px 5px; border-radius:4px; font-family:var(--mono); font-size:12px;">[[pausa:N]]</code> — se manda TAL CUAL, sin pasar por la IA)</label>
+        <textarea class="\${prefijoClase}-contenido" data-i="\${i}" rows="3" placeholder="Ej: Te dejo un audio con más detalles[[pausa:3]][[audio:precio]]¿Qué te parece?">\${(d.contenido || "").replace(/</g,"&lt;")}</textarea>
+      \` : \`
+        <label>Cuál mandar</label>
+        <select class="\${prefijoClase}-clave" data-i="\${i}">\${opcionesClaveHTML(d.tipo, d.clave)}</select>
+      \`;
       div.innerHTML = \`
         <div class="paso-head">
           <span class="eyebrow-num">DISPARADOR \${i + 1}</span>
@@ -3271,6 +3304,7 @@ ${estilosBase()}
             <select class="\${prefijoClase}-tipo" data-i="\${i}">
               <option value="audio"\${d.tipo === "audio" ? " selected" : ""}>🎤 Audio</option>
               <option value="foto"\${d.tipo === "foto" ? " selected" : ""}>🖼️ Foto</option>
+              <option value="mensaje"\${esMensaje ? " selected" : ""}>📝 Mensaje (texto + fotos + audios + pausas combinados)</option>
             </select>
           </div>
           <div>
@@ -3278,8 +3312,7 @@ ${estilosBase()}
             <input type="number" step="0.5" min="0" class="\${prefijoClase}-pausa" data-i="\${i}" value="\${d.pausa_segundos ?? 2}">
           </div>
         </div>
-        <label>Cuál mandar</label>
-        <select class="\${prefijoClase}-clave" data-i="\${i}">\${opcionesClaveHTML(d.tipo, d.clave)}</select>
+        \${campoContenido}
       \`;
       cont.appendChild(div);
     });
@@ -3294,26 +3327,40 @@ ${estilosBase()}
     }));
   }
 
+  // Se lee por "data-i" (no por posición) porque el campo de contenido
+  // cambia según el tipo: un disparador "mensaje" no tiene el select de
+  // "cuál mandar", y viceversa — si se leyera por posición, los valores de
+  // un disparador podrían mezclarse con los de otro.
   function leerDisparadoresDeContenedor(lista, prefijoClase){
-    document.querySelectorAll(\`.\${prefijoClase}-frases\`).forEach((ta, i) => {
+    document.querySelectorAll(\`.\${prefijoClase}-frases\`).forEach((ta) => {
+      const i = +ta.dataset.i;
       if(!lista[i]) return;
       lista[i].frases = ta.value.split("\\n").map(f => f.trim()).filter(Boolean);
     });
-    document.querySelectorAll(\`.\${prefijoClase}-coincidencia\`).forEach((sel, i) => {
+    document.querySelectorAll(\`.\${prefijoClase}-coincidencia\`).forEach((sel) => {
+      const i = +sel.dataset.i;
       if(!lista[i]) return;
       lista[i].coincidencia = sel.value;
     });
-    document.querySelectorAll(\`.\${prefijoClase}-tipo\`).forEach((sel, i) => {
+    document.querySelectorAll(\`.\${prefijoClase}-tipo\`).forEach((sel) => {
+      const i = +sel.dataset.i;
       if(!lista[i]) return;
       lista[i].tipo = sel.value;
     });
-    document.querySelectorAll(\`.\${prefijoClase}-pausa\`).forEach((input, i) => {
+    document.querySelectorAll(\`.\${prefijoClase}-pausa\`).forEach((input) => {
+      const i = +input.dataset.i;
       if(!lista[i]) return;
       lista[i].pausa_segundos = parseFloat(input.value) || 0;
     });
-    document.querySelectorAll(\`.\${prefijoClase}-clave\`).forEach((sel, i) => {
+    document.querySelectorAll(\`.\${prefijoClase}-clave\`).forEach((sel) => {
+      const i = +sel.dataset.i;
       if(!lista[i]) return;
       lista[i].clave = sel.value;
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-contenido\`).forEach((ta) => {
+      const i = +ta.dataset.i;
+      if(!lista[i]) return;
+      lista[i].contenido = ta.value;
     });
   }
 
@@ -3440,7 +3487,7 @@ ${estilosBase()}
 
   document.getElementById("addDisparador").addEventListener("click", () => {
     leerDisparadoresDelDOM();
-    disparadores.push({ frases: [], tipo: "audio", clave: "", pausa_segundos: 2, coincidencia: "contiene" });
+    disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene" });
     renderDisparadores();
   });
 
@@ -3509,7 +3556,7 @@ ${estilosBase()}
 
         <div class="etapa-subseccion">
           <p class="etapa-subseccion-titulo">🎯 Disparadores propios de esta etapa (opcional)</p>
-          <p class="hint" style="margin:0 0 10px;">Si una palabra coincide aquí, se usa este audio/foto y NO se revisan los disparadores generales. Si el mensaje del cliente no coincide con ninguno de aquí, se cae a los disparadores generales de la izquierda.</p>
+          <p class="hint" style="margin:0 0 10px;">Si una palabra coincide aquí, se activa este disparador (audio, foto, o un <b>📝 Mensaje</b> combinando texto + fotos + audios + pausas) y NO se revisan los disparadores generales. Si el mensaje del cliente no coincide con ninguno de aquí, se cae a los disparadores generales de la izquierda.</p>
           <div class="etapa-disparadores" data-i="\${i}"></div>
           <button type="button" class="add-paso etapa-add-disparador" data-i="\${i}">+ Agregar disparador de esta etapa</button>
         </div>
@@ -3597,7 +3644,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].disparadores) etapas[i].disparadores = [];
-      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", pausa_segundos: 2, coincidencia: "contiene" });
+      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene" });
       renderEtapas();
     }));
 
