@@ -1000,6 +1000,51 @@ function partesIncluyenMedia(partes, tipo, clave) {
   return partes.some((p) => p.tipo === tipo && p.clave === claveNormalizada);
 }
 
+// Manda el contenido de un disparador ya activado (audio, foto, o el tipo
+// "mensaje" con contenido libre) respetando su propia espera configurada.
+// Se usa tanto en el camino normal (disparador se suma a la respuesta de la
+// IA) como en el camino "exclusivo" (el disparador reemplaza por completo la
+// respuesta de ese turno).
+async function enviarDisparador(senderId, disparador, origenLog) {
+  const esperaSegundos = Number.isFinite(disparador.pausa_segundos) ? disparador.pausa_segundos : 2;
+  if (esperaSegundos > 0) await sleep(esperaSegundos * 1000);
+
+  if (disparador.tipo === "mensaje") {
+    if (!disparador.contenido?.trim()) {
+      console.warn(`⚠️ El disparador tipo "mensaje" (${origenLog}) no tiene contenido configurado, se ignora.`);
+      return;
+    }
+    try {
+      console.log(`🎯 Disparador automático (${origenLog}): enviando mensaje combinado a ${senderId} (activado por palabra clave)`);
+      await enviarContenidoConMarcadores(senderId, disparador.contenido);
+    } catch (err) {
+      console.error(`❌ Error enviando el disparador tipo "mensaje" a ${senderId}:`, err.response?.data || err.message);
+    }
+    return;
+  }
+
+  const almacen = disparador.tipo === "audio" ? configActual.audios : configActual.fotos;
+  const item = almacen?.[disparador.clave];
+  if (!item?.url) {
+    console.warn(`⚠️ El disparador apunta al ${disparador.tipo} "${disparador.clave}", pero no existe (o se borró) en /panel.`);
+    return;
+  }
+
+  try {
+    if (disparador.tipo === "audio") {
+      console.log(`🎯 Disparador automático (${origenLog}): enviando audio "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
+      await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${item.url}`);
+      await conReintento(() => enviarAudioInstagram(senderId, item.url));
+    } else {
+      console.log(`🎯 Disparador automático (${origenLog}): enviando foto "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
+      await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${item.url}`);
+      await conReintento(() => enviarImagenInstagram(senderId, item.url));
+    }
+  } catch (err) {
+    console.error(`❌ Error enviando el disparador automático "${disparador.clave}" a ${senderId}:`, err.response?.data || err.message);
+  }
+}
+
 // ---------------------------------------------------------------
 // Etapas de la conversación: cada lead puede estar en una "etapa" (guardada
 // en conversaciones.etapa). Mientras esté en una etapa, se usa el PROMPT
@@ -1274,6 +1319,36 @@ async function procesarBuffer(senderId) {
       console.log(`🔇 Transición silenciosa aplicada para ${senderId} — no se genera respuesta en este mensaje.`);
     } else {
 
+    // Disparadores automáticos: si el mensaje del cliente contiene alguna de
+    // las palabras/frases configuradas, se manda el audio/foto/mensaje
+    // correspondiente de forma GARANTIZADA — sin depender de que la IA haya
+    // decidido incluir el marcador en su respuesta. Primero se revisan los
+    // disparadores propios de la ETAPA activa (si el lead tiene una); solo si
+    // ninguno de esos coincide, se cae a revisar los disparadores GENERALES
+    // de /panel. Se calculan ANTES de llamar a la IA para poder detectar si
+    // alguno es "exclusivo" (ver más abajo).
+    const disparadoresDeEtapa = etapaConfig ? (etapaConfig.disparadores || []) : [];
+    let disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, disparadoresDeEtapa);
+    let disparadoresSonDeEtapa = disparadoresActivados.length > 0;
+
+    if (!disparadoresSonDeEtapa) {
+      disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, configActual.disparadores || []);
+    }
+
+    const origenLog = disparadoresSonDeEtapa ? `etapa "${etapaConfig?.clave}"` : "general";
+    const disparadorExclusivo = disparadoresActivados.find(d => d.exclusivo);
+
+    if (disparadorExclusivo) {
+      // Disparador "exclusivo": reemplaza por completo la respuesta de este
+      // turno — la IA NO responde nada, solo se manda el contenido de este
+      // disparador. El mensaje del cliente sí se guarda en el historial,
+      // para que la IA tenga contexto la próxima vez que responda con su
+      // prompt normal (ej. si el lead sigue preguntando cosas después).
+      await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
+      console.log(`🎯 Disparador EXCLUSIVO (${origenLog}) activado para ${senderId} — se manda solo este disparador, el prompt no responde este turno.`);
+      await enviarDisparador(senderId, disparadorExclusivo, origenLog);
+    } else {
+
     const promptPropio = etapaConfig ? etapaConfig.prompt : configActual.ai_prompt;
     // Las "reglas generales" se anteponen SIEMPRE (prompt general y cada
     // etapa), para que el bot no pierda de vista quién es, su objetivo y qué
@@ -1354,70 +1429,18 @@ async function procesarBuffer(senderId) {
       }
     }
 
-    // Disparadores automáticos: si el mensaje del cliente contiene alguna de
-    // las palabras/frases configuradas, se manda el audio/foto correspondiente
-    // de forma GARANTIZADA — sin depender de que la IA haya decidido incluir
-    // el marcador en su respuesta. Primero se revisan los disparadores propios
-    // de la ETAPA activa (si el lead tiene una); solo si ninguno de esos
-    // coincide, se cae a revisar los disparadores GENERALES de /panel. Si la
-    // IA ya mandó ese mismo audio/foto por su cuenta, no se repite.
-    const disparadoresDeEtapa = etapaConfig ? (etapaConfig.disparadores || []) : [];
-    let disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, disparadoresDeEtapa);
-    let disparadoresSonDeEtapa = disparadoresActivados.length > 0;
-
-    if (!disparadoresSonDeEtapa) {
-      disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, configActual.disparadores || []);
-    }
-
+    // Se mandan todos los disparadores activados (ya calculados arriba). Si
+    // la IA ya incluyó ese mismo audio/foto por su cuenta (solo aplica a
+    // audio/foto simples, no al tipo "mensaje"), no se repite.
     for (const disparador of disparadoresActivados) {
-      // El chequeo de "la IA ya lo mandó por su cuenta" solo aplica a
-      // audio/foto simples (referenciados por clave) — un disparador tipo
-      // "mensaje" es contenido libre combinado, así que siempre se manda.
       if (disparador.tipo !== "mensaje" && partesIncluyenMedia(partesRespuestaIA, disparador.tipo, disparador.clave)) {
         console.log(`ℹ️ Disparador "${disparador.clave}" activado por palabra clave, pero la IA ya lo mandó por su cuenta — se omite duplicado.`);
         continue;
       }
-
-      const esperaSegundos = Number.isFinite(disparador.pausa_segundos) ? disparador.pausa_segundos : 2;
-      if (esperaSegundos > 0) await sleep(esperaSegundos * 1000);
-
-      const origenLog = disparadoresSonDeEtapa ? `etapa "${etapaConfig.clave}"` : "general";
-
-      if (disparador.tipo === "mensaje") {
-        if (!disparador.contenido?.trim()) {
-          console.warn(`⚠️ El disparador tipo "mensaje" (${origenLog}) no tiene contenido configurado, se ignora.`);
-          continue;
-        }
-        try {
-          console.log(`🎯 Disparador automático (${origenLog}): enviando mensaje combinado a ${senderId} (activado por palabra clave)`);
-          await enviarContenidoConMarcadores(senderId, disparador.contenido);
-        } catch (err) {
-          console.error(`❌ Error enviando el disparador tipo "mensaje" a ${senderId}:`, err.response?.data || err.message);
-        }
-        continue;
-      }
-
-      const almacen = disparador.tipo === "audio" ? configActual.audios : configActual.fotos;
-      const item = almacen?.[disparador.clave];
-      if (!item?.url) {
-        console.warn(`⚠️ El disparador apunta al ${disparador.tipo} "${disparador.clave}", pero no existe (o se borró) en /panel.`);
-        continue;
-      }
-
-      try {
-        if (disparador.tipo === "audio") {
-          console.log(`🎯 Disparador automático (${origenLog}): enviando audio "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
-          await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${item.url}`);
-          await conReintento(() => enviarAudioInstagram(senderId, item.url));
-        } else {
-          console.log(`🎯 Disparador automático (${origenLog}): enviando foto "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
-          await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${item.url}`);
-          await conReintento(() => enviarImagenInstagram(senderId, item.url));
-        }
-      } catch (err) {
-        console.error(`❌ Error enviando el disparador automático "${disparador.clave}" a ${senderId}:`, err.response?.data || err.message);
-      }
+      await enviarDisparador(senderId, disparador, origenLog);
     }
+
+    } // fin del "else" de disparador exclusivo
 
     } // fin del "else" de transición silenciosa
   } catch (err) {
@@ -2287,7 +2310,8 @@ function normalizarDisparadores(disparadores) {
       contenido: typeof d.contenido === "string" ? d.contenido.trim() : "",
       frases: Array.isArray(d.frases) ? d.frases.map(f => String(f).trim()).filter(Boolean) : [],
       pausa_segundos: Number.isFinite(d.pausa_segundos) && d.pausa_segundos >= 0 ? d.pausa_segundos : 2,
-      coincidencia: d.coincidencia === "exacta" ? "exacta" : "contiene"
+      coincidencia: d.coincidencia === "exacta" ? "exacta" : "contiene",
+      exclusivo: Boolean(d.exclusivo)
     }))
     .filter(d => d.frases.length > 0)
     .filter(d => d.tipo === "mensaje" ? Boolean(d.contenido) : Boolean(d.clave));
@@ -3313,6 +3337,10 @@ ${estilosBase()}
           </div>
         </div>
         \${campoContenido}
+        <label style="display:flex; align-items:flex-start; gap:9px; cursor:pointer; margin-top:10px;">
+          <input type="checkbox" class="\${prefijoClase}-exclusivo" data-i="\${i}"\${d.exclusivo ? " checked" : ""} style="width:16px; height:16px; accent-color:var(--green); cursor:pointer; margin-top:1px; flex-shrink:0;">
+          <span style="color:var(--text); font-size:13.5px; font-weight:500; line-height:1.45;">🚫 Exclusivo — al activarse, el prompt NO responde nada este turno (solo se manda este disparador)</span>
+        </label>
       \`;
       cont.appendChild(div);
     });
@@ -3361,6 +3389,11 @@ ${estilosBase()}
       const i = +ta.dataset.i;
       if(!lista[i]) return;
       lista[i].contenido = ta.value;
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-exclusivo\`).forEach((chk) => {
+      const i = +chk.dataset.i;
+      if(!lista[i]) return;
+      lista[i].exclusivo = chk.checked;
     });
   }
 
@@ -3487,7 +3520,7 @@ ${estilosBase()}
 
   document.getElementById("addDisparador").addEventListener("click", () => {
     leerDisparadoresDelDOM();
-    disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene" });
+    disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false });
     renderDisparadores();
   });
 
@@ -3644,7 +3677,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].disparadores) etapas[i].disparadores = [];
-      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene" });
+      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false });
       renderEtapas();
     }));
 
