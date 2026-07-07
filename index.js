@@ -1196,6 +1196,24 @@ async function procesarBuffer(senderId) {
     let etapaActualClave = conv.etapa || null;
     let etapaConfig = obtenerEtapaConfig(etapaActualClave);
 
+    // Etapa de entrada: si el lead es completamente nuevo (nunca se le ha
+    // asignado ninguna etapa y todavía no tiene historial) y hay una etapa
+    // marcada como "entrada" en /panel, entra directo ahí — sin necesidad de
+    // que ninguna palabra clave o condición coincida primero. Sirve para
+    // arrancar el flujo siempre desde un punto fijo (ej. cuando ya sabes por
+    // qué campaña/CTA llegó el lead) en vez de pasar por el prompt general.
+    let entroPorEtapaDeEntrada = false;
+    if (!etapaActualClave && historial.length === 0) {
+      const etapaEntrada = (configActual.etapas || []).find(e => e.entrada);
+      if (etapaEntrada) {
+        console.log(`🚪 ${senderId} es un lead nuevo — entra directo a la etapa de entrada "${etapaEntrada.clave}".`);
+        etapaActualClave = etapaEntrada.clave;
+        etapaConfig = etapaEntrada;
+        await guardarConversacion(senderId, { etapa: etapaActualClave });
+        entroPorEtapaDeEntrada = true;
+      }
+    }
+
     // Transición GARANTIZADA de etapa por palabra clave (ver buscarTransicionActivada):
     // si el mensaje del cliente coincide con alguna frase configurada para la
     // etapa actual (o, si no hay ninguna etapa activa, con las transiciones
@@ -1215,7 +1233,7 @@ async function procesarBuffer(senderId) {
       }
     }
 
-    let transicionAplicada = false;
+    let transicionAplicada = entroPorEtapaDeEntrada;
     if (transicion && transicion.etapa_destino !== (etapaActualClave || "")) {
       const nuevaEtapaConfig = transicion.etapa_destino ? obtenerEtapaConfig(transicion.etapa_destino) : null;
       if (transicion.etapa_destino === "" || nuevaEtapaConfig) {
@@ -1244,7 +1262,7 @@ async function procesarBuffer(senderId) {
       await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
       console.log(`📌 Enviando mensaje fijo de la etapa "${etapaConfig.clave}" a ${senderId} (sin pasar por la IA).`);
       await enviarContenidoConMarcadores(senderId, mensajeFijoEtapa);
-    } else if (transicionAplicada && transicion.silenciosa) {
+    } else if (transicionAplicada && transicion?.silenciosa) {
       // Transición "silenciosa": solo cambia de etapa y NO genera ni manda
       // ninguna respuesta en este mensaje (ni siquiera un audio/foto por
       // disparador). Útil sobre todo para transiciones evaluadas por IA
@@ -2276,17 +2294,31 @@ function normalizarTransiciones(transiciones) {
 // Valida y normaliza el array de etapas que llega desde /panel.
 function normalizarEtapas(etapas) {
   if (!Array.isArray(etapas)) return [];
-  return etapas
+  const normalizadas = etapas
     .filter(e => e && typeof e.clave === "string" && e.clave.trim())
     .map(e => ({
       clave: e.clave.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_-]/g, "_"),
       nombre: typeof e.nombre === "string" ? e.nombre.trim() : "",
       prompt: typeof e.prompt === "string" ? e.prompt.trim() : "",
       mensaje_fijo: typeof e.mensaje_fijo === "string" ? e.mensaje_fijo.trim() : "",
+      entrada: Boolean(e.entrada),
       disparadores: normalizarDisparadores(e.disparadores),
       transiciones: normalizarTransiciones(e.transiciones)
     }))
     .filter(e => e.clave);
+
+  // Solo puede haber UNA etapa de entrada a la vez (un lead nuevo solo puede
+  // arrancar en un lugar). Si por lo que sea llegan varias marcadas, se deja
+  // únicamente la primera y se desmarcan las demás.
+  let yaHayEntrada = false;
+  for (const e of normalizadas) {
+    if (e.entrada) {
+      if (yaHayEntrada) e.entrada = false;
+      else yaHayEntrada = true;
+    }
+  }
+
+  return normalizadas;
 }
 
 // Quita transiciones (generales o de una etapa) que apunten a una clave de
@@ -2848,6 +2880,16 @@ ${estilosBase()}
   }
   .etapa-drag-handle:hover{ color:#C99BFF; background:rgba(201,155,255,.1); }
   .etapa-drag-handle:active{ cursor:grabbing; }
+  .etapa-entrada-badge{
+    font-family:var(--mono); font-size:10.5px; font-weight:600; color:#0A0D13;
+    background:#C99BFF; border-radius:6px; padding:2px 8px; letter-spacing:.03em; flex-shrink:0;
+  }
+  .etapa-entrada-check{
+    display:flex; align-items:flex-start; gap:9px; cursor:pointer; margin:0 0 14px;
+    padding:10px 12px; border-radius:9px; background:rgba(201,155,255,.06); border:1px solid rgba(201,155,255,.2);
+  }
+  .etapa-entrada-check input{ width:16px; height:16px; accent-color:#C99BFF; cursor:pointer; margin-top:1px; flex-shrink:0; }
+  .etapa-entrada-check span{ color:var(--text); font-size:13.5px; font-weight:500; line-height:1.5; }
   .etapa-card-head .eyebrow-num{ font-family:var(--mono); font-size:12px; color:#C99BFF; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .etapa-subseccion{ border-top:1px dashed var(--border); margin-top:16px; padding-top:16px; }
   .etapa-subseccion-titulo{ font-family:var(--display); font-weight:600; font-size:13.5px; margin:0 0 10px; color:var(--muted); }
@@ -3047,6 +3089,12 @@ ${estilosBase()}
           <p class="hint">
             Toma el ícono ⠿ de cada tarjeta y arrástrala arriba o abajo para reordenar tus etapas (por ejemplo,
             para meter una etapa nueva antes de la primera) sin tener que borrar y volver a crear nada.
+          </p>
+          <p class="hint">
+            <b>🚪 Etapa de entrada:</b> marca esta casilla dentro de una etapa para que TODOS los leads nuevos
+            entren directo ahí (con su mensaje fijo, si le pusiste uno) sin necesidad de ninguna palabra clave —
+            ideal cuando ya sabes por qué CTA o campaña llegan. Desmárcala cuando quieras que los leads nuevos
+            vuelvan a empezar por el prompt general de la izquierda. Solo puede haber una etapa de entrada a la vez.
           </p>
 
           <div class="etapa-subseccion" style="border-top:none; margin-top:0; padding-top:0;">
@@ -3422,9 +3470,14 @@ ${estilosBase()}
           <div class="etapa-card-head-izq">
             <span class="etapa-drag-handle" title="Arrastra para reordenar" draggable="true">⠿</span>
             <span class="eyebrow-num">ETAPA \${i + 1}\${et.nombre ? " · " + et.nombre.replace(/</g,"&lt;") : ""}</span>
+            \${et.entrada ? '<span class="etapa-entrada-badge">🚪 ENTRADA</span>' : ""}
           </div>
           <button type="button" class="etapa-quitar" data-i="\${i}">quitar etapa</button>
         </div>
+        <label class="etapa-entrada-check">
+          <input type="checkbox" class="etapa-entrada" data-i="\${i}"\${et.entrada ? " checked" : ""}>
+          <span>🚪 Etapa de entrada — los leads NUEVOS entran directo aquí, sin necesidad de ninguna palabra clave (si tienes otra marcada, se desmarca sola)</span>
+        </label>
         <div class="row2" style="margin-bottom:12px;">
           <div>
             <label>Nombre para mostrar</label>
@@ -3474,6 +3527,17 @@ ${estilosBase()}
     cont.querySelectorAll(".etapa-quitar").forEach(b => b.addEventListener("click", e => {
       leerEtapasDelDOM();
       etapas.splice(+e.target.dataset.i, 1);
+      renderEtapas();
+    }));
+
+    // Solo puede haber UNA etapa de entrada: al marcar una, se desmarcan
+    // todas las demás (un lead nuevo solo puede arrancar en un solo lugar).
+    cont.querySelectorAll(".etapa-entrada").forEach(chk => chk.addEventListener("change", (e) => {
+      leerEtapasDelDOM();
+      const i = +e.target.dataset.i;
+      if(etapas[i].entrada){
+        etapas.forEach((et, j) => { if(j !== i) et.entrada = false; });
+      }
       renderEtapas();
     }));
 
@@ -3558,6 +3622,7 @@ ${estilosBase()}
     document.querySelectorAll(".etapa-clave").forEach((input, i) => { if(etapas[i]) etapas[i].clave = slugify(input.value); });
     document.querySelectorAll(".etapa-prompt").forEach((ta, i) => { if(etapas[i]) etapas[i].prompt = ta.value; });
     document.querySelectorAll(".etapa-mensaje-fijo").forEach((ta, i) => { if(etapas[i]) etapas[i].mensaje_fijo = ta.value; });
+    document.querySelectorAll(".etapa-entrada").forEach((chk, i) => { if(etapas[i]) etapas[i].entrada = chk.checked; });
     document.querySelectorAll(".etapa-disparadores").forEach(subcont => {
       const i = +subcont.dataset.i;
       if(!etapas[i]) return;
@@ -3572,7 +3637,7 @@ ${estilosBase()}
 
   document.getElementById("addEtapa").addEventListener("click", () => {
     leerEtapasDelDOM();
-    etapas.push({ clave: "", nombre: "", prompt: "", mensaje_fijo: "", disparadores: [], transiciones: [] });
+    etapas.push({ clave: "", nombre: "", prompt: "", mensaje_fijo: "", entrada: false, disparadores: [], transiciones: [] });
     renderEtapas();
   });
 
