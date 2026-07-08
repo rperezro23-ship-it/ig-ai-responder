@@ -983,11 +983,32 @@ function coincideFrase(mensajeNormalizado, fraseNormalizada, modo) {
 
 // Devuelve la lista de disparadores configurados cuyas palabras/frases
 // coinciden con el mensaje del cliente (sin mayúsculas ni acentos), según el
-// modo de coincidencia de cada disparador ("contiene" o "exacta").
+// modo de coincidencia de cada disparador:
+//   "contiene"      -> con que UNA de las frases aparezca en el mensaje, activa.
+//   "exacta"        -> el mensaje completo debe ser UNA de las frases, tal cual.
+//   "combinaciones" -> cada LÍNEA es un grupo de palabras separadas por coma
+//                       que TIENEN que estar TODAS presentes para que esa
+//                       línea cuente; si CUALQUIERA de las líneas se cumple
+//                       completa, el disparador se activa. Sirve para armar
+//                       varias combinaciones distintas en un mismo disparador,
+//                       ej. "cansancio, estetico" en una línea y
+//                       "hipertension, estetico" en otra — activa con
+//                       cualquiera de las dos combinaciones.
+function grupoDePalabrasCoincide(mensajeNormalizado, lineaConComas) {
+  const palabras = lineaConComas.split(",").map(p => normalizarParaComparar(p)).filter(Boolean);
+  if (palabras.length === 0) return false;
+  return palabras.every(p => mensajeNormalizado.includes(p));
+}
+
 function buscarDisparadoresActivados(mensajeUsuario, disparadores) {
   const mensajeNormalizado = normalizarParaComparar(mensajeUsuario);
   return (disparadores || []).filter((d) => {
-    if (!d.clave || !Array.isArray(d.frases)) return false;
+    if (!Array.isArray(d.frases) || d.frases.length === 0) return false;
+
+    if (d.coincidencia === "combinaciones") {
+      return d.frases.some((linea) => grupoDePalabrasCoincide(mensajeNormalizado, linea));
+    }
+
     return d.frases.some((frase) => coincideFrase(mensajeNormalizado, normalizarParaComparar(frase), d.coincidencia));
   });
 }
@@ -2191,6 +2212,12 @@ async function cargarConfigDesdeDB() {
       // esto, una etapa guardada con el formato viejo dejaría de mandar su
       // mensaje fijo hasta que alguien la volviera a guardar a mano.
       configActual.etapas = normalizarEtapas(configActual.etapas);
+      // Los disparadores GENERALES (no los de dentro de cada etapa, que ya
+      // se migran arriba via normalizarEtapas) también se re-normalizan al
+      // cargar, por la misma razón: para migrar automáticamente el modo
+      // "todas" (legado) a "combinaciones" sin depender de que alguien
+      // vuelva a guardar desde /panel.
+      configActual.disparadores = normalizarDisparadores(configActual.disparadores);
       if (!Array.isArray(configActual.transiciones_generales)) configActual.transiciones_generales = [];
       actualizarClienteOpenAI();
       console.log("✅ Configuración cargada desde Supabase.");
@@ -2373,15 +2400,29 @@ function normalizarDisparadores(disparadores) {
   if (!Array.isArray(disparadores)) return [];
   return disparadores
     .filter(d => d && (d.tipo === "audio" || d.tipo === "foto" || d.tipo === "mensaje"))
-    .map(d => ({
-      tipo: d.tipo,
-      clave: typeof d.clave === "string" ? d.clave.trim().toLowerCase() : "",
-      contenido: typeof d.contenido === "string" ? d.contenido.trim() : "",
-      frases: Array.isArray(d.frases) ? d.frases.map(f => String(f).trim()).filter(Boolean) : [],
-      pausa_segundos: Number.isFinite(d.pausa_segundos) && d.pausa_segundos >= 0 ? d.pausa_segundos : 2,
-      coincidencia: d.coincidencia === "exacta" ? "exacta" : "contiene",
-      exclusivo: Boolean(d.exclusivo)
-    }))
+    .map(d => {
+      let frases = Array.isArray(d.frases) ? d.frases.map(f => String(f).trim()).filter(Boolean) : [];
+      let coincidencia = (d.coincidencia === "exacta" || d.coincidencia === "combinaciones") ? d.coincidencia : "contiene";
+
+      // Compatibilidad con guardados anteriores al modo "combinaciones": el
+      // modo "todas" (una sola combinación, una palabra por línea) se migra
+      // a "combinaciones" uniendo todas las palabras en una sola línea con
+      // comas, para que se siga comportando exactamente igual.
+      if (d.coincidencia === "todas") {
+        coincidencia = "combinaciones";
+        frases = frases.length > 0 ? [frases.join(", ")] : [];
+      }
+
+      return {
+        tipo: d.tipo,
+        clave: typeof d.clave === "string" ? d.clave.trim().toLowerCase() : "",
+        contenido: typeof d.contenido === "string" ? d.contenido.trim() : "",
+        frases,
+        pausa_segundos: Number.isFinite(d.pausa_segundos) && d.pausa_segundos >= 0 ? d.pausa_segundos : 2,
+        coincidencia,
+        exclusivo: Boolean(d.exclusivo)
+      };
+    })
     .filter(d => d.frases.length > 0)
     .filter(d => d.tipo === "mensaje" ? Boolean(d.contenido) : Boolean(d.clave));
 }
@@ -3402,11 +3443,13 @@ ${estilosBase()}
           <button type="button" class="\${prefijoClase}-quitar" data-i="\${i}">quitar</button>
         </div>
         <label>Palabras o frases que lo activan (una por línea)</label>
-        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: precio&#10;cuanto cuesta&#10;inversion" style="margin-bottom:10px;">\${(d.frases || []).join("\\n")}</textarea>
+        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: precio&#10;cuanto cuesta&#10;inversion" style="margin-bottom:6px;">\${(d.frases || []).join("\\n")}</textarea>
+        <p class="hint" style="margin:0 0 10px; font-size:12.5px;">Con "CUALQUIERA" o "EXACTAMENTE", cada línea es una alternativa distinta. Con "COMBINACIONES", cada línea es un grupo de palabras separadas por coma que TIENEN que estar TODAS presentes (ej. una línea "cansancio, estetico" activa solo si el mensaje trae las dos); puedes poner varias líneas-combinación distintas (ej. otra línea "hipertension, estetico") y con que se cumpla CUALQUIERA de ellas, activa.</p>
         <label>¿Cómo debe coincidir?</label>
         <select class="\${prefijoClase}-coincidencia" data-i="\${i}" style="margin-bottom:10px;">
-          <option value="contiene"\${d.coincidencia !== "exacta" ? " selected" : ""}>Contiene la frase en cualquier parte del mensaje</option>
-          <option value="exacta"\${d.coincidencia === "exacta" ? " selected" : ""}>El mensaje es EXACTAMENTE esa palabra/frase</option>
+          <option value="contiene"\${d.coincidencia !== "exacta" && d.coincidencia !== "combinaciones" ? " selected" : ""}>Contiene CUALQUIERA de las frases (una por una)</option>
+          <option value="exacta"\${d.coincidencia === "exacta" ? " selected" : ""}>El mensaje es EXACTAMENTE una de esas frases</option>
+          <option value="combinaciones"\${d.coincidencia === "combinaciones" ? " selected" : ""}>Combinaciones (grupos de palabras con coma, ej. "cansancio, estetico")</option>
         </select>
         <div class="row2" style="margin-bottom:10px;">
           <div>
