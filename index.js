@@ -175,11 +175,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null };
   }
 
   return data;
@@ -197,7 +197,16 @@ async function agregarAlHistorialDB(senderId, role, content) {
   const conv = await obtenerConversacion(senderId);
   const historial = [...(conv.historial || []), { role, content }];
   while (historial.length > configActual.max_historial) historial.shift();
-  await guardarConversacion(senderId, { historial });
+
+  const campos = { historial };
+  // Se registra el momento exacto en que se mandó el último mensaje DEL BOT
+  // (no del cliente) — sirve para los seguimientos con "solo si está visto":
+  // se compara contra la marca de "leído" (visto_hasta) que manda Instagram,
+  // para saber si el cliente ya vio ESE mensaje en particular antes de
+  // mandarle el siguiente seguimiento.
+  if (role === "assistant") campos.ultimo_mensaje_bot_en = new Date().toISOString();
+
+  await guardarConversacion(senderId, campos);
   return historial;
 }
 
@@ -311,6 +320,23 @@ async function procesarSeguimientosPendientesDB() {
     if (!pasoConfig) {
       await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
       continue;
+    }
+
+    // "Solo enviar si está visto": este paso no se manda hasta que el
+    // cliente haya leído el ÚLTIMO mensaje que le mandó el bot (comparando
+    // la marca de "leído" que manda Instagram contra la fecha del último
+    // mensaje del bot). Si todavía no lo vio, NO se marca como enviado —
+    // se deja pendiente para que el próximo cron lo vuelva a revisar (la
+    // ventana de 24h de arriba sigue aplicando como límite natural).
+    if (pasoConfig.solo_si_visto) {
+      const vistoHasta = conv.visto_hasta ? new Date(conv.visto_hasta).getTime() : 0;
+      const ultimoMensajeBot = conv.ultimo_mensaje_bot_en ? new Date(conv.ultimo_mensaje_bot_en).getTime() : 0;
+      const yaVisto = ultimoMensajeBot > 0 && vistoHasta >= ultimoMensajeBot;
+
+      if (!yaVisto) {
+        console.log(`👁️ Seguimiento (${tipo}, paso ${pasoIndex}) para ${senderId} en espera: el cliente todavía no ha visto el mensaje anterior.`);
+        continue;
+      }
     }
 
     // Se namespacea la clave de rotación por tipo, para que el paso 0 normal
@@ -1572,9 +1598,24 @@ app.post("/webhook", async (req, res) => {
 
     for (const event of eventos) {
       const senderId = event.sender?.id;
-      const mensaje  = event.message?.text;
+      if (!senderId) continue;
 
-      if (!senderId || !mensaje) continue;
+      // Evento de "visto" (read receipt): Instagram manda esto cuando el
+      // cliente abre el chat y lee los mensajes. "watermark" es un timestamp
+      // (ms desde epoch) que indica "leyó todo hasta este momento". Se guarda
+      // para que los seguimientos con "solo si está visto" (ver
+      // procesarSeguimientosPendientesDB) puedan comparar si el cliente ya
+      // vio el último mensaje que le mandó el bot antes de mandarle el
+      // siguiente seguimiento.
+      if (event.read?.watermark) {
+        const vistoHasta = new Date(Number(event.read.watermark)).toISOString();
+        await guardarConversacion(senderId, { visto_hasta: vistoHasta });
+        console.log(`👁️ ${senderId} vio los mensajes hasta ${vistoHasta}`);
+        continue;
+      }
+
+      const mensaje = event.message?.text;
+      if (!mensaje) continue;
       if (event.message?.is_echo) continue;
 
       const msgId = event.message?.mid;
@@ -3291,7 +3332,7 @@ ${estilosBase()}
           <details class="ayuda">
             <summary>¿Cómo funciona esto?</summary>
             <div class="hint-contenido">
-              <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de arriba. Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en estos mensajes.</p>
+              <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de arriba. Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en estos mensajes. Con la casilla <b>"Solo enviar si el mensaje anterior ya está visto"</b> puedes hacer que un paso específico espere a que el cliente haya leído lo último que le mandaste (usando el estado de "visto" de Instagram) antes de mandarle ese seguimiento — si todavía no lo ha visto, simplemente espera y lo vuelve a revisar más tarde, sin cancelar el envío.</p>
             </div>
           </details>
           <div id="pasosEnlace"></div>
@@ -3303,7 +3344,7 @@ ${estilosBase()}
           <details class="ayuda">
             <summary>¿Cómo funciona esto?</summary>
             <div class="hint-contenido">
-              <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en cualquiera de estos mensajes.</p>
+              <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en cualquiera de estos mensajes. Con la casilla <b>"Solo enviar si el mensaje anterior ya está visto"</b> algunos pasos pueden esperar a que el cliente haya leído tu último mensaje antes de mandarle ese paso — útil para, por ejemplo, mandar 3 seguimientos siempre y que los siguientes 4 solo se manden una vez que sepas que de verdad está viendo la conversación.</p>
             </div>
           </details>
           <div id="pasos"></div>
@@ -3430,7 +3471,11 @@ ${estilosBase()}
         <label>Horas de silencio antes de disparar</label>
         <input type="number" step="0.1" min="0" class="paso-horas" data-i="\${i}" value="\${paso.horas}" style="margin-bottom:10px;">
         <label>Mensajes (uno por línea, rotan entre ellos)</label>
-        <textarea class="paso-mensajes" data-i="\${i}" rows="3">\${(paso.mensajes || []).join("\\n")}</textarea>
+        <textarea class="paso-mensajes" data-i="\${i}" rows="3" style="margin-bottom:10px;">\${(paso.mensajes || []).join("\\n")}</textarea>
+        <label style="display:flex; align-items:flex-start; gap:9px; cursor:pointer; margin:0;">
+          <input type="checkbox" class="paso-solo-visto" data-i="\${i}"\${paso.solo_si_visto ? " checked" : ""} style="width:16px; height:16px; accent-color:var(--green); cursor:pointer; margin-top:1px; flex-shrink:0;">
+          <span style="color:var(--text); font-size:13.5px; font-weight:500; line-height:1.45;">👁️ Solo enviar si el mensaje anterior ya está visto (si no, espera y lo reintenta después)</span>
+        </label>
       \`;
       cont.appendChild(div);
     });
@@ -3440,7 +3485,7 @@ ${estilosBase()}
   }
 
   document.getElementById("addPaso").addEventListener("click", () => {
-    pasos.push({ horas: 1, mensajes: ["Escribe aquí un mensaje de seguimiento..."] });
+    pasos.push({ horas: 1, mensajes: ["Escribe aquí un mensaje de seguimiento..."], solo_si_visto: false });
     renderPasos();
   });
 
@@ -3449,6 +3494,7 @@ ${estilosBase()}
     document.querySelectorAll(".paso-mensajes").forEach((ta, i) => {
       pasos[i].mensajes = ta.value.split("\\n").map(m => m.trim()).filter(Boolean);
     });
+    document.querySelectorAll(".paso-solo-visto").forEach((chk, i) => { pasos[i].solo_si_visto = chk.checked; });
   }
 
   // --- Seguimiento especial al enlace: mismo patrón, otro contenedor ---
@@ -3468,7 +3514,11 @@ ${estilosBase()}
         <label>Horas desde que se envió el enlace, antes de disparar</label>
         <input type="number" step="0.1" min="0" class="paso-enlace-horas" data-i="\${i}" value="\${paso.horas}" style="margin-bottom:10px;">
         <label>Mensajes (uno por línea, rotan entre ellos)</label>
-        <textarea class="paso-enlace-mensajes" data-i="\${i}" rows="3">\${(paso.mensajes || []).join("\\n")}</textarea>
+        <textarea class="paso-enlace-mensajes" data-i="\${i}" rows="3" style="margin-bottom:10px;">\${(paso.mensajes || []).join("\\n")}</textarea>
+        <label style="display:flex; align-items:flex-start; gap:9px; cursor:pointer; margin:0;">
+          <input type="checkbox" class="paso-enlace-solo-visto" data-i="\${i}"\${paso.solo_si_visto ? " checked" : ""} style="width:16px; height:16px; accent-color:var(--green); cursor:pointer; margin-top:1px; flex-shrink:0;">
+          <span style="color:var(--text); font-size:13.5px; font-weight:500; line-height:1.45;">👁️ Solo enviar si el mensaje anterior ya está visto (si no, espera y lo reintenta después)</span>
+        </label>
       \`;
       cont.appendChild(div);
     });
@@ -3478,7 +3528,7 @@ ${estilosBase()}
   }
 
   document.getElementById("addPasoEnlace").addEventListener("click", () => {
-    pasosEnlace.push({ horas: 4, mensajes: ["Ey, ¿cómo vas? ¿Pudiste encontrar un espacio que te quede bien?"] });
+    pasosEnlace.push({ horas: 4, mensajes: ["Ey, ¿cómo vas? ¿Pudiste encontrar un espacio que te quede bien?"], solo_si_visto: false });
     renderPasosEnlace();
   });
 
@@ -3487,6 +3537,7 @@ ${estilosBase()}
     document.querySelectorAll(".paso-enlace-mensajes").forEach((ta, i) => {
       pasosEnlace[i].mensajes = ta.value.split("\\n").map(m => m.trim()).filter(Boolean);
     });
+    document.querySelectorAll(".paso-enlace-solo-visto").forEach((chk, i) => { pasosEnlace[i].solo_si_visto = chk.checked; });
   }
 
   // --- Disparadores automáticos: helpers reutilizables (generales y por etapa) ---
