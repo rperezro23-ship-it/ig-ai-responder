@@ -3041,9 +3041,18 @@ ${estilosBase()}
 
   .paso{
     border:1px solid var(--border); border-radius:11px; padding:16px; margin-bottom:12px;
-    background:rgba(255,255,255,.015);
+    background:rgba(255,255,255,.015); transition:opacity .12s, border-color .12s, background .12s;
   }
+  .paso.arrastrando{ opacity:.4; }
+  .paso.arrastrando-sobre{ border-color:var(--green); background:rgba(49,217,124,.06); }
   .paso-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px; }
+  .paso-head-izq{ display:flex; align-items:center; gap:9px; min-width:0; }
+  .fila-drag-handle{
+    cursor:grab; color:var(--muted); font-size:17px; line-height:1; flex-shrink:0;
+    padding:2px 5px; border-radius:6px; user-select:none;
+  }
+  .fila-drag-handle:hover{ color:var(--green); background:rgba(49,217,124,.1); }
+  .fila-drag-handle:active{ cursor:grabbing; }
   .paso-head .eyebrow-num{ font-family:var(--mono); font-size:12px; color:var(--green); }
   .quitar{ background:none; border:none; color:var(--muted); font-size:13px; cursor:pointer; text-decoration:underline; }
   .quitar:hover{ color:var(--red); }
@@ -3305,7 +3314,7 @@ ${estilosBase()}
           <details class="ayuda">
             <summary>¿Cómo funciona esto?</summary>
             <div class="hint-contenido">
-              <p class="hint">La IA no siempre es consistente decidiendo cuándo incluir un <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en su respuesta — a veces sí, a veces no. Acá puedes configurar palabras o frases que, en cuanto aparezcan en el mensaje del cliente, manden algo <b>SIEMPRE, por código, sin depender de la IA</b>. Puedes elegir mandar un solo audio, una sola foto, o el tipo <b>📝 Mensaje</b> para combinar texto + fotos + audios + pausas en una sola secuencia (con los mismos marcadores de siempre). Si la IA ya lo mandó ella misma en esa misma respuesta (solo aplica a audio/foto simples), no se duplica.<br><br><b>Estos disparadores son el respaldo general:</b> si el lead está en una etapa que tiene sus propios disparadores (ver "Etapas de la conversación"), primero se revisan los de esa etapa; solo si NINGUNO de esos coincide con lo que escribió el cliente, se cae a revisar esta lista de aquí.</p>
+              <p class="hint">La IA no siempre es consistente decidiendo cuándo incluir un <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en su respuesta — a veces sí, a veces no. Acá puedes configurar palabras o frases que, en cuanto aparezcan en el mensaje del cliente, manden algo <b>SIEMPRE, por código, sin depender de la IA</b>. Puedes elegir mandar un solo audio, una sola foto, o el tipo <b>📝 Mensaje</b> para combinar texto + fotos + audios + pausas en una sola secuencia (con los mismos marcadores de siempre). Si la IA ya lo mandó ella misma en esa misma respuesta (solo aplica a audio/foto simples), no se duplica.<br><br><b>Estos disparadores son el respaldo general:</b> si el lead está en una etapa que tiene sus propios disparadores (ver "Etapas de la conversación"), primero se revisan los de esa etapa; solo si NINGUNO de esos coincide con lo que escribió el cliente, se cae a revisar esta lista de aquí.<br><br>Toma el ícono ⠿ de cada disparador para arrastrarlo y cambiar su orden — importa sobre todo si tienes varios marcados como "Exclusivo": si dos coinciden a la vez, gana el que esté primero en la lista.</p>
             </div>
           </details>
           <div id="listaDisparadores"></div>
@@ -3383,6 +3392,12 @@ ${estilosBase()}
                 dentro del prompt, como método manual/adicional — pero como depende de que la IA decida ponerlo, puede
                 fallar; las tres formas de arriba son las confiables. También puedes cambiar la etapa de un lead a mano
                 desde <a href="/chats">Chats</a>.
+              </p>
+              <p class="hint">
+                <b>Orden y prioridad:</b> las transiciones de cada etapa se revisan en el orden en que están en la
+                lista, y gana la PRIMERA que coincida. Usa el ícono ⠿ de cada transición para arrastrarla y cambiar
+                su orden — útil cuando tienes varias que podrían coincidir con el mismo mensaje y quieres asegurar
+                cuál se evalúa primero.
               </p>
               <p class="hint">
                 Toma el ícono ⠿ de cada tarjeta y arrástrala arriba o abajo para reordenar tus etapas (por ejemplo,
@@ -3573,7 +3588,10 @@ ${estilosBase()}
       \`;
       div.innerHTML = \`
         <div class="paso-head">
-          <span class="eyebrow-num">DISPARADOR \${i + 1}</span>
+          <div class="paso-head-izq">
+            <span class="fila-drag-handle" title="Arrastra para reordenar" draggable="true">⠿</span>
+            <span class="eyebrow-num">DISPARADOR \${i + 1}</span>
+          </div>
           <button type="button" class="\${prefijoClase}-quitar" data-i="\${i}">quitar</button>
         </div>
         <label>Palabras o frases que lo activan (una por línea)</label>
@@ -3616,6 +3634,7 @@ ${estilosBase()}
       alCambiar();
       renderDisparadoresEnContenedor(cont, lista, prefijoClase, alCambiar);
     }));
+    habilitarArrastreDeFilas(cont, lista, alCambiar, () => renderDisparadoresEnContenedor(cont, lista, prefijoClase, alCambiar));
   }
 
   // Se lee por "data-i" (no por posición) porque el campo de contenido
@@ -3701,7 +3720,10 @@ ${estilosBase()}
       \`;
       div.innerHTML = \`
         <div class="paso-head">
-          <span class="eyebrow-num">TRANSICIÓN \${i + 1}</span>
+          <div class="paso-head-izq">
+            <span class="fila-drag-handle" title="Arrastra para reordenar" draggable="true">⠿</span>
+            <span class="eyebrow-num">TRANSICIÓN \${i + 1}</span>
+          </div>
           <button type="button" class="\${prefijoClase}-quitar" data-i="\${i}">quitar</button>
         </div>
         <label>¿Cómo debe activarse?</label>
@@ -3730,6 +3752,7 @@ ${estilosBase()}
       alCambiar();
       renderTransicionesEnContenedor(cont, lista, prefijoClase, alCambiar, incluirSalir);
     }));
+    habilitarArrastreDeFilas(cont, lista, alCambiar, () => renderTransicionesEnContenedor(cont, lista, prefijoClase, alCambiar, incluirSalir));
   }
 
   // Se lee por "data-i" (no por posición en la lista de elementos) porque el
@@ -3792,6 +3815,57 @@ ${estilosBase()}
   // --- Etapas de la conversación ---
   let etapas = [];
   let indiceEtapaArrastrando = null;
+
+  // --- Arrastrar y soltar genérico para filas ("paso") dentro de un
+  // contenedor — reutilizado por disparadores y transiciones (generales y
+  // por etapa), ya que ambos funcionan por PRIORIDAD: se revisan en el
+  // orden de la lista y gana la primera que coincida. "arrastreGenerico"
+  // guarda también una referencia al contenedor de origen, para no mezclar
+  // un arrastre iniciado en una lista con el drop de otra lista distinta
+  // (ej. no confundir los disparadores de la etapa A con los de la etapa B).
+  let arrastreGenerico = null;
+
+  function habilitarArrastreDeFilas(cont, lista, alCambiar, renderDeNuevo){
+    cont.querySelectorAll(".fila-drag-handle").forEach(handle => {
+      handle.addEventListener("dragstart", () => {
+        const fila = handle.closest(".paso");
+        const indice = Array.from(cont.children).indexOf(fila);
+        arrastreGenerico = { cont, indice };
+        fila.classList.add("arrastrando");
+      });
+      handle.addEventListener("dragend", () => {
+        cont.querySelectorAll(".paso").forEach(f => f.classList.remove("arrastrando", "arrastrando-sobre"));
+        arrastreGenerico = null;
+      });
+    });
+
+    cont.querySelectorAll(".paso").forEach(fila => {
+      fila.addEventListener("dragover", (e) => {
+        if(!arrastreGenerico || arrastreGenerico.cont !== cont) return;
+        e.preventDefault();
+        fila.classList.add("arrastrando-sobre");
+      });
+      fila.addEventListener("dragleave", () => fila.classList.remove("arrastrando-sobre"));
+      fila.addEventListener("drop", (e) => {
+        e.preventDefault();
+        fila.classList.remove("arrastrando-sobre");
+        if(!arrastreGenerico || arrastreGenerico.cont !== cont) return;
+
+        const indiceDestino = Array.from(cont.children).indexOf(fila);
+        const indiceOrigen = arrastreGenerico.indice;
+        arrastreGenerico = null;
+        if(indiceDestino === indiceOrigen) return;
+
+        alCambiar();
+        const [movido] = lista.splice(indiceOrigen, 1);
+        let nuevaPosicion = indiceDestino;
+        if(indiceOrigen < indiceDestino) nuevaPosicion -= 1;
+        lista.splice(nuevaPosicion, 0, movido);
+        renderDeNuevo();
+      });
+    });
+  }
+
 
   function slugify(txt){
     return (txt || "").trim().toLowerCase()
