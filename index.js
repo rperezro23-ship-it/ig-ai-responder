@@ -2172,6 +2172,13 @@ async function cargarConfigDesdeDB() {
       configActual.seguimientos = [...(configActual.seguimientos || [])].sort((a, b) => a.horas - b.horas);
       configActual.seguimientos_enlace = [...(configActual.seguimientos_enlace || [])].sort((a, b) => a.horas - b.horas);
       if (!Array.isArray(configActual.etapas)) configActual.etapas = [];
+      // Se re-normalizan las etapas también al CARGAR (no solo al guardar
+      // desde /panel), para migrar automáticamente formatos antiguos —por
+      // ejemplo, etapas guardadas antes de que "mensaje_fijo" (un solo texto)
+      // se convirtiera en "mensajes_fijos" (varias variantes que rotan). Sin
+      // esto, una etapa guardada con el formato viejo dejaría de mandar su
+      // mensaje fijo hasta que alguien la volviera a guardar a mano.
+      configActual.etapas = normalizarEtapas(configActual.etapas);
       if (!Array.isArray(configActual.transiciones_generales)) configActual.transiciones_generales = [];
       actualizarClienteOpenAI();
       console.log("✅ Configuración cargada desde Supabase.");
