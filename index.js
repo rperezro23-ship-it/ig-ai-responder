@@ -1298,14 +1298,23 @@ async function procesarBuffer(senderId) {
     // si los tiene), sin pasar por la IA en absoluto — a diferencia del
     // prompt normal, esto es 100% garantizado, útil para mensajes donde
     // necesitas control total del texto exacto (ej. con errores intencionales
-    // o un guion muy específico). Tiene prioridad sobre "silenciosa": si la
-    // etapa de destino tiene un mensaje fijo configurado, se manda ese,
-    // independientemente de cómo esté marcada la transición.
-    const mensajeFijoEtapa = (transicionAplicada && etapaConfig?.mensaje_fijo?.trim()) || null;
+    // o un guion muy específico). Si hay varias variantes configuradas (ej.
+    // 10 casos de éxito distintos), rotan de forma GLOBAL entre todos los
+    // leads que entren a la etapa, para no repetir siempre la misma.
+    // Tiene prioridad sobre "silenciosa": si la etapa de destino tiene
+    // mensajes fijos configurados, se manda uno de esos, independientemente
+    // de cómo esté marcada la transición.
+    let mensajeFijoEtapa = null;
+    let indiceMensajeFijo = -1;
+    if (transicionAplicada && etapaConfig?.mensajes_fijos?.length > 0) {
+      const totalVariantes = etapaConfig.mensajes_fijos.length;
+      indiceMensajeFijo = await obtenerYAvanzarRotacionEntrada(etapaConfig.clave, totalVariantes);
+      mensajeFijoEtapa = etapaConfig.mensajes_fijos[indiceMensajeFijo] || null;
+    }
 
     if (mensajeFijoEtapa) {
       await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
-      console.log(`📌 Enviando mensaje fijo de la etapa "${etapaConfig.clave}" a ${senderId} (sin pasar por la IA).`);
+      console.log(`📌 Enviando mensaje fijo (variante ${indiceMensajeFijo + 1}/${etapaConfig.mensajes_fijos.length}) de la etapa "${etapaConfig.clave}" a ${senderId} (sin pasar por la IA).`);
       await enviarContenidoConMarcadores(senderId, mensajeFijoEtapa);
     } else if (transicionAplicada && transicion?.silenciosa) {
       // Transición "silenciosa": solo cambia de etapa y NO genera ni manda
@@ -2245,6 +2254,47 @@ async function obtenerInfoTokenDB() {
   return data;
 }
 
+// ---------------------------------------------------------------
+// Rotación de los "mensajes fijos al entrar a una etapa" (ver más abajo, en
+// normalizarEtapas). A diferencia de la rotación de seguimientos (que es
+// POR CONVERSACIÓN, porque un mismo lead puede recibir varios seguimientos
+// seguidos), esta rotación es GLOBAL y compartida entre TODOS los leads:
+// cada vez que alguien entra a la etapa, se manda la siguiente variante de
+// la lista, sin importar quién sea — así, si tienes 10 casos de éxito
+// cargados, el lead 1 recibe el caso 1, el lead 2 el caso 2, y así
+// sucesivamente, dando la vuelta cuando se acaban. Se guarda en Supabase
+// (no en configActual) para que no se pise ni se resetee cuando se guarda
+// la configuración desde /panel, y para que sobreviva un redeploy.
+// ---------------------------------------------------------------
+
+async function obtenerYAvanzarRotacionEntrada(etapaClave, totalMensajes) {
+  if (!totalMensajes || totalMensajes <= 0) return 0;
+
+  const { data, error } = await supabase
+    .from("app_config")
+    .select("*")
+    .eq("key", "etapa_entrada_rotacion")
+    .maybeSingle();
+
+  if (error) {
+    console.error("❌ Error leyendo rotación de mensajes de entrada, se usa el índice 0:", error.message);
+    return 0;
+  }
+
+  const estado = (data && data.valor) ? { ...data.valor } : {};
+  const indiceActual = Number.isInteger(estado[etapaClave]) ? estado[etapaClave] : 0;
+  const indiceUsado = indiceActual % totalMensajes;
+
+  estado[etapaClave] = (indiceActual + 1) % totalMensajes;
+
+  const { error: errorGuardado } = await supabase
+    .from("app_config")
+    .upsert({ key: "etapa_entrada_rotacion", valor: estado, actualizado_en: new Date().toISOString() });
+  if (errorGuardado) console.error("❌ Error guardando rotación de mensajes de entrada:", errorGuardado.message);
+
+  return indiceUsado;
+}
+
 app.get("/token-info", requireAdminKey, async (req, res) => {
   try {
     const info = await obtenerInfoTokenDB();
@@ -2345,15 +2395,27 @@ function normalizarEtapas(etapas) {
   if (!Array.isArray(etapas)) return [];
   const normalizadas = etapas
     .filter(e => e && typeof e.clave === "string" && e.clave.trim())
-    .map(e => ({
-      clave: e.clave.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_-]/g, "_"),
-      nombre: typeof e.nombre === "string" ? e.nombre.trim() : "",
-      prompt: typeof e.prompt === "string" ? e.prompt.trim() : "",
-      mensaje_fijo: typeof e.mensaje_fijo === "string" ? e.mensaje_fijo.trim() : "",
-      entrada: Boolean(e.entrada),
-      disparadores: normalizarDisparadores(e.disparadores),
-      transiciones: normalizarTransiciones(e.transiciones)
-    }))
+    .map(e => {
+      // mensajes_fijos: varias variantes que rotan (ver obtenerYAvanzarRotacionEntrada).
+      // Se mantiene compatibilidad con guardados antiguos que tenían un solo
+      // "mensaje_fijo" (string) en vez del array nuevo.
+      let mensajesFijos = [];
+      if (Array.isArray(e.mensajes_fijos)) {
+        mensajesFijos = e.mensajes_fijos.map(m => String(m).trim()).filter(Boolean);
+      } else if (typeof e.mensaje_fijo === "string" && e.mensaje_fijo.trim()) {
+        mensajesFijos = [e.mensaje_fijo.trim()];
+      }
+
+      return {
+        clave: e.clave.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_-]/g, "_"),
+        nombre: typeof e.nombre === "string" ? e.nombre.trim() : "",
+        prompt: typeof e.prompt === "string" ? e.prompt.trim() : "",
+        mensajes_fijos: mensajesFijos,
+        entrada: Boolean(e.entrada),
+        disparadores: normalizarDisparadores(e.disparadores),
+        transiciones: normalizarTransiciones(e.transiciones)
+      };
+    })
     .filter(e => e.clave);
 
   // Solo puede haber UNA etapa de entrada a la vez (un lead nuevo solo puede
@@ -3572,7 +3634,7 @@ ${estilosBase()}
         <textarea class="etapa-prompt" data-i="\${i}" rows="6" placeholder="Ej: Ahora solo pregunta cuál es su objetivo principal. Si responde que sí quiere que le expliques un plan, incluye [[etapa:plan]] al final. Si responde que no, sigue platicando sin insistir.">\${(et.prompt || "").replace(/</g,"&lt;")}</textarea>
 
         <div class="etapa-subseccion">
-          <p class="etapa-subseccion-titulo">📌 Mensaje fijo al ENTRAR a esta etapa (opcional)</p>
+          <p class="etapa-subseccion-titulo">📌 Mensaje(s) fijo(s) al ENTRAR a esta etapa (opcional)</p>
           <p class="hint" style="margin:0 0 10px;">
             Si lo llenas, en cuanto un lead entre a esta etapa (por palabra clave o por condición) se manda este
             texto TAL CUAL, carácter por carácter — sin pasar por la IA en absoluto. Útil cuando necesitas un
@@ -3584,7 +3646,12 @@ ${estilosBase()}
             Si lo dejas vacío, la etapa responde normal con su prompt de arriba (y con la IA). Tiene prioridad sobre
             la opción "no responder nada" de la transición que trajo al lead aquí.
           </p>
-          <textarea class="etapa-mensaje-fijo" data-i="\${i}" rows="3" placeholder="Ej: La salud es un tema importante, hay que solucionarlo cuanto antes[[audio:salud]]¿Te hace sentido esto?">\${(et.mensaje_fijo || "").replace(/</g,"&lt;")}</textarea>
+          <p class="hint" style="margin:0 0 10px;">
+            <b>Un mensaje por línea.</b> Si pones varios (ej. 10 casos de éxito distintos), cada vez que un lead
+            entre a esta etapa se manda uno diferente, rotando en orden — así no se repite siempre el mismo. Si
+            solo pones uno, se manda siempre ese.
+          </p>
+          <textarea class="etapa-mensaje-fijo" data-i="\${i}" rows="4" placeholder="Ej: La salud es un tema importante, hay que solucionarlo cuanto antes[[audio:salud]]¿Te hace sentido esto?&#10;María bajó 15kg en 3 meses[[foto:caso1]]¿Te gustaría lograr algo similar?">\${(et.mensajes_fijos || []).join("\\n").replace(/</g,"&lt;")}</textarea>
         </div>
 
         <div class="etapa-subseccion">
@@ -3701,7 +3768,7 @@ ${estilosBase()}
     document.querySelectorAll(".etapa-nombre").forEach((input, i) => { if(etapas[i]) etapas[i].nombre = input.value; });
     document.querySelectorAll(".etapa-clave").forEach((input, i) => { if(etapas[i]) etapas[i].clave = slugify(input.value); });
     document.querySelectorAll(".etapa-prompt").forEach((ta, i) => { if(etapas[i]) etapas[i].prompt = ta.value; });
-    document.querySelectorAll(".etapa-mensaje-fijo").forEach((ta, i) => { if(etapas[i]) etapas[i].mensaje_fijo = ta.value; });
+    document.querySelectorAll(".etapa-mensaje-fijo").forEach((ta, i) => { if(etapas[i]) etapas[i].mensajes_fijos = ta.value.split("\\n").map(m => m.trim()).filter(Boolean); });
     document.querySelectorAll(".etapa-entrada").forEach((chk, i) => { if(etapas[i]) etapas[i].entrada = chk.checked; });
     document.querySelectorAll(".etapa-disparadores").forEach(subcont => {
       const i = +subcont.dataset.i;
@@ -3717,7 +3784,7 @@ ${estilosBase()}
 
   document.getElementById("addEtapa").addEventListener("click", () => {
     leerEtapasDelDOM();
-    etapas.push({ clave: "", nombre: "", prompt: "", mensaje_fijo: "", entrada: false, disparadores: [], transiciones: [] });
+    etapas.push({ clave: "", nombre: "", prompt: "", mensajes_fijos: [], entrada: false, disparadores: [], transiciones: [] });
     renderEtapas();
   });
 
