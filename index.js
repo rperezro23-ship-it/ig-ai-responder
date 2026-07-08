@@ -207,7 +207,25 @@ async function agregarAlHistorialDB(senderId, role, content) {
   if (role === "assistant") campos.ultimo_mensaje_bot_en = new Date().toISOString();
 
   await guardarConversacion(senderId, campos);
+
+  // "historial" (arriba) se recorta a propósito para no inflar el costo de
+  // cada respuesta de la IA — pero eso significa que los mensajes viejos se
+  // pierden de ahí para siempre. Para que /chats pueda mostrar la
+  // conversación COMPLETA con scroll hacia atrás, cada mensaje se guarda
+  // ADEMÁS en esta tabla aparte, sin ningún límite.
+  await guardarMensajeChatCompleto(senderId, role, content);
+
   return historial;
+}
+
+// Guarda un mensaje en el registro completo (sin recorte) usado por /chats
+// para el scroll hacia atrás. Es un registro puramente de lectura para el
+// panel — nunca se usa como contexto de la IA (eso sigue siendo "historial").
+async function guardarMensajeChatCompleto(senderId, role, content) {
+  const { error } = await supabase
+    .from("mensajes_chat")
+    .insert({ sender_id: senderId, role, content, creado_en: new Date().toISOString() });
+  if (error) console.error("❌ Error guardando mensaje en mensajes_chat:", error.message);
 }
 
 async function registrarMensajeUsuario(senderId) {
@@ -1882,6 +1900,41 @@ app.get("/historial/:senderId", requireAdminKey, async (req, res) => {
   res.json(conv);
 });
 
+// Historial COMPLETO y paginado de una conversación, para el scroll hacia
+// atrás en /chats (a diferencia de /historial/:senderId, que solo devuelve
+// el "historial" recortado que usa la IA como contexto). Sin el parámetro
+// "antes", devuelve la página más reciente; con "antes" (un timestamp ISO),
+// devuelve la página de mensajes inmediatamente anterior a esa fecha —
+// así el front puede ir pidiendo "más para atrás" según el usuario haga scroll.
+app.get("/historial-paginado/:senderId", requireAdminKey, async (req, res) => {
+  try {
+    const limite = Math.min(Math.max(parseInt(req.query.limite, 10) || 30, 1), 100);
+    const antes = req.query.antes;
+
+    let query = supabase
+      .from("mensajes_chat")
+      .select("*")
+      .eq("sender_id", req.params.senderId)
+      .order("creado_en", { ascending: false })
+      .limit(limite);
+
+    if (antes) query = query.lt("creado_en", antes);
+
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ error: error.message });
+
+    // Se pide en orden descendente (más nuevo primero) para poder limitar
+    // fácil a los últimos N, pero se devuelve en orden ascendente (más viejo
+    // primero) que es como se pintan los mensajes en el chat.
+    const mensajes = (data || []).reverse();
+    const hayMasAntiguos = (data || []).length === limite;
+
+    res.json({ mensajes, hay_mas_antiguos: hayMasAntiguos });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Resumen de todas las conversaciones (usado por /chats para la lista de la izquierda).
 // Solo trae lo necesario para pintar la lista: último mensaje, quién lo mandó y cuándo.
 app.get("/conversaciones", requireAdminKey, async (req, res) => {
@@ -2394,6 +2447,69 @@ async function guardarConfigDB(nuevaConfig) {
 }
 
 cargarConfigDesdeDB();
+
+// ---------------------------------------------------------------
+// Respaldo inicial (una sola vez por conversación): al agregar la tabla
+// "mensajes_chat" para el scroll hacia atrás en /chats, las conversaciones
+// que ya existían no tienen nada guardado ahí todavía — solo tienen lo que
+// quedó en "historial" (ya recortado por max_historial). Esta rutina copia,
+// para cada conversación que aún no tenga NADA en mensajes_chat, lo que
+// tenga disponible en su "historial" actual — así al menos se rescatan los
+// mensajes más recientes que todavía no se habían perdido, en vez de
+// arrancar la tabla completamente vacía para conversaciones viejas.
+// ---------------------------------------------------------------
+async function respaldarHistorialExistenteUnaVez() {
+  try {
+    const { data: conversaciones, error } = await supabase
+      .from("conversaciones")
+      .select("sender_id, historial");
+
+    if (error) {
+      console.error("❌ Error leyendo conversaciones para el respaldo inicial de mensajes_chat:", error.message);
+      return;
+    }
+
+    for (const conv of conversaciones || []) {
+      const historial = Array.isArray(conv.historial) ? conv.historial : [];
+      if (historial.length === 0) continue;
+
+      const { count, error: errorConteo } = await supabase
+        .from("mensajes_chat")
+        .select("*", { count: "exact", head: true })
+        .eq("sender_id", conv.sender_id);
+
+      if (errorConteo) {
+        console.error(`❌ Error revisando mensajes_chat de ${conv.sender_id}:`, errorConteo.message);
+        continue;
+      }
+      if (count > 0) continue; // ya tiene registro completo, no se toca
+
+      const ahora = Date.now();
+      const filas = historial.map((m, idx) => ({
+        sender_id: conv.sender_id,
+        role: m.role,
+        content: m.content,
+        // Se espacían por 1 segundo entre sí (en el mismo orden en que ya
+        // estaban) para que el orden cronológico se respete al ordenar por
+        // "creado_en" — no se conoce la hora real de cada uno, así que esto
+        // es solo una aproximación razonable para el respaldo inicial.
+        creado_en: new Date(ahora - (historial.length - idx) * 1000).toISOString()
+      }));
+
+      const { error: errorInsercion } = await supabase.from("mensajes_chat").insert(filas);
+      if (errorInsercion) {
+        console.error(`❌ Error respaldando historial de ${conv.sender_id} en mensajes_chat:`, errorInsercion.message);
+      } else {
+        console.log(`✅ Respaldo inicial: ${filas.length} mensaje(s) de ${conv.sender_id} copiados a mensajes_chat.`);
+      }
+    }
+  } catch (err) {
+    console.error("❌ Error inesperado en el respaldo inicial de mensajes_chat:", err.message);
+  }
+}
+
+respaldarHistorialExistenteUnaVez();
+
 
 async function estaBotActivo() {
   const { data, error } = await supabase
@@ -4723,7 +4839,9 @@ ${estilosBase()}
 
   let conversaciones = [];
   let senderSeleccionado = null;
-  let ultimoHistorialJSON = null;
+  let mensajesMostrados = []; // {role, content, creado_en} — página actual mostrada, orden ascendente
+  let hayMasAntiguos = false;
+  let cargandoAntiguos = false;
   let filtroActual = "todas";
   let etapasDisponibles = [];
 
@@ -4879,7 +4997,7 @@ ${estilosBase()}
       if(data && !data.error){
         if(senderSeleccionado === senderId){
           senderSeleccionado = null;
-          ultimoHistorialJSON = null;
+          mensajesMostrados = [];
           renderHead();
           actualizarInputBar();
           document.getElementById("chatMensajes").innerHTML = '<div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>';
@@ -5002,8 +5120,7 @@ ${estilosBase()}
       } else {
         ta.value = "";
         ta.style.height = "auto";
-        ultimoHistorialJSON = null;
-        await cargarHistorial();
+        await revisarMensajesNuevos();
         await cargarConversaciones();
       }
     } catch (err) {
@@ -5072,8 +5189,7 @@ ${estilosBase()}
         errorBox.textContent = "❌ " + (data.error || "No se pudo enviar la foto.");
         errorBox.classList.add("visible");
       } else {
-        ultimoHistorialJSON = null;
-        await cargarHistorial();
+        await revisarMensajesNuevos();
         await cargarConversaciones();
       }
     } catch (err) {
@@ -5169,8 +5285,7 @@ ${estilosBase()}
         errorBox.textContent = "❌ " + (data.error || "No se pudo enviar el audio.");
         errorBox.classList.add("visible");
       } else {
-        ultimoHistorialJSON = null;
-        await cargarHistorial();
+        await revisarMensajesNuevos();
         await cargarConversaciones();
       }
     } catch (err) {
@@ -5223,59 +5338,127 @@ ${estilosBase()}
 
   async function seleccionarChat(senderId){
     senderSeleccionado = senderId;
-    ultimoHistorialJSON = null;
+    mensajesMostrados = [];
+    hayMasAntiguos = false;
     renderLista();
     renderHead();
     actualizarInputBar();
     document.getElementById("mensajeManual").value = "";
     document.getElementById("chatMensajes").innerHTML = '<div class="chat-empty">Cargando…</div>';
-    await cargarHistorial();
+    document.getElementById("chatMensajes").dataset.primeraVez = "";
+    await cargarUltimaPagina();
   }
 
-  function renderMensajes(historial){
+  function construirBurbujaHTML(m){
+    const esImagen = typeof m.content === "string" && m.content.startsWith("[[imagen]]");
+    const esAudio = typeof m.content === "string" && m.content.startsWith("[[audio]]");
+    let contenidoHTML;
+    if (esImagen) {
+      contenidoHTML = \`<img src="\${m.content.slice(10)}" alt="imagen enviada" loading="lazy">\`;
+    } else if (esAudio) {
+      contenidoHTML = \`<audio controls src="\${m.content.slice(9)}"></audio>\`;
+    } else {
+      contenidoHTML = escapar(m.content);
+    }
+    return \`
+      <div class="bubble-row \${m.role === "assistant" ? "assistant" : "user"}">
+        <div class="bubble\${(esImagen || esAudio) ? " bubble-imagen" : ""}">\${contenidoHTML}</div>
+      </div>
+    \`;
+  }
+
+  function renderMensajesCompleto(){
     const cont = document.getElementById("chatMensajes");
-    if(!historial || historial.length === 0){
+    if(mensajesMostrados.length === 0){
       cont.innerHTML = '<div class="chat-empty">Sin mensajes todavía en esta conversación.</div>';
       return;
     }
     const estabaAbajo = cont.scrollTop + cont.clientHeight >= cont.scrollHeight - 60;
-    cont.innerHTML = historial.map(m => {
-      const esImagen = typeof m.content === "string" && m.content.startsWith("[[imagen]]");
-      const esAudio = typeof m.content === "string" && m.content.startsWith("[[audio]]");
-      let contenidoHTML;
-      if (esImagen) {
-        contenidoHTML = \`<img src="\${m.content.slice(10)}" alt="imagen enviada" loading="lazy">\`;
-      } else if (esAudio) {
-        contenidoHTML = \`<audio controls src="\${m.content.slice(9)}"></audio>\`;
-      } else {
-        contenidoHTML = escapar(m.content);
-      }
-      return \`
-        <div class="bubble-row \${m.role === "assistant" ? "assistant" : "user"}">
-          <div class="bubble\${(esImagen || esAudio) ? " bubble-imagen" : ""}">\${contenidoHTML}</div>
-        </div>
-      \`;
-    }).join("");
+    cont.innerHTML = mensajesMostrados.map(construirBurbujaHTML).join("");
     if(estabaAbajo || cont.dataset.primeraVez !== "hecho"){
       cont.scrollTop = cont.scrollHeight;
       cont.dataset.primeraVez = "hecho";
     }
   }
 
-  async function cargarHistorial(){
+  // Carga la página más reciente de la conversación (los últimos mensajes) —
+  // se usa al seleccionar un chat por primera vez.
+  async function cargarUltimaPagina(){
     if(!senderSeleccionado) return;
-    const data = await llamarGET("/historial/" + encodeURIComponent(senderSeleccionado));
+    const data = await llamarGET("/historial-paginado/" + encodeURIComponent(senderSeleccionado) + "?limite=30");
     if(!data) return;
-    const json = JSON.stringify(data.historial || []);
-    if(json === ultimoHistorialJSON) return;
-    ultimoHistorialJSON = json;
+    mensajesMostrados = data.mensajes || [];
+    hayMasAntiguos = Boolean(data.hay_mas_antiguos);
     document.getElementById("chatMensajes").dataset.primeraVez = "";
-    renderMensajes(data.historial || []);
+    renderMensajesCompleto();
   }
+
+  // Se llama cuando el usuario hace scroll hacia arriba y llega cerca del
+  // principio: pide la página de mensajes INMEDIATAMENTE ANTERIOR a la más
+  // vieja que ya se está mostrando, y la agrega arriba sin perder la
+  // posición visual de scroll (para que no "salte" la conversación).
+  async function cargarPaginaAntigua(){
+    if(!senderSeleccionado || !hayMasAntiguos || cargandoAntiguos) return;
+    if(mensajesMostrados.length === 0) return;
+
+    cargandoAntiguos = true;
+    const cont = document.getElementById("chatMensajes");
+    const alturaAntes = cont.scrollHeight;
+    const scrollAntes = cont.scrollTop;
+
+    const antes = mensajesMostrados[0].creado_en;
+    const data = await llamarGET("/historial-paginado/" + encodeURIComponent(senderSeleccionado) + "?limite=30&antes=" + encodeURIComponent(antes));
+    cargandoAntiguos = false;
+    if(!data) return;
+
+    const masAntiguos = data.mensajes || [];
+    hayMasAntiguos = Boolean(data.hay_mas_antiguos);
+    if(masAntiguos.length === 0) return;
+
+    mensajesMostrados = [...masAntiguos, ...mensajesMostrados];
+    renderMensajesCompleto();
+
+    const alturaDespues = cont.scrollHeight;
+    cont.scrollTop = scrollAntes + (alturaDespues - alturaAntes);
+  }
+
+  // Revisa si llegaron mensajes NUEVOS (más recientes que el último que ya
+  // se está mostrando) y los agrega al final, sin rehacer todo el chat —
+  // así no se rompe el scroll si el usuario está revisando mensajes viejos
+  // hacia arriba en ese momento. Se usa tanto en el polling automático como
+  // justo después de mandar un mensaje/foto/audio manual.
+  async function revisarMensajesNuevos(){
+    if(!senderSeleccionado) return;
+    const data = await llamarGET("/historial-paginado/" + encodeURIComponent(senderSeleccionado) + "?limite=30");
+    if(!data) return;
+    const llegados = data.mensajes || [];
+    if(llegados.length === 0) return;
+
+    const ultimoActual = mensajesMostrados.length > 0 ? mensajesMostrados[mensajesMostrados.length - 1].creado_en : null;
+    const nuevos = ultimoActual ? llegados.filter(m => m.creado_en > ultimoActual) : llegados;
+    if(nuevos.length === 0) return;
+
+    const cont = document.getElementById("chatMensajes");
+    const estabaAbajo = cont.scrollTop + cont.clientHeight >= cont.scrollHeight - 60;
+
+    mensajesMostrados = [...mensajesMostrados, ...nuevos];
+
+    if(cont.dataset.primeraVez !== "hecho"){
+      renderMensajesCompleto();
+    } else {
+      cont.insertAdjacentHTML("beforeend", nuevos.map(construirBurbujaHTML).join(""));
+      if(estabaAbajo) cont.scrollTop = cont.scrollHeight;
+    }
+  }
+
+  document.getElementById("chatMensajes").addEventListener("scroll", () => {
+    const cont = document.getElementById("chatMensajes");
+    if(cont.scrollTop < 80) cargarPaginaAntigua();
+  });
 
   setInterval(() => {
     cargarConversaciones();
-    if(senderSeleccionado) cargarHistorial();
+    if(senderSeleccionado) revisarMensajesNuevos();
   }, 4000);
 
   cargarEtapasDisponibles();
