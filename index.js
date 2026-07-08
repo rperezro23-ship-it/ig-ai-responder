@@ -1159,12 +1159,24 @@ function buscarTransicionActivada(mensajeUsuario, transiciones) {
 // Evalúa transiciones de tipo "condición" (ej. "el cliente mencionó tener 40
 // años o más") usando la IA, ya que esto no se puede reducir a una simple
 // coincidencia de texto. Para no multiplicar las llamadas a OpenAI, se
-// evalúan TODAS las condiciones de la lista en una sola llamada, y se
-// devuelve la primera que resulte verdadera (respetando el orden en que
-// están configuradas). Solo se llama cuando ninguna transición por palabra
-// clave coincidió primero (ver buscarTransicionActivada), así que no agrega
-// costo a las etapas que no usan este modo.
-async function evaluarTransicionesPorCondicion(mensajeUsuario, historial, transicionesCondicion) {
+// evalúan TODAS las condiciones de la lista en una sola llamada.
+//
+// Tiene DOS MODOS, según "elegirMejor":
+//   false (por defecto) -> cada condición se evalúa de forma INDEPENDIENTE
+//     (sí/no cada una), y gana la PRIMERA que resulte verdadera según el
+//     orden de la lista. Puede pasar que la IA marque más de una como
+//     verdadera a la vez, y en ese caso el orden decide cuál gana —
+//     aunque la que realmente corresponde sea otra.
+//   true -> en vez de evaluar cada una por separado, se le pide a la IA que
+//     las compare ENTRE SÍ (como categorías que se excluyen unas a otras) y
+//     elija UNA SOLA, la que mejor describa lo que dijo el cliente. Ya no
+//     importa el orden de la lista — la IA decide directamente cuál es,
+//     sin pasar por una carrera de "la primera que diga sí".
+//
+// Solo se llama cuando ninguna transición por palabra clave coincidió
+// primero (ver buscarTransicionActivada), así que no agrega costo a las
+// etapas que no usan este modo.
+async function evaluarTransicionesPorCondicion(mensajeUsuario, historial, transicionesCondicion, elegirMejor) {
   if (!transicionesCondicion || transicionesCondicion.length === 0) return null;
 
   try {
@@ -1176,6 +1188,41 @@ async function evaluarTransicionesPorCondicion(mensajeUsuario, historial, transi
       .join("\n");
 
     const listaCondiciones = transicionesCondicion.map((t, idx) => `${idx}. ${t.condicion.trim()}`).join("\n");
+    const mensajeUsuarioContenido = `Contexto reciente de la conversación:\n${contexto}\n\nÚltimo mensaje del cliente: "${mensajeUsuario}"`;
+
+    if (elegirMejor) {
+      const resp = await openaiClient.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        max_tokens: 80,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "Te doy una lista de condiciones que describen distintas posibles situaciones o razones del " +
+              "cliente — se tratan como categorías que se EXCLUYEN entre sí (el cliente normalmente encaja " +
+              "en una sola, no en varias a la vez). Decide cuál de ellas describe MEJOR lo que el cliente " +
+              "quiso decir en su último mensaje, considerando también el contexto reciente. Si ninguna aplica " +
+              "razonablemente, responde null. Responde ÚNICAMENTE un JSON con este formato exacto, sin texto " +
+              'adicional: {"mejor_indice": <número de la condición que mejor aplica, o null>}.\n\n' +
+              "Condiciones:\n" + listaCondiciones
+          },
+          { role: "user", content: mensajeUsuarioContenido }
+        ]
+      });
+
+      const texto = resp.choices[0]?.message?.content?.trim();
+      const parsed = JSON.parse(texto);
+      const indiceElegido = parsed.mejor_indice;
+
+      console.log(`🔍 Evaluación "elegir la mejor" entre ${transicionesCondicion.length} condiciones -> índice elegido: ${Number.isInteger(indiceElegido) ? indiceElegido : "ninguno"}`);
+
+      if (Number.isInteger(indiceElegido) && indiceElegido >= 0 && indiceElegido < transicionesCondicion.length) {
+        return transicionesCondicion[indiceElegido];
+      }
+      return null;
+    }
 
     const resp = await openaiClient.chat.completions.create({
       model: "gpt-4o-mini",
@@ -1195,7 +1242,7 @@ async function evaluarTransicionesPorCondicion(mensajeUsuario, historial, transi
             '{"cumple": [true o false, ...]} con un valor por cada condición, EN EL MISMO ORDEN en que se listan.\n\n' +
             "Condiciones:\n" + listaCondiciones
         },
-        { role: "user", content: `Contexto reciente de la conversación:\n${contexto}\n\nÚltimo mensaje del cliente: "${mensajeUsuario}"` }
+        { role: "user", content: mensajeUsuarioContenido }
       ]
     });
 
@@ -1354,7 +1401,10 @@ async function procesarBuffer(senderId) {
     if (!transicion) {
       const transicionesCondicion = listaTransiciones.filter(t => t.coincidencia === "condicion" && t.condicion);
       if (transicionesCondicion.length > 0) {
-        transicion = await evaluarTransicionesPorCondicion(mensajeCompleto, historial, transicionesCondicion);
+        const elegirMejor = etapaConfig
+          ? Boolean(etapaConfig.elegir_mejor_condicion)
+          : Boolean(configActual.transiciones_generales_elegir_mejor);
+        transicion = await evaluarTransicionesPorCondicion(mensajeCompleto, historial, transicionesCondicion, elegirMejor);
       }
     }
 
@@ -2222,7 +2272,8 @@ let configActual = {
   fotos: {},  // { claveFoto: { url, nombre_original, ruta_archivo, subido_en } }
   disparadores: [], // [{ frases: [], tipo: "audio"|"foto", clave, pausa_segundos }]  <- generales (fallback)
   etapas: [],  // [{ clave, nombre, prompt, disparadores: [...], transiciones: [...] }]
-  transiciones_generales: []  // [{ frases: [], etapa_destino }]  <- entrar a una etapa por palabra clave sin depender de la IA
+  transiciones_generales: [], // [{ frases: [], etapa_destino }]  <- entrar a una etapa por palabra clave sin depender de la IA
+  transiciones_generales_elegir_mejor: false // si hay varias condiciones generales, elegir la mejor en vez de la primera que diga sí
 };
 
 // Cliente de OpenAI: se reconstruye cada vez que cambia configActual.openai_api_key
@@ -2536,6 +2587,7 @@ function normalizarEtapas(etapas) {
         prompt: typeof e.prompt === "string" ? e.prompt.trim() : "",
         mensajes_fijos: mensajesFijos,
         entrada: Boolean(e.entrada),
+        elegir_mejor_condicion: Boolean(e.elegir_mejor_condicion),
         disparadores: normalizarDisparadores(e.disparadores),
         transiciones: normalizarTransiciones(e.transiciones)
       };
@@ -2567,7 +2619,8 @@ function filtrarDestinosDeTransicionValidos(transiciones, clavesValidas) {
 app.post("/config", requireAdminKey, async (req, res) => {
   try {
     const { ai_prompt, contexto_base, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
-            calificacion_activa, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales } = req.body || {};
+            calificacion_activa, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
+            transiciones_generales_elegir_mejor } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -2585,6 +2638,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (Array.isArray(disparadores)) nuevaConfig.disparadores = normalizarDisparadores(disparadores);
     if (Array.isArray(etapas)) nuevaConfig.etapas = normalizarEtapas(etapas);
     if (Array.isArray(transiciones_generales)) nuevaConfig.transiciones_generales = normalizarTransiciones(transiciones_generales);
+    if (typeof transiciones_generales_elegir_mejor === "boolean") nuevaConfig.transiciones_generales_elegir_mejor = transiciones_generales_elegir_mejor;
 
     // Descarta transiciones (generales o por etapa) que apunten a una etapa
     // que ya no existe en el guardado actual.
@@ -3415,6 +3469,10 @@ ${estilosBase()}
           <div class="etapa-subseccion" style="border-top:none; margin-top:0; padding-top:0;">
             <p class="etapa-subseccion-titulo">🔀 Transiciones generales (para ENTRAR a una etapa, cuando el lead todavía no tiene ninguna)</p>
             <p class="hint" style="margin:0 0 10px;">Si el cliente escribe alguna de estas frases mientras todavía no está en ninguna etapa, entra GARANTIZADO a la etapa que elijas — sin depender del prompt general.</p>
+            <label class="etapa-entrada-check" style="margin-bottom:14px;">
+              <input type="checkbox" id="transGeneralesElegirMejor">
+              <span>🎯 Si hay varias transiciones tipo "condición" aquí, que la IA elija cuál es la MEJOR (en vez de la primera que diga que sí) — útil cuando tienes varias condiciones que podrían solaparse entre sí</span>
+            </label>
             <div id="listaTransicionesGenerales"></div>
             <button class="add-paso" id="addTransicionGeneral" type="button">+ Agregar transición general</button>
           </div>
@@ -3956,6 +4014,10 @@ ${estilosBase()}
               <p class="hint">Mientras el lead esté en ESTA etapa, si escribe alguna de estas frases, se mueve GARANTIZADO a la etapa que elijas (o vuelve al prompt general) — sin depender de que la IA ponga el marcador [[etapa:...]].</p>
             </div>
           </details>
+          <label class="etapa-entrada-check" style="margin-bottom:14px;">
+            <input type="checkbox" class="etapa-elegir-mejor" data-i="\${i}"\${et.elegir_mejor_condicion ? " checked" : ""}>
+            <span>🎯 Si hay varias transiciones tipo "condición" en esta etapa, que la IA elija cuál es la MEJOR (en vez de la primera que diga que sí) — útil cuando tienes varias condiciones que podrían solaparse entre sí</span>
+          </label>
           <div class="etapa-transiciones" data-i="\${i}"></div>
           <button type="button" class="add-paso etapa-add-transicion" data-i="\${i}">+ Agregar transición de esta etapa</button>
         </div>
@@ -4062,6 +4124,7 @@ ${estilosBase()}
     document.querySelectorAll(".etapa-prompt").forEach((ta, i) => { if(etapas[i]) etapas[i].prompt = ta.value; });
     document.querySelectorAll(".etapa-mensaje-fijo").forEach((ta, i) => { if(etapas[i]) etapas[i].mensajes_fijos = ta.value.split("\\n").map(m => m.trim()).filter(Boolean); });
     document.querySelectorAll(".etapa-entrada").forEach((chk, i) => { if(etapas[i]) etapas[i].entrada = chk.checked; });
+    document.querySelectorAll(".etapa-elegir-mejor").forEach((chk, i) => { if(etapas[i]) etapas[i].elegir_mejor_condicion = chk.checked; });
     document.querySelectorAll(".etapa-disparadores").forEach(subcont => {
       const i = +subcont.dataset.i;
       if(!etapas[i]) return;
@@ -4076,7 +4139,7 @@ ${estilosBase()}
 
   document.getElementById("addEtapa").addEventListener("click", () => {
     leerEtapasDelDOM();
-    etapas.push({ clave: "", nombre: "", prompt: "", mensajes_fijos: [], entrada: false, disparadores: [], transiciones: [] });
+    etapas.push({ clave: "", nombre: "", prompt: "", mensajes_fijos: [], entrada: false, elegir_mejor_condicion: false, disparadores: [], transiciones: [] });
     renderEtapas();
   });
 
@@ -4110,6 +4173,7 @@ ${estilosBase()}
     renderDisparadores();
     etapas = Array.isArray(cfg.etapas) ? JSON.parse(JSON.stringify(cfg.etapas)) : [];
     transicionesGenerales = Array.isArray(cfg.transiciones_generales) ? JSON.parse(JSON.stringify(cfg.transiciones_generales)) : [];
+    document.getElementById("transGeneralesElegirMejor").checked = Boolean(cfg.transiciones_generales_elegir_mejor);
     renderEtapas();
     renderTransicionesGenerales();
     document.getElementById("btnGuardar").disabled = false;
@@ -4325,7 +4389,8 @@ ${estilosBase()}
       enlace_calificacion: document.getElementById("enlaceCalificacion").value,
       disparadores: disparadores,
       etapas: etapas,
-      transiciones_generales: transicionesGenerales
+      transiciones_generales: transicionesGenerales,
+      transiciones_generales_elegir_mejor: document.getElementById("transGeneralesElegirMejor").checked
     };
     const nuevaClave = document.getElementById("openaiKey").value.trim();
     if(nuevaClave) body.openai_api_key = nuevaClave;
