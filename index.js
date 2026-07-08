@@ -1120,7 +1120,11 @@ function buscarTransicionActivada(mensajeUsuario, transiciones) {
     if (typeof t.etapa_destino !== "string") continue;
     if (t.coincidencia === "condicion") continue;
     if (!Array.isArray(t.frases)) continue;
-    const coincide = t.frases.some((frase) => coincideFrase(mensajeNormalizado, normalizarParaComparar(frase), t.coincidencia));
+
+    const coincide = t.coincidencia === "combinaciones"
+      ? t.frases.some((linea) => grupoDePalabrasCoincide(mensajeNormalizado, linea))
+      : t.frases.some((frase) => coincideFrase(mensajeNormalizado, normalizarParaComparar(frase), t.coincidencia));
+
     if (coincide) return t;
   }
   return null;
@@ -2447,15 +2451,17 @@ function normalizarDisparadores(disparadores) {
 // Valida y normaliza un array de transiciones de etapa por palabra clave
 // (usado tanto para las generales como para las propias de cada etapa).
 // etapa_destino === "" es válido: significa "salir de etapas" (general).
-// coincidencia puede ser "contiene", "exacta" (comparación de texto) o
-// "condicion" (la evalúa la IA contra una descripción en lenguaje natural,
-// ej. "el cliente mencionó tener 40 años o más" — ver evaluarTransicionesPorCondicion).
+// coincidencia puede ser "contiene", "exacta" (comparación de texto),
+// "combinaciones" (grupos de palabras separadas por coma, una línea por
+// grupo — ver grupoDePalabrasCoincide) o "condicion" (la evalúa la IA contra
+// una descripción en lenguaje natural, ej. "el cliente mencionó tener 40
+// años o más" — ver evaluarTransicionesPorCondicion).
 function normalizarTransiciones(transiciones) {
   if (!Array.isArray(transiciones)) return [];
   return transiciones
     .filter(t => t && typeof t.etapa_destino === "string")
     .map(t => {
-      const coincidencia = (t.coincidencia === "exacta" || t.coincidencia === "condicion") ? t.coincidencia : "contiene";
+      const coincidencia = (t.coincidencia === "exacta" || t.coincidencia === "condicion" || t.coincidencia === "combinaciones") ? t.coincidencia : "contiene";
       return {
         etapa_destino: t.etapa_destino.trim().toLowerCase(),
         frases: Array.isArray(t.frases) ? t.frases.map(f => String(f).trim()).filter(Boolean) : [],
@@ -3639,7 +3645,8 @@ ${estilosBase()}
         <textarea class="\${prefijoClase}-condicion" data-i="\${i}" rows="2" placeholder='Ej: "El cliente mencionó tener 40 años de edad o más"' style="margin-bottom:10px;">\${(t.condicion || "").replace(/</g,"&lt;")}</textarea>
       \` : \`
         <label>Palabras o frases que la activan (una por línea)</label>
-        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: si&#10;sí quiero&#10;me interesa" style="margin-bottom:10px;">\${(t.frases || []).join("\\n")}</textarea>
+        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: si&#10;sí quiero&#10;me interesa&#10;(o, si eliges Combinaciones: cansancio, estetico)" style="margin-bottom:6px;">\${(t.frases || []).join("\\n")}</textarea>
+        \${t.coincidencia === "combinaciones" ? '<p class="hint" style="margin:0 0 10px; font-size:12.5px;">Cada línea es un grupo de palabras separadas por coma que TIENEN que estar TODAS presentes (ej. "cansancio, estetico"). Puedes poner varias líneas-combinación distintas; con que se cumpla CUALQUIERA, se activa.</p>' : ''}
       \`;
       div.innerHTML = \`
         <div class="paso-head">
@@ -3648,8 +3655,9 @@ ${estilosBase()}
         </div>
         <label>¿Cómo debe activarse?</label>
         <select class="\${prefijoClase}-coincidencia" data-i="\${i}" style="margin-bottom:10px;">
-          <option value="contiene"\${t.coincidencia !== "exacta" && t.coincidencia !== "condicion" ? " selected" : ""}>Contiene la frase en cualquier parte del mensaje</option>
+          <option value="contiene"\${t.coincidencia !== "exacta" && t.coincidencia !== "condicion" && t.coincidencia !== "combinaciones" ? " selected" : ""}>Contiene la frase en cualquier parte del mensaje</option>
           <option value="exacta"\${t.coincidencia === "exacta" ? " selected" : ""}>El mensaje es EXACTAMENTE esa palabra/frase</option>
+          <option value="combinaciones"\${t.coincidencia === "combinaciones" ? " selected" : ""}>Combinaciones (grupos de palabras con coma, ej. "cansancio, estetico")</option>
           <option value="condicion"\${esCondicion ? " selected" : ""}>Según una condición (la evalúa la IA)</option>
         </select>
         \${campoActivador}
