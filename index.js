@@ -602,6 +602,23 @@ function estilosBase() {
   .card p{ color:#C9D1DE; font-size:16px; line-height:1.75; margin:0 0 7px; }
   .card p:last-child{ margin-bottom:0; }
 
+  /* --- Bloques de ayuda colapsables (details/summary nativo) --- */
+  details.ayuda{ margin:0 0 16px; }
+  details.ayuda summary{
+    cursor:pointer; list-style:none; color:#3FC7E8; font-size:13.5px; font-weight:600;
+    display:flex; align-items:center; gap:6px; user-select:none; padding:2px 0;
+  }
+  details.ayuda summary::-webkit-details-marker{ display:none; }
+  details.ayuda summary::before{
+    content:"▸"; display:inline-block; font-size:11px; color:#3FC7E8;
+    transition:transform .15s; flex-shrink:0;
+  }
+  details.ayuda[open] summary::before{ transform:rotate(90deg); }
+  details.ayuda summary:hover{ color:#6BD8F0; }
+  details.ayuda .hint-contenido{ margin-top:10px; }
+  details.ayuda .hint-contenido p.hint{ margin:0 0 12px; }
+  details.ayuda .hint-contenido p.hint:last-child{ margin-bottom:0; }
+
   label{ display:block; font-size:14px; color:var(--muted); margin:0 0 7px; font-weight:500; }
   textarea, input[type=number], input[type=text]{
     width:100%; background:var(--surface-3); border:1px solid var(--border); color:var(--text);
@@ -3094,7 +3111,12 @@ ${estilosBase()}
       <div class="col">
         <div class="card card-destacada">
           <h2>1. Clave de API (OpenAI)</h2>
-          <p class="hint">Lo primero que hay que configurar: sin una clave válida el bot no puede generar respuestas. Se guarda en la base de datos y nunca se muestra completa aquí, solo sus últimos 4 caracteres. Escribe una nueva únicamente si quieres reemplazarla.</p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Lo primero que hay que configurar: sin una clave válida el bot no puede generar respuestas. Se guarda en la base de datos y nunca se muestra completa aquí, solo sus últimos 4 caracteres. Escribe una nueva únicamente si quieres reemplazarla.</p>
+            </div>
+          </details>
           <label for="openaiKey">Nueva clave</label>
           <div class="key-input-row">
             <input type="password" id="openaiKey" placeholder="sk-..." autocomplete="off">
@@ -3105,33 +3127,48 @@ ${estilosBase()}
 
         <div class="card card-destacada">
           <h2>🧱 Reglas generales (siempre activas)</h2>
-          <p class="hint">
-            Este texto se agrega <b>automáticamente antes</b> de cualquier prompt que use la IA — el general de abajo
-            y el de <b>cada una</b> de tus etapas — sin que tengas que repetirlo en cada una. Sirve para que el bot
-            nunca pierda de vista quién es, cuál es su objetivo, y qué NO debe hacer, incluso cuando está dentro de
-            una etapa con instrucciones muy acotadas (ej. una etapa que solo pregunta la edad no debería, aun así,
-            ponerse a dar rutinas de ejercicio o consejos técnicos si el lead pregunta algo fuera de tema).
-          </p>
-          <p class="hint">
-            Ejemplo: <i>"Eres el asistente de Roberto, entrenador fitness para hombres de 40-55 años. Tu único
-            objetivo en esta conversación es calificar al lead y agendar una llamada — nunca des rutinas de
-            ejercicio, planes de dieta detallados, ni consejos técnicos; si preguntan por eso, di que se ve en la
-            sesión con Roberto."</i>
-          </p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">
+                Este texto se agrega <b>automáticamente antes</b> de cualquier prompt que use la IA — el general de abajo
+                y el de <b>cada una</b> de tus etapas — sin que tengas que repetirlo en cada una. Sirve para que el bot
+                nunca pierda de vista quién es, cuál es su objetivo, y qué NO debe hacer, incluso cuando está dentro de
+                una etapa con instrucciones muy acotadas (ej. una etapa que solo pregunta la edad no debería, aun así,
+                ponerse a dar rutinas de ejercicio o consejos técnicos si el lead pregunta algo fuera de tema).
+              </p>
+              <p class="hint">
+                Ejemplo: <i>"Eres el asistente de Roberto, entrenador fitness para hombres de 40-55 años. Tu único
+                objetivo en esta conversación es calificar al lead y agendar una llamada — nunca des rutinas de
+                ejercicio, planes de dieta detallados, ni consejos técnicos; si preguntan por eso, di que se ve en la
+                sesión con Roberto."</i>
+              </p>
+            </div>
+          </details>
           <label for="contextoBase">Reglas generales</label>
           <textarea id="contextoBase" rows="5" placeholder="Ej: Eres el asistente de... Tu único objetivo es... Nunca hagas..."></textarea>
         </div>
 
         <div class="card">
           <h2>Mensaje del bot (general)</h2>
-          <p class="hint">Instrucciones que sigue la IA para responder a los clientes cuando <b>NO</b> están en ninguna etapa (ver "Etapas de la conversación" a la derecha). Sé específico: tono, qué información dar, qué evitar. También puedes usar <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> dentro de la respuesta para partirla en varios mensajes separados (burbujas distintas), esperando N segundos entre cada uno. También sirve para mandar un audio o foto pregrabada después de un texto, o para pasar al lead a una etapa con <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:clave]]</code> — por ejemplo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">Perfecto, cuéntame primero tu objetivo[[etapa:objetivo]]</code> manda ese mensaje y a partir de ahí el lead entra a la etapa "objetivo" (usará el prompt de esa etapa, no este).</p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Instrucciones que sigue la IA para responder a los clientes cuando <b>NO</b> están en ninguna etapa (ver "Etapas de la conversación" a la derecha). Sé específico: tono, qué información dar, qué evitar. También puedes usar <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> dentro de la respuesta para partirla en varios mensajes separados (burbujas distintas), esperando N segundos entre cada uno. También sirve para mandar un audio o foto pregrabada después de un texto, o para pasar al lead a una etapa con <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:clave]]</code> — por ejemplo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">Perfecto, cuéntame primero tu objetivo[[etapa:objetivo]]</code> manda ese mensaje y a partir de ahí el lead entra a la etapa "objetivo" (usará el prompt de esa etapa, no este).</p>
+            </div>
+          </details>
           <label for="prompt">Prompt del sistema (general)</label>
           <textarea id="prompt" rows="8" placeholder="Eres el asistente de..."></textarea>
         </div>
 
         <div class="card">
           <h2>Tiempos de respuesta</h2>
-          <p class="hint">Antes de contestar, el bot espera un rato aleatorio entre estos dos valores — así da tiempo a que el cliente termine de escribir varias líneas seguidas.</p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Antes de contestar, el bot espera un rato aleatorio entre estos dos valores — así da tiempo a que el cliente termine de escribir varias líneas seguidas.</p>
+            </div>
+          </details>
           <div class="row2">
             <div>
               <label for="minDelay">Espera mínima (segundos)</label>
@@ -3146,14 +3183,24 @@ ${estilosBase()}
 
         <div class="card">
           <h2>Memoria de conversación</h2>
-          <p class="hint">Cuántos mensajes recientes (tuyos y del cliente) recuerda el bot al responder. Más alto = más contexto, pero más costo por respuesta.</p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Cuántos mensajes recientes (tuyos y del cliente) recuerda el bot al responder. Más alto = más contexto, pero más costo por respuesta.</p>
+            </div>
+          </details>
           <label for="maxHistorial">Mensajes a recordar</label>
           <input type="number" id="maxHistorial" min="1">
         </div>
 
         <div class="card">
           <h2>Calificación automática de leads</h2>
-          <p class="hint">Define los criterios que debe cumplir un lead para calificar. Después de cada respuesta, la IA revisa la conversación y, en cuanto se cumplen TODOS, marca la conversación con la etiqueta ✅ Califica (puedes filtrarlos y exportarlos en Chats). El envío del enlace/formulario lo hace directamente tu prompt de arriba, no este bloque.</p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Define los criterios que debe cumplir un lead para calificar. Después de cada respuesta, la IA revisa la conversación y, en cuanto se cumplen TODOS, marca la conversación con la etiqueta ✅ Califica (puedes filtrarlos y exportarlos en Chats). El envío del enlace/formulario lo hace directamente tu prompt de arriba, no este bloque.</p>
+            </div>
+          </details>
 
           <label style="display:flex; align-items:center; gap:10px; cursor:pointer; margin-bottom:16px;">
             <input type="checkbox" id="calificacionActiva" style="width:18px; height:18px; accent-color:var(--green); cursor:pointer;">
@@ -3166,7 +3213,12 @@ ${estilosBase()}
 
         <div class="card">
           <h2>Audios y fotos pregrabados</h2>
-          <p class="hint">Sube audios y fotos, y ponles un nombre corto (sin espacios). Úsalos en cualquier <b>prompt</b> (general o de una etapa) o en los mensajes de <b>seguimientos</b> con los marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:nombre]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:nombre]]</code>. Le llegan al cliente como un mensaje de audio o imagen normal de Instagram. Si el mensaje tiene texto además del marcador, primero se envía el texto y luego el archivo — usa <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> entre ambos si quieres que pase N segundos de espera antes de mandar el archivo.</p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Sube audios y fotos, y ponles un nombre corto (sin espacios). Úsalos en cualquier <b>prompt</b> (general o de una etapa) o en los mensajes de <b>seguimientos</b> con los marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:nombre]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:nombre]]</code>. Le llegan al cliente como un mensaje de audio o imagen normal de Instagram. Si el mensaje tiene texto además del marcador, primero se envía el texto y luego el archivo — usa <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> entre ambos si quieres que pase N segundos de espera antes de mandar el archivo.</p>
+            </div>
+          </details>
 
           <p style="font-family:var(--display); font-weight:600; font-size:14.5px; margin:18px 0 10px;">🎤 Audios</p>
           <div id="listaAudios" style="margin-bottom:14px;"></div>
@@ -3203,14 +3255,24 @@ ${estilosBase()}
 
         <div class="card card-destacada">
           <h2>🎯 Disparadores automáticos generales (envío garantizado)</h2>
-          <p class="hint">La IA no siempre es consistente decidiendo cuándo incluir un <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en su respuesta — a veces sí, a veces no. Acá puedes configurar palabras o frases que, en cuanto aparezcan en el mensaje del cliente, manden algo <b>SIEMPRE, por código, sin depender de la IA</b>. Puedes elegir mandar un solo audio, una sola foto, o el tipo <b>📝 Mensaje</b> para combinar texto + fotos + audios + pausas en una sola secuencia (con los mismos marcadores de siempre). Si la IA ya lo mandó ella misma en esa misma respuesta (solo aplica a audio/foto simples), no se duplica.<br><br><b>Estos disparadores son el respaldo general:</b> si el lead está en una etapa que tiene sus propios disparadores (ver "Etapas de la conversación"), primero se revisan los de esa etapa; solo si NINGUNO de esos coincide con lo que escribió el cliente, se cae a revisar esta lista de aquí.</p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">La IA no siempre es consistente decidiendo cuándo incluir un <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> o <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> en su respuesta — a veces sí, a veces no. Acá puedes configurar palabras o frases que, en cuanto aparezcan en el mensaje del cliente, manden algo <b>SIEMPRE, por código, sin depender de la IA</b>. Puedes elegir mandar un solo audio, una sola foto, o el tipo <b>📝 Mensaje</b> para combinar texto + fotos + audios + pausas en una sola secuencia (con los mismos marcadores de siempre). Si la IA ya lo mandó ella misma en esa misma respuesta (solo aplica a audio/foto simples), no se duplica.<br><br><b>Estos disparadores son el respaldo general:</b> si el lead está en una etapa que tiene sus propios disparadores (ver "Etapas de la conversación"), primero se revisan los de esa etapa; solo si NINGUNO de esos coincide con lo que escribió el cliente, se cae a revisar esta lista de aquí.</p>
+            </div>
+          </details>
           <div id="listaDisparadores"></div>
           <button class="add-paso" id="addDisparador" type="button">+ Agregar disparador general</button>
         </div>
 
         <div class="card">
           <h2>Enlace de calificación (calendario / formulario)</h2>
-          <p class="hint">Pega aquí el enlace exacto que tu prompt manda cuando un lead ya calificó (por ejemplo tu link de Calendly o de un formulario). El sistema NO lo envía — solo lo usa para detectar cuándo tu bot ya se lo mandó al cliente. En cuanto lo detecta en una respuesta, le pone la etiqueta 🔗 <b>para siempre</b> (no se quita nunca) y activa el seguimiento especial de abajo. Ese seguimiento especial <b>se mantiene activo aunque el lead responda algo en el medio</b> (ej. "gracias") — solo se pasa al seguimiento normal una vez que ya se mandaron TODOS los pasos configurados abajo.</p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Pega aquí el enlace exacto que tu prompt manda cuando un lead ya calificó (por ejemplo tu link de Calendly o de un formulario). El sistema NO lo envía — solo lo usa para detectar cuándo tu bot ya se lo mandó al cliente. En cuanto lo detecta en una respuesta, le pone la etiqueta 🔗 <b>para siempre</b> (no se quita nunca) y activa el seguimiento especial de abajo. Ese seguimiento especial <b>se mantiene activo aunque el lead responda algo en el medio</b> (ej. "gracias") — solo se pasa al seguimiento normal una vez que ya se mandaron TODOS los pasos configurados abajo.</p>
+            </div>
+          </details>
           <label for="enlaceCalificacion">Enlace a detectar</label>
           <input type="text" id="enlaceCalificacion" placeholder="https://calendly.com/tu-usuario/...">
           <span class="enlace-tag">Debe coincidir tal cual aparece en el mensaje que manda el bot</span>
@@ -3220,14 +3282,24 @@ ${estilosBase()}
           <div style="height:1px; background:var(--border); margin:24px 0;"></div>
 
           <h2 style="margin-bottom:5px;">Seguimiento especial a ese enlace</h2>
-          <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de arriba. Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en estos mensajes.</p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de arriba. Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en estos mensajes.</p>
+            </div>
+          </details>
           <div id="pasosEnlace"></div>
           <button class="add-paso" id="addPasoEnlace" type="button">+ Agregar paso de seguimiento al enlace</button>
         </div>
 
         <div class="card">
           <h2>Seguimientos automáticos</h2>
-          <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en cualquiera de estos mensajes.</p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en cualquiera de estos mensajes.</p>
+            </div>
+          </details>
           <div id="pasos"></div>
           <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
         </div>
@@ -3236,42 +3308,47 @@ ${estilosBase()}
       <div class="col">
         <div class="card card-etapas">
           <h2>🧭 Etapas de la conversación</h2>
-          <p class="hint">
-            Cada lead puede estar en una <b>etapa</b> (o en ninguna, y entonces usa el prompt general de la izquierda).
-            Sirve para que preguntas de "sí/no" no se crucen entre distintos momentos de la conversación: si en la
-            etapa "precio" un "sí" debe hacer una cosa y en la etapa "agendar" otro "sí" debe hacer algo distinto,
-            cada etapa solo conoce SU propio prompt — la IA no ve las demás preguntas sí/no al mismo tiempo.
-          </p>
-          <p class="hint">
-            Hay <b>tres formas</b> de mover a un lead de etapa (las configuras dentro de cada transición):<br><br>
-            <b>1) Palabra exacta:</b> el mensaje del cliente debe ser ESA palabra/frase y nada más — ideal para un CTA
-            de video tipo "mándame la palabra DIETA", donde no quieres que dispare si solo menciona "dieta" hablando
-            de otra cosa.<br><br>
-            <b>2) Contiene la frase:</b> dispara aunque la palabra esté en medio de una oración más larga.<br><br>
-            <b>3) Según una condición (la evalúa la IA):</b> para cosas que no son una palabra fija, como "el cliente
-            dijo que tiene 40 años o más" o "ya mencionó cuál es su objetivo". La IA revisa el mensaje y el contexto
-            reciente y decide si se cumple — solo se usa cuando ninguna transición por palabra coincidió primero, así
-            que no le agrega costo a las etapas que no la necesitan. Como es una evaluación de IA, no acierta el 100%
-            de las veces — si notas que a veces no pasa de etapa cuando debería, revisa los logs de Render: cada
-            evaluación deja un registro tipo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">🔍 Condición #0 (...) -&gt; ¿cumplida?: no</code>
-            que te dice exactamente qué decidió. Para que acierte más seguido, sé lo más específico posible en el
-            texto de la condición (ej. "el cliente confirmó explícitamente que sí quiere agendar una llamada" en vez
-            de solo "quiere agendar"), y evita condiciones ambiguas o que dependan de inferencias muy sutiles.<br><br>
-            También existe el marcador <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:clave]]</code>
-            dentro del prompt, como método manual/adicional — pero como depende de que la IA decida ponerlo, puede
-            fallar; las tres formas de arriba son las confiables. También puedes cambiar la etapa de un lead a mano
-            desde <a href="/chats">Chats</a>.
-          </p>
-          <p class="hint">
-            Toma el ícono ⠿ de cada tarjeta y arrástrala arriba o abajo para reordenar tus etapas (por ejemplo,
-            para meter una etapa nueva antes de la primera) sin tener que borrar y volver a crear nada.
-          </p>
-          <p class="hint">
-            <b>🚪 Etapa de entrada:</b> marca esta casilla dentro de una etapa para que TODOS los leads nuevos
-            entren directo ahí (con su mensaje fijo, si le pusiste uno) sin necesidad de ninguna palabra clave —
-            ideal cuando ya sabes por qué CTA o campaña llegan. Desmárcala cuando quieras que los leads nuevos
-            vuelvan a empezar por el prompt general de la izquierda. Solo puede haber una etapa de entrada a la vez.
-          </p>
+          <details class="ayuda">
+            <summary>¿Cómo funcionan las etapas?</summary>
+            <div class="hint-contenido">
+              <p class="hint">
+                Cada lead puede estar en una <b>etapa</b> (o en ninguna, y entonces usa el prompt general de la izquierda).
+                Sirve para que preguntas de "sí/no" no se crucen entre distintos momentos de la conversación: si en la
+                etapa "precio" un "sí" debe hacer una cosa y en la etapa "agendar" otro "sí" debe hacer algo distinto,
+                cada etapa solo conoce SU propio prompt — la IA no ve las demás preguntas sí/no al mismo tiempo.
+              </p>
+              <p class="hint">
+                Hay <b>tres formas</b> de mover a un lead de etapa (las configuras dentro de cada transición):<br><br>
+                <b>1) Palabra exacta:</b> el mensaje del cliente debe ser ESA palabra/frase y nada más — ideal para un CTA
+                de video tipo "mándame la palabra DIETA", donde no quieres que dispare si solo menciona "dieta" hablando
+                de otra cosa.<br><br>
+                <b>2) Contiene la frase:</b> dispara aunque la palabra esté en medio de una oración más larga.<br><br>
+                <b>3) Según una condición (la evalúa la IA):</b> para cosas que no son una palabra fija, como "el cliente
+                dijo que tiene 40 años o más" o "ya mencionó cuál es su objetivo". La IA revisa el mensaje y el contexto
+                reciente y decide si se cumple — solo se usa cuando ninguna transición por palabra coincidió primero, así
+                que no le agrega costo a las etapas que no la necesitan. Como es una evaluación de IA, no acierta el 100%
+                de las veces — si notas que a veces no pasa de etapa cuando debería, revisa los logs de Render: cada
+                evaluación deja un registro tipo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">🔍 Condición #0 (...) -&gt; ¿cumplida?: no</code>
+                que te dice exactamente qué decidió. Para que acierte más seguido, sé lo más específico posible en el
+                texto de la condición (ej. "el cliente confirmó explícitamente que sí quiere agendar una llamada" en vez
+                de solo "quiere agendar"), y evita condiciones ambiguas o que dependan de inferencias muy sutiles.<br><br>
+                También existe el marcador <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:clave]]</code>
+                dentro del prompt, como método manual/adicional — pero como depende de que la IA decida ponerlo, puede
+                fallar; las tres formas de arriba son las confiables. También puedes cambiar la etapa de un lead a mano
+                desde <a href="/chats">Chats</a>.
+              </p>
+              <p class="hint">
+                Toma el ícono ⠿ de cada tarjeta y arrástrala arriba o abajo para reordenar tus etapas (por ejemplo,
+                para meter una etapa nueva antes de la primera) sin tener que borrar y volver a crear nada.
+              </p>
+              <p class="hint">
+                <b>🚪 Etapa de entrada:</b> marca esta casilla dentro de una etapa para que TODOS los leads nuevos
+                entren directo ahí (con su mensaje fijo, si le pusiste uno) sin necesidad de ninguna palabra clave —
+                ideal cuando ya sabes por qué CTA o campaña llegan. Desmárcala cuando quieras que los leads nuevos
+                vuelvan a empezar por el prompt general de la izquierda. Solo puede haber una etapa de entrada a la vez.
+              </p>
+            </div>
+          </details>
 
           <div class="etapa-subseccion" style="border-top:none; margin-top:0; padding-top:0;">
             <p class="etapa-subseccion-titulo">🔀 Transiciones generales (para ENTRAR a una etapa, cuando el lead todavía no tiene ninguna)</p>
@@ -3702,35 +3779,50 @@ ${estilosBase()}
 
         <div class="etapa-subseccion">
           <p class="etapa-subseccion-titulo">📌 Mensaje(s) fijo(s) al ENTRAR a esta etapa (opcional)</p>
-          <p class="hint" style="margin:0 0 10px;">
-            Si lo llenas, en cuanto un lead entre a esta etapa (por palabra clave o por condición) se manda este
-            texto TAL CUAL, carácter por carácter — sin pasar por la IA en absoluto. Útil cuando necesitas un
-            control total del texto exacto (incluso con errores intencionales) o mandar un audio/foto justo al
-            entrar. Acepta los mismos marcadores de siempre:
-            <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:clave]]</code>,
-            <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:clave]]</code>,
-            <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code>.
-            Si lo dejas vacío, la etapa responde normal con su prompt de arriba (y con la IA). Tiene prioridad sobre
-            la opción "no responder nada" de la transición que trajo al lead aquí.
-          </p>
-          <p class="hint" style="margin:0 0 10px;">
-            <b>Un mensaje por línea.</b> Si pones varios (ej. 10 casos de éxito distintos), cada vez que un lead
-            entre a esta etapa se manda uno diferente, rotando en orden — así no se repite siempre el mismo. Si
-            solo pones uno, se manda siempre ese.
-          </p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">
+                Si lo llenas, en cuanto un lead entre a esta etapa (por palabra clave o por condición) se manda este
+                texto TAL CUAL, carácter por carácter — sin pasar por la IA en absoluto. Útil cuando necesitas un
+                control total del texto exacto (incluso con errores intencionales) o mandar un audio/foto justo al
+                entrar. Acepta los mismos marcadores de siempre:
+                <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:clave]]</code>,
+                <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:clave]]</code>,
+                <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code>.
+                Si lo dejas vacío, la etapa responde normal con su prompt de arriba (y con la IA). Tiene prioridad sobre
+                la opción "no responder nada" de la transición que trajo al lead aquí.
+              </p>
+              <p class="hint">
+                <b>Un mensaje por línea.</b> Si pones varios (ej. 10 casos de éxito distintos), cada vez que un lead
+                entre a esta etapa se manda uno diferente, rotando en orden — así no se repite siempre el mismo. Si
+                solo pones uno, se manda siempre ese.
+              </p>
+            </div>
+          </details>
           <textarea class="etapa-mensaje-fijo" data-i="\${i}" rows="4" placeholder="Ej: La salud es un tema importante, hay que solucionarlo cuanto antes[[audio:salud]]¿Te hace sentido esto?&#10;María bajó 15kg en 3 meses[[foto:caso1]]¿Te gustaría lograr algo similar?">\${(et.mensajes_fijos || []).join("\\n").replace(/</g,"&lt;")}</textarea>
         </div>
 
         <div class="etapa-subseccion">
           <p class="etapa-subseccion-titulo">🎯 Disparadores propios de esta etapa (opcional)</p>
-          <p class="hint" style="margin:0 0 10px;">Si una palabra coincide aquí, se activa este disparador (audio, foto, o un <b>📝 Mensaje</b> combinando texto + fotos + audios + pausas) y NO se revisan los disparadores generales. Si el mensaje del cliente no coincide con ninguno de aquí, se cae a los disparadores generales de la izquierda.</p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Si una palabra coincide aquí, se activa este disparador (audio, foto, o un <b>📝 Mensaje</b> combinando texto + fotos + audios + pausas) y NO se revisan los disparadores generales. Si el mensaje del cliente no coincide con ninguno de aquí, se cae a los disparadores generales de la izquierda.</p>
+            </div>
+          </details>
           <div class="etapa-disparadores" data-i="\${i}"></div>
           <button type="button" class="add-paso etapa-add-disparador" data-i="\${i}">+ Agregar disparador de esta etapa</button>
         </div>
 
         <div class="etapa-subseccion">
           <p class="etapa-subseccion-titulo">🔀 Transiciones automáticas de SALIDA de esta etapa (por palabra clave, garantizado)</p>
-          <p class="hint" style="margin:0 0 10px;">Mientras el lead esté en ESTA etapa, si escribe alguna de estas frases, se mueve GARANTIZADO a la etapa que elijas (o vuelve al prompt general) — sin depender de que la IA ponga el marcador [[etapa:...]].</p>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Mientras el lead esté en ESTA etapa, si escribe alguna de estas frases, se mueve GARANTIZADO a la etapa que elijas (o vuelve al prompt general) — sin depender de que la IA ponga el marcador [[etapa:...]].</p>
+            </div>
+          </details>
           <div class="etapa-transiciones" data-i="\${i}"></div>
           <button type="button" class="add-paso etapa-add-transicion" data-i="\${i}">+ Agregar transición de esta etapa</button>
         </div>
