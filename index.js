@@ -1100,7 +1100,10 @@ async function evaluarTransicionesPorCondicion(mensajeUsuario, historial, transi
   if (!transicionesCondicion || transicionesCondicion.length === 0) return null;
 
   try {
-    const contexto = sanitizarHistorialParaIA(historial).slice(-6)
+    // Se manda más contexto (hasta 12 mensajes, no solo 6) porque la
+    // respuesta que confirma una condición (ej. la edad) a veces quedó
+    // varios turnos atrás, no necesariamente en el último intercambio.
+    const contexto = sanitizarHistorialParaIA(historial).slice(-12)
       .map(m => `${m.role === "user" ? "Cliente" : "Asistente"}: ${m.content}`)
       .join("\n");
 
@@ -1118,8 +1121,9 @@ async function evaluarTransicionesPorCondicion(mensajeUsuario, historial, transi
             "Eres un evaluador que decide si el ÚLTIMO mensaje del cliente (dado el contexto reciente de la " +
             "conversación) cumple alguna de las siguientes condiciones. Evalúa cada condición de forma " +
             "independiente, basándote en lo que el cliente ha dicho de forma explícita o razonablemente " +
-            "implícita. Si no hay información suficiente para confirmar una condición, considérala NO cumplida. " +
-            "Responde ÚNICAMENTE un JSON con este formato exacto, sin texto adicional: " +
+            "implícita, considerando TODO el contexto (la respuesta puede estar en un mensaje anterior, no " +
+            "solo en el último). Si no hay información suficiente para confirmar una condición, considérala " +
+            "NO cumplida. Responde ÚNICAMENTE un JSON con este formato exacto, sin texto adicional: " +
             '{"cumple": [true o false, ...]} con un valor por cada condición, EN EL MISMO ORDEN en que se listan.\n\n' +
             "Condiciones:\n" + listaCondiciones
         },
@@ -1131,9 +1135,17 @@ async function evaluarTransicionesPorCondicion(mensajeUsuario, historial, transi
     const parsed = JSON.parse(texto);
     const resultados = Array.isArray(parsed.cumple) ? parsed.cumple : [];
 
+    // Log de diagnóstico SIEMPRE (no solo cuando hay match) — así en los
+    // logs de Render se puede ver exactamente qué decidió la IA para cada
+    // condición configurada, incluso cuando decide que ninguna se cumple.
+    transicionesCondicion.forEach((t, i) => {
+      console.log(`🔍 Condición #${i} ("${t.condicion}") -> ¿cumplida?: ${resultados[i] === true ? "SÍ" : "no"}`);
+    });
+
     for (let i = 0; i < transicionesCondicion.length; i++) {
       if (resultados[i] === true) return transicionesCondicion[i];
     }
+    console.log(`🔍 Ninguna condición se cumplió — se sigue en la misma etapa, responde el prompt normal.`);
     return null;
   } catch (err) {
     console.error("⚠️ Error evaluando transición por condición:", err.response?.data || err.message);
@@ -3198,7 +3210,12 @@ ${estilosBase()}
             <b>3) Según una condición (la evalúa la IA):</b> para cosas que no son una palabra fija, como "el cliente
             dijo que tiene 40 años o más" o "ya mencionó cuál es su objetivo". La IA revisa el mensaje y el contexto
             reciente y decide si se cumple — solo se usa cuando ninguna transición por palabra coincidió primero, así
-            que no le agrega costo a las etapas que no la necesitan.<br><br>
+            que no le agrega costo a las etapas que no la necesitan. Como es una evaluación de IA, no acierta el 100%
+            de las veces — si notas que a veces no pasa de etapa cuando debería, revisa los logs de Render: cada
+            evaluación deja un registro tipo <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">🔍 Condición #0 (...) -&gt; ¿cumplida?: no</code>
+            que te dice exactamente qué decidió. Para que acierte más seguido, sé lo más específico posible en el
+            texto de la condición (ej. "el cliente confirmó explícitamente que sí quiere agendar una llamada" en vez
+            de solo "quiere agendar"), y evita condiciones ambiguas o que dependan de inferencias muy sutiles.<br><br>
             También existe el marcador <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[etapa:clave]]</code>
             dentro del prompt, como método manual/adicional — pero como depende de que la IA decida ponerlo, puede
             fallar; las tres formas de arriba son las confiables. También puedes cambiar la etapa de un lead a mano
