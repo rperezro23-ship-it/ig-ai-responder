@@ -1273,36 +1273,71 @@ async function evaluarTransicionesPorCondicion(mensajeUsuario, historial, transi
 // "califica" la primera vez que se cumplen. Es una llamada aparte,
 // barata y sin afectar el mensaje que recibe el cliente.
 // ---------------------------------------------------------------
+// Evalúa la calificación de un lead criterio por criterio (cada línea del
+// campo "Criterios de calificación" es un criterio independiente), en vez de
+// pedirle a la IA un solo true/false global. Esto tiene dos ventajas:
+//   1) Se puede aplicar una regla ANTI-INFERENCIA explícita y estricta: un
+//      criterio solo cuenta como cumplido si el cliente lo confirmó
+//      directamente, nunca por suposición o porque "no dijo lo contrario"
+//      (ej. no asumir que puede pagar $100 solo porque no ha preguntado el
+//      precio todavía — si nunca se le preguntó, ese criterio sigue sin
+//      cumplirse, así de simple).
+//   2) Deja un registro en los logs de CUÁL criterio en particular está
+//      fallando, en vez de un solo veredicto sin desglose.
 async function evaluarCalificacion(historial, criterios) {
   try {
     const transcripcion = sanitizarHistorialParaIA(historial)
       .map(m => `${m.role === "user" ? "Cliente" : "Asistente"}: ${m.content}`)
       .join("\n");
 
+    const listaCriterios = (criterios || "").split("\n").map(c => c.trim()).filter(Boolean);
+    if (listaCriterios.length === 0) return { califica: false, razon: "" };
+
+    const criteriosNumerados = listaCriterios.map((c, idx) => `${idx}. ${c}`).join("\n");
+
     const resp = await openaiClient.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
-      max_tokens: 200,
+      max_tokens: 350,
       response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content:
-            "Eres un evaluador de leads para un negocio. Te doy una lista de criterios de " +
-            "calificación y el historial de una conversación de Instagram. Debes decidir si la " +
-            "persona cumple TODOS los criterios, según lo que ha quedado claro en la conversación " +
-            "(de forma explícita o razonablemente implícita). Si falta información para confirmar " +
-            "algún criterio, todavía NO califica. Responde ÚNICAMENTE un JSON con este formato " +
-            'exacto, sin texto adicional: {"califica": true o false, "razon": "explicación breve en español"}.\n\n' +
-            "Criterios de calificación:\n" + criterios
+            "Eres un evaluador de leads para un negocio. Te doy una lista de criterios de calificación " +
+            "y el historial COMPLETO de una conversación de Instagram. Debes decidir, criterio por " +
+            "criterio, si el cliente lo cumple.\n\n" +
+            "REGLA MÁS IMPORTANTE (anti-inferencia): un criterio SOLO se considera cumplido si el " +
+            "CLIENTE lo confirmó de forma explícita, con sus propias palabras, típicamente en respuesta " +
+            "a una pregunta relacionada con ese tema específico. NUNCA marques un criterio como cumplido " +
+            "por suposición, optimismo, o porque \"probablemente aplica\" — la ausencia de objeción NO es " +
+            "una confirmación. En particular: si el tema de un criterio (ej. presupuesto, precio, una " +
+            "condición específica) todavía NO SE HA PREGUNTADO ni mencionado en la conversación, ese " +
+            "criterio es FALSE — nunca asumas que se cumple solo porque el cliente no ha dicho nada en " +
+            "contra o no ha objetado el tema. Si tienes cualquier duda razonable sobre si un criterio " +
+            "ya quedó confirmado, respóndelo como FALSE.\n\n" +
+            "Responde ÚNICAMENTE un JSON con este formato exacto, sin texto adicional: " +
+            '{"cumple": [true o false, ...], "razon": "explicación breve en español de cuáles se cumplen y cuáles no"} ' +
+            "con un valor en \"cumple\" por cada criterio, EN EL MISMO ORDEN en que se listan.\n\n" +
+            "Criterios:\n" + criteriosNumerados
         },
-        { role: "user", content: "Historial de la conversación:\n\n" + transcripcion }
+        { role: "user", content: "Historial completo de la conversación:\n\n" + transcripcion }
       ]
     });
 
     const texto = resp.choices[0]?.message?.content?.trim();
     const parsed = JSON.parse(texto);
-    return { califica: Boolean(parsed.califica), razon: parsed.razon || "" };
+    const resultados = Array.isArray(parsed.cumple) ? parsed.cumple : [];
+
+    // Log de diagnóstico por criterio — para poder ver en Render exactamente
+    // cuál criterio en particular está bloqueando (o dejando pasar) a un lead.
+    listaCriterios.forEach((c, i) => {
+      console.log(`🔍 Criterio de calificación #${i} ("${c}") -> ¿cumplido?: ${resultados[i] === true ? "SÍ" : "no"}`);
+    });
+
+    const todosCumplidos = resultados.length === listaCriterios.length && resultados.every(r => r === true);
+
+    return { califica: todosCumplidos, razon: parsed.razon || "" };
   } catch (err) {
     console.error("⚠️ Error evaluando calificación de lead:", err.response?.data || err.message);
     return null;
