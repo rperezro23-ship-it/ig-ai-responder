@@ -1401,14 +1401,28 @@ async function analizarDoloresYObstaculos(transcripcion) {
     const texto = resp.choices[0]?.message?.content?.trim();
     const parsed = JSON.parse(texto);
     return {
-      dolor_salud: typeof parsed.dolor_salud === "string" ? parsed.dolor_salud : null,
-      dolor_estetico: typeof parsed.dolor_estetico === "string" ? parsed.dolor_estetico : null,
-      obstaculo: typeof parsed.obstaculo === "string" ? parsed.obstaculo : null
+      dolor_salud: limpiarEtiquetaIA(parsed.dolor_salud),
+      dolor_estetico: limpiarEtiquetaIA(parsed.dolor_estetico),
+      obstaculo: limpiarEtiquetaIA(parsed.obstaculo)
     };
   } catch (err) {
     console.error("⚠️ Error analizando dolores/obstáculos de una conversación:", err.response?.data || err.message);
     return { dolor_salud: null, dolor_estetico: null, obstaculo: null };
   }
+}
+
+// A veces la IA responde con el TEXTO literal "null" (o "n/a", "ninguno")
+// en vez del valor vacío real de JSON — sin este filtro, esa palabra se
+// cuela como si fuera una categoría más en el reporte de dolores/obstáculos.
+function limpiarEtiquetaIA(valor) {
+  if (typeof valor !== "string") return null;
+  const limpio = valor.trim();
+  if (!limpio) return null;
+  const normalizado = limpio.toLowerCase();
+  if (["null", "none", "n/a", "ninguno", "ninguna", "no aplica", "no menciona", "no especifica"].includes(normalizado)) {
+    return null;
+  }
+  return limpio;
 }
 
 // El historial que se guarda en Supabase incluye, para los audios y fotos ya
@@ -5853,19 +5867,23 @@ app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) =>
       return conteos;
     }
 
-    const filas = [];
-    function agregarFilas(tipo, conteos) {
+    // Cada tipo (salud, estético, obstáculo) se ordena de mayor a menor
+    // frecuencia y se arma como su propia lista de filas [categoria, cantidad,
+    // porcentaje] — así en el CSV quedan como bloques de columnas separados
+    // uno al lado del otro, en vez de una sola lista larga mezclada por tipo
+    // (mucho más fácil de leer en Excel).
+    function filasDeCategoria(conteos) {
       const entradas = Object.entries(conteos).sort((a, b) => b[1] - a[1]);
-      for (const [categoria, cantidad] of entradas) {
+      return entradas.map(([categoria, cantidad]) => {
         const porcentaje = totalAnalizados > 0 ? ((cantidad / totalAnalizados) * 100).toFixed(1) + "%" : "0.0%";
-        filas.push({ tipo, categoria, cantidad, porcentaje });
-      }
+        return [categoria, cantidad, porcentaje];
+      });
     }
-    agregarFilas("salud", contarCategorias("dolor_salud"));
-    agregarFilas("estetico", contarCategorias("dolor_estetico"));
-    agregarFilas("obstaculo", contarCategorias("obstaculo"));
 
-    const encabezados = ["tipo", "categoria", "cantidad", "porcentaje"];
+    const filasSalud = filasDeCategoria(contarCategorias("dolor_salud"));
+    const filasEstetico = filasDeCategoria(contarCategorias("dolor_estetico"));
+    const filasObstaculo = filasDeCategoria(contarCategorias("obstaculo"));
+
     const escaparCSV = (valor) => {
       const txt = String(valor ?? "");
       return /[",\n]/.test(txt) ? '"' + txt.replace(/"/g, '""') + '"' : txt;
@@ -5875,12 +5893,29 @@ app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) =>
       : filtro === "enlace" ? "Solo leads con enlace de calendario enviado"
       : "Todos los leads";
 
+    // Encabezado de 3 bloques de 3 columnas (Categoria, Cantidad, %), con una
+    // columna en blanco de separación entre bloques.
+    const encabezadoBloques = [
+      "Dolor de salud", "Cantidad", "Porcentaje", "",
+      "Motivo estético", "Cantidad", "Porcentaje", "",
+      "Obstáculo", "Cantidad", "Porcentaje"
+    ];
+
+    const totalFilas = Math.max(filasSalud.length, filasEstetico.length, filasObstaculo.length);
+    const filasCombinadas = [];
+    for (let i = 0; i < totalFilas; i++) {
+      const salud = filasSalud[i] || ["", "", ""];
+      const estetico = filasEstetico[i] || ["", "", ""];
+      const obstaculo = filasObstaculo[i] || ["", "", ""];
+      filasCombinadas.push([...salud, "", ...estetico, "", ...obstaculo]);
+    }
+
     const lineas = [
       `Segmento analizado:,${nombreSegmento}`,
       `Total de conversaciones analizadas:,${totalAnalizados}`,
       "",
-      encabezados.join(","),
-      ...filas.map((f) => encabezados.map((h) => escaparCSV(f[h])).join(","))
+      encabezadoBloques.map(escaparCSV).join(","),
+      ...filasCombinadas.map((fila) => fila.map(escaparCSV).join(","))
     ];
 
     const csv = "\uFEFF" + lineas.join("\r\n");
