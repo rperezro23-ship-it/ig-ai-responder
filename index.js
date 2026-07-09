@@ -4695,18 +4695,18 @@ ${estilosBase()}
     display:flex; align-items:center; gap:6px; font-family:var(--mono); font-size:11px;
     color:var(--muted-dim); letter-spacing:.03em;
   }
-  .chat-tabs{ display:flex; gap:8px; padding:12px 14px; border-bottom:1px solid var(--border); flex-shrink:0; flex-wrap:wrap; }
+  .chat-tabs{ display:flex; gap:5px; padding:8px 10px; border-bottom:1px solid var(--border); flex-shrink:0; }
   .chat-tab{
-    flex:1; text-align:center; padding:9px 8px; border-radius:9px; font-size:13px;
+    flex:1; text-align:center; padding:6px 4px; border-radius:7px; font-size:12px;
     font-weight:600; cursor:pointer; color:var(--muted); background:var(--surface-3);
-    border:1px solid transparent; transition:background .12s, color .12s; min-width:70px;
+    border:1px solid transparent; transition:background .12s, color .12s;
   }
   .chat-tab:hover{ color:var(--text); }
   .chat-tab.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.3); }
   .chat-tab.tab-handoff.active{ background:var(--red-soft); color:var(--red); border-color:rgba(255,93,93,.3); }
   .chat-tab.tab-califica.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.4); }
   .chat-tab.tab-enlace.active{ background:rgba(63,199,232,.14); color:#3FC7E8; border-color:rgba(63,199,232,.4); }
-  .chat-tab .count{ font-family:var(--mono); font-size:11.5px; opacity:.85; margin-left:4px; }
+  .chat-tab .count{ font-family:var(--mono); font-size:10.5px; opacity:.85; margin-left:2px; }
   .califica-badge{
     font-size:11px; margin-left:7px; flex-shrink:0;
   }
@@ -4746,27 +4746,24 @@ ${estilosBase()}
     background:var(--surface-3); border:1px solid rgba(201,155,255,.35); color:var(--text);
     border-radius:8px; padding:6px 10px; font-size:13px; font-family:var(--body);
   }
-  .chat-export{ padding:10px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
-  .btn-exportar{
-    display:block; text-align:center; background:var(--surface-3); color:var(--text);
-    border:1px solid var(--border); border-radius:9px; padding:10px 10px; font-size:13px;
-    font-weight:600; text-decoration:none; transition:background .12s, border-color .12s, color .12s;
+  /* --- Barra compacta: segmento del resumen + botón resumen + exportar CSV --- */
+  .chat-toolbar{
+    display:flex; align-items:center; gap:6px; padding:8px 10px;
+    border-bottom:1px solid var(--border); flex-shrink:0; flex-wrap:wrap;
   }
-  .btn-exportar:hover{ background:var(--surface-2); border-color:var(--red); color:var(--red); }
-  .chat-reporte{ padding:12px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
-  .chat-reporte-label{ display:block; font-size:12px; color:var(--muted); margin:0 0 6px; font-weight:500; }
-  .chat-reporte-select{
-    width:100%; background:var(--surface-3); border:1px solid var(--border); color:var(--text);
-    border-radius:8px; padding:8px 10px; font-size:13px; font-family:var(--body); margin-bottom:8px;
+  .select-mini{
+    flex:1; min-width:64px; background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:7px; padding:6px 6px; font-size:11.5px; font-family:var(--body);
   }
-  .btn-reporte-dolores{
-    width:100%; background:rgba(63,199,232,.1); color:#3FC7E8; border:1px solid rgba(63,199,232,.3);
-    border-radius:9px; padding:10px 10px; font-size:13px; font-weight:600; cursor:pointer;
-    transition:background .12s, border-color .12s;
+  .btn-mini{
+    display:inline-flex; align-items:center; justify-content:center; white-space:nowrap;
+    background:rgba(63,199,232,.1); color:#3FC7E8; border:1px solid rgba(63,199,232,.3);
+    border-radius:7px; padding:6px 9px; font-size:11.5px; font-weight:600; cursor:pointer;
+    text-decoration:none; transition:background .12s, border-color .12s; flex-shrink:0;
   }
-  .btn-reporte-dolores:hover:not(:disabled){ background:rgba(63,199,232,.18); }
-  .btn-reporte-dolores:disabled{ opacity:.6; cursor:default; }
-  .chat-reporte-hint{ font-size:11.5px; color:var(--muted-dim); line-height:1.5; margin:8px 0 0; }
+  .btn-mini:hover:not(:disabled){ background:rgba(63,199,232,.18); }
+  .btn-mini:disabled{ opacity:.6; cursor:default; }
+  .chat-export{ flex-shrink:0; }
   .chat-input-bar{
     display:none; gap:10px; padding:14px 18px; border-top:1px solid var(--border);
     align-items:flex-end; flex-shrink:0;
@@ -4897,23 +4894,21 @@ ${estilosBase()}
           <span class="live-tag"><span class="status-dot"></span>en vivo</span>
         </div>
         <div class="chat-tabs">
-          <div class="chat-tab active" id="tabTodas" data-filtro="todas">Todas <span class="count" id="countTodas"></span></div>
-          <div class="chat-tab tab-califica" id="tabCalifica" data-filtro="califica">✅ Califica <span class="count" id="countCalifica"></span></div>
-          <div class="chat-tab tab-enlace" id="tabEnlace" data-filtro="enlace">🔗 Enlace enviado <span class="count" id="countEnlace"></span></div>
-          <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff">Handoff (+24h) <span class="count" id="countHandoff"></span></div>
+          <div class="chat-tab active" id="tabTodas" data-filtro="todas" title="Todas">Todas <span class="count" id="countTodas"></span></div>
+          <div class="chat-tab tab-califica" id="tabCalifica" data-filtro="califica" title="Califica">✅ <span class="count" id="countCalifica"></span></div>
+          <div class="chat-tab tab-enlace" id="tabEnlace" data-filtro="enlace" title="Enlace enviado">🔗 <span class="count" id="countEnlace"></span></div>
+          <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff" title="Handoff (+24h)">⏰ <span class="count" id="countHandoff"></span></div>
         </div>
-        <div class="chat-reporte">
-          <label for="segmentoReporteDolores" class="chat-reporte-label">Analizar:</label>
-          <select id="segmentoReporteDolores" class="chat-reporte-select">
-            <option value="todos">Todos los leads</option>
-            <option value="califica">✅ Solo los que califican</option>
-            <option value="enlace">🔗 Solo los que agendaron (enlace enviado)</option>
+        <div class="chat-toolbar">
+          <select id="segmentoReporteDolores" class="select-mini" title="Segmento a analizar en el resumen de dolores/obstáculos">
+            <option value="todos">Todos</option>
+            <option value="califica">✅ Califican</option>
+            <option value="enlace">🔗 Agendaron</option>
           </select>
-          <button type="button" class="btn-reporte-dolores" id="btnReporteDolores">📊 Resumen de dolores y obstáculos</button>
-          <p class="chat-reporte-hint">Analiza tus conversaciones y descarga un CSV con las frecuencias de dolores de salud, motivos estéticos y obstáculos que mencionaron tus leads — útil para publicidad y comunicación. Puede tardar según cuántas conversaciones tengas.</p>
-        </div>
-        <div class="chat-export" id="chatExportWrap" style="display:none;">
-          <a id="btnExportar" href="#" class="btn-exportar">⬇ Exportar</a>
+          <button type="button" class="btn-mini" id="btnReporteDolores" title="Analiza tus conversaciones y descarga un CSV con las frecuencias de dolores y obstáculos que mencionaron tus leads.">📊 Resumen</button>
+          <div class="chat-export" id="chatExportWrap" style="display:none;">
+            <a id="btnExportar" href="#" class="btn-mini">⬇ CSV</a>
+          </div>
         </div>
         <div class="chat-list" id="listaChats"><p class="vacio-lista">Cargando…</p></div>
       </div>
@@ -5017,9 +5012,9 @@ ${estilosBase()}
     const btn = document.getElementById("btnExportar");
 
     const config = {
-      handoff:  { href: "/exportar/handoff.csv",     texto: "⬇ Exportar handoff",           total: totalHandoff,  estilo: "" },
-      califica: { href: "/exportar/calificados.csv", texto: "⬇ Exportar calificados",        total: totalCalifica, estilo: "border-color:rgba(49,217,124,.3); color:var(--green);" },
-      enlace:   { href: "/exportar/enlace.csv",       texto: "⬇ Exportar enlaces enviados",  total: totalEnlace,   estilo: "border-color:rgba(63,199,232,.35); color:#3FC7E8;" }
+      handoff:  { href: "/exportar/handoff.csv",     titulo: "Exportar handoff",           total: totalHandoff,  estilo: "" },
+      califica: { href: "/exportar/calificados.csv", titulo: "Exportar calificados",        total: totalCalifica, estilo: "border-color:rgba(49,217,124,.3); color:var(--green);" },
+      enlace:   { href: "/exportar/enlace.csv",       titulo: "Exportar enlaces enviados",  total: totalEnlace,   estilo: "border-color:rgba(63,199,232,.35); color:#3FC7E8;" }
     };
 
     const cfg = config[filtroActual];
@@ -5027,10 +5022,11 @@ ${estilosBase()}
       wrap.style.display = "none";
       return;
     }
-    wrap.style.display = "block";
+    wrap.style.display = "inline-block";
     btn.setAttribute("href", cfg.href);
     btn.setAttribute("style", cfg.estilo);
-    btn.textContent = cfg.texto + " (" + cfg.total + ")";
+    btn.setAttribute("title", cfg.titulo);
+    btn.textContent = "⬇ CSV (" + cfg.total + ")";
   }
 
   function conversacionesFiltradas(){
