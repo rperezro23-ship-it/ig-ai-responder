@@ -1362,6 +1362,55 @@ async function evaluarCalificacion(historial, criterios) {
   }
 }
 
+// Analiza UNA conversación y extrae, si se mencionan: un problema de salud,
+// un motivo estético, y el principal obstáculo del lead para lograrlo por su
+// cuenta. Se usa para el reporte de "dolores y obstáculos más frecuentes"
+// (ver /exportar/dolores-obstaculos.csv), pensado para entender mejor al
+// cliente y usarlo en publicidad/comunicación. Se le pide a la IA una
+// etiqueta CORTA y reutilizable (no una frase larga) para poder agrupar y
+// contar categorías repetidas entre distintas conversaciones.
+async function analizarDoloresYObstaculos(transcripcion) {
+  try {
+    const resp = await openaiClient.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      max_tokens: 150,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "Analiza esta conversación de un lead con un entrenador fitness y extrae, si se mencionan: " +
+            "(1) un problema o dolor de SALUD/energía (ej. hipertension, diabetes, cansancio, colesterol, " +
+            "articulaciones, azucar, higado graso, poca energia — o cualquier otro que se mencione), " +
+            "(2) un motivo o problema ESTÉTICO/de apariencia (ej. estetica, verme bien, fisico, panza, guata, " +
+            "barriga, u otro), y (3) el principal OBSTÁCULO que dice tener para lograrlo por su cuenta (ej. " +
+            "falta de tiempo, no sabe que rutina hacer, falta de disciplina, intentos fallidos, no sabe de " +
+            "nutricion, lesion, motivacion, dinero, u otro).\n\n" +
+            "Usa una etiqueta CORTA (1 a 3 palabras), en minúsculas, sin acentos, y reutiliza la MISMA " +
+            "etiqueta que usarías para un caso similar en otra conversación (para poder agruparlas después " +
+            "— ej. usa siempre \"cansancio\", no alternes entre \"cansancio\"/\"cansado\"/\"fatiga\"). Si algo " +
+            "no se menciona en la conversación, usa null (no inventes ni asumas). Responde ÚNICAMENTE un " +
+            "JSON con este formato exacto, sin texto adicional: " +
+            '{"dolor_salud": "etiqueta o null", "dolor_estetico": "etiqueta o null", "obstaculo": "etiqueta o null"}'
+        },
+        { role: "user", content: transcripcion }
+      ]
+    });
+
+    const texto = resp.choices[0]?.message?.content?.trim();
+    const parsed = JSON.parse(texto);
+    return {
+      dolor_salud: typeof parsed.dolor_salud === "string" ? parsed.dolor_salud : null,
+      dolor_estetico: typeof parsed.dolor_estetico === "string" ? parsed.dolor_estetico : null,
+      obstaculo: typeof parsed.obstaculo === "string" ? parsed.obstaculo : null
+    };
+  } catch (err) {
+    console.error("⚠️ Error analizando dolores/obstáculos de una conversación:", err.response?.data || err.message);
+    return { dolor_salud: null, dolor_estetico: null, obstaculo: null };
+  }
+}
+
 // El historial que se guarda en Supabase incluye, para los audios y fotos ya
 // enviados, el formato interno "[[audio]]url" / "[[imagen]]url" (así los
 // puede reproducir /chats). El problema es que si ese historial se le manda
@@ -4655,6 +4704,20 @@ ${estilosBase()}
     font-weight:600; text-decoration:none; transition:background .12s, border-color .12s, color .12s;
   }
   .btn-exportar:hover{ background:var(--surface-2); border-color:var(--red); color:var(--red); }
+  .chat-reporte{ padding:12px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
+  .chat-reporte-label{ display:block; font-size:12px; color:var(--muted); margin:0 0 6px; font-weight:500; }
+  .chat-reporte-select{
+    width:100%; background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:8px 10px; font-size:13px; font-family:var(--body); margin-bottom:8px;
+  }
+  .btn-reporte-dolores{
+    width:100%; background:rgba(63,199,232,.1); color:#3FC7E8; border:1px solid rgba(63,199,232,.3);
+    border-radius:9px; padding:10px 10px; font-size:13px; font-weight:600; cursor:pointer;
+    transition:background .12s, border-color .12s;
+  }
+  .btn-reporte-dolores:hover:not(:disabled){ background:rgba(63,199,232,.18); }
+  .btn-reporte-dolores:disabled{ opacity:.6; cursor:default; }
+  .chat-reporte-hint{ font-size:11.5px; color:var(--muted-dim); line-height:1.5; margin:8px 0 0; }
   .chat-input-bar{
     display:none; gap:10px; padding:14px 18px; border-top:1px solid var(--border);
     align-items:flex-end; flex-shrink:0;
@@ -4789,6 +4852,16 @@ ${estilosBase()}
           <div class="chat-tab tab-califica" id="tabCalifica" data-filtro="califica">✅ Califica <span class="count" id="countCalifica"></span></div>
           <div class="chat-tab tab-enlace" id="tabEnlace" data-filtro="enlace">🔗 Enlace enviado <span class="count" id="countEnlace"></span></div>
           <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff">Handoff (+24h) <span class="count" id="countHandoff"></span></div>
+        </div>
+        <div class="chat-reporte">
+          <label for="segmentoReporteDolores" class="chat-reporte-label">Analizar:</label>
+          <select id="segmentoReporteDolores" class="chat-reporte-select">
+            <option value="todos">Todos los leads</option>
+            <option value="califica">✅ Solo los que califican</option>
+            <option value="enlace">🔗 Solo los que agendaron (enlace enviado)</option>
+          </select>
+          <button type="button" class="btn-reporte-dolores" id="btnReporteDolores">📊 Resumen de dolores y obstáculos</button>
+          <p class="chat-reporte-hint">Analiza tus conversaciones y descarga un CSV con las frecuencias de dolores de salud, motivos estéticos y obstáculos que mencionaron tus leads — útil para publicidad y comunicación. Puede tardar según cuántas conversaciones tengas.</p>
         </div>
         <div class="chat-export" id="chatExportWrap" style="display:none;">
           <a id="btnExportar" href="#" class="btn-exportar">⬇ Exportar</a>
@@ -5461,6 +5534,42 @@ ${estilosBase()}
     if(senderSeleccionado) revisarMensajesNuevos();
   }, 4000);
 
+  document.getElementById("btnReporteDolores").addEventListener("click", async () => {
+    const btn = document.getElementById("btnReporteDolores");
+    const textoOriginal = btn.textContent;
+    const segmento = document.getElementById("segmentoReporteDolores").value;
+    btn.disabled = true;
+    btn.textContent = "⏳ Generando… (puede tardar un momento)";
+
+    try {
+      const res = await fetch("/exportar/dolores-obstaculos.csv?filtro=" + encodeURIComponent(segmento));
+      if(res.status === 401){
+        window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname);
+        return;
+      }
+      if(!res.ok){
+        const data = await res.json().catch(() => ({}));
+        alert("No se pudo generar el reporte: " + (data.error || "error desconocido"));
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const sufijo = segmento === "califica" ? "_califican" : segmento === "enlace" ? "_agendaron" : "";
+      a.download = "dolores_obstaculos" + sufijo + "_" + new Date().toISOString().slice(0, 10) + ".csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert("Error de conexión generando el reporte: " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = textoOriginal;
+    }
+  });
+
   cargarEtapasDisponibles();
   cargarConversaciones();
 </script>
@@ -5622,6 +5731,129 @@ app.get("/exportar/enlace.csv", requireAdminKey, async (req, res) => {
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="enlace_enviado_${fechaArchivo}.csv"`);
+    res.send(csv);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Analiza TODAS las conversaciones (hasta un límite razonable, las más
+// recientes primero) y exporta un CSV con las frecuencias de dolores de
+// salud, motivos estéticos, y obstáculos que fueron mencionando los leads —
+// pensado para entender mejor al cliente y usarlo en publicidad/comunicación.
+// Se procesa bajo demanda (el admin lo pide desde /chats) porque cada
+// conversación requiere una llamada a la IA — puede tardar según cuántas
+// conversaciones tengas. Se usa el registro COMPLETO de mensajes
+// (mensajes_chat), no el "historial" recortado, para no perderse info que
+// se haya dicho al principio de una conversación larga.
+const LIMITE_CONVERSACIONES_REPORTE = 300;
+const TAMANO_LOTE_REPORTE = 8;
+
+app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) => {
+  try {
+    // "filtro" permite enfocar el análisis solo en el segmento que más
+    // importa para marketing: los que califican, o los que ya llegaron al
+    // enlace de calendario/formulario (leads de mayor intención) — en vez
+    // de mezclar esa información con la de leads que ni siquiera avanzaron.
+    const filtro = req.query.filtro === "califica" || req.query.filtro === "enlace" ? req.query.filtro : "todos";
+
+    let consulta = supabase
+      .from("conversaciones")
+      .select("sender_id")
+      .order("actualizado_en", { ascending: false })
+      .limit(LIMITE_CONVERSACIONES_REPORTE);
+
+    if (filtro === "califica") consulta = consulta.eq("califica", true);
+    if (filtro === "enlace") consulta = consulta.eq("enlace_enviado", true);
+
+    const { data: conversaciones, error } = await consulta;
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    const listaSenders = (conversaciones || []).map(c => c.sender_id);
+    const resultados = [];
+
+    for (let i = 0; i < listaSenders.length; i += TAMANO_LOTE_REPORTE) {
+      const lote = listaSenders.slice(i, i + TAMANO_LOTE_REPORTE);
+
+      const analisisLote = await Promise.all(lote.map(async (senderId) => {
+        const { data: mensajes, error: errorMsgs } = await supabase
+          .from("mensajes_chat")
+          .select("role, content")
+          .eq("sender_id", senderId)
+          .order("creado_en", { ascending: true })
+          .limit(200);
+
+        if (errorMsgs) {
+          console.error(`❌ Error leyendo mensajes_chat de ${senderId} para el reporte:`, errorMsgs.message);
+          return null;
+        }
+        if (!mensajes || mensajes.length === 0) return null;
+        if (!mensajes.some(m => m.role === "user")) return null; // sin nada que el cliente haya dicho
+
+        const transcripcion = mensajes
+          .filter(m => typeof m.content === "string" && !m.content.startsWith("[[imagen]]") && !m.content.startsWith("[[audio]]"))
+          .map(m => `${m.role === "user" ? "Cliente" : "Asistente"}: ${m.content}`)
+          .join("\n");
+
+        if (!transcripcion.trim()) return null;
+
+        return analizarDoloresYObstaculos(transcripcion);
+      }));
+
+      resultados.push(...analisisLote.filter(Boolean));
+    }
+
+    const totalAnalizados = resultados.length;
+
+    function contarCategorias(campo) {
+      const conteos = {};
+      for (const r of resultados) {
+        const valor = r?.[campo];
+        if (!valor || typeof valor !== "string") continue;
+        const clave = normalizarParaComparar(valor);
+        if (!clave) continue;
+        conteos[clave] = (conteos[clave] || 0) + 1;
+      }
+      return conteos;
+    }
+
+    const filas = [];
+    function agregarFilas(tipo, conteos) {
+      const entradas = Object.entries(conteos).sort((a, b) => b[1] - a[1]);
+      for (const [categoria, cantidad] of entradas) {
+        const porcentaje = totalAnalizados > 0 ? ((cantidad / totalAnalizados) * 100).toFixed(1) + "%" : "0.0%";
+        filas.push({ tipo, categoria, cantidad, porcentaje });
+      }
+    }
+    agregarFilas("salud", contarCategorias("dolor_salud"));
+    agregarFilas("estetico", contarCategorias("dolor_estetico"));
+    agregarFilas("obstaculo", contarCategorias("obstaculo"));
+
+    const encabezados = ["tipo", "categoria", "cantidad", "porcentaje"];
+    const escaparCSV = (valor) => {
+      const txt = String(valor ?? "");
+      return /[",\n]/.test(txt) ? '"' + txt.replace(/"/g, '""') + '"' : txt;
+    };
+
+    const nombreSegmento = filtro === "califica" ? "Solo leads que califican"
+      : filtro === "enlace" ? "Solo leads con enlace de calendario enviado"
+      : "Todos los leads";
+
+    const lineas = [
+      `Segmento analizado:,${nombreSegmento}`,
+      `Total de conversaciones analizadas:,${totalAnalizados}`,
+      "",
+      encabezados.join(","),
+      ...filas.map((f) => encabezados.map((h) => escaparCSV(f[h])).join(","))
+    ];
+
+    const csv = "\uFEFF" + lineas.join("\r\n");
+    const fechaArchivo = new Date().toISOString().slice(0, 10);
+    const sufijoArchivo = filtro === "califica" ? "_califican" : filtro === "enlace" ? "_agendaron" : "";
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="dolores_obstaculos${sufijoArchivo}_${fechaArchivo}.csv"`);
     res.send(csv);
   } catch (err) {
     res.status(500).json({ error: err.message });
