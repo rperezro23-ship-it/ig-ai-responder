@@ -5855,23 +5855,27 @@ app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) =>
 
     const totalAnalizados = resultados.length;
 
-    function contarCategorias(campo) {
+    // "campos" es una lista porque la columna de "Dolor" combina salud +
+    // estético en una sola bolsa de categorías (un mismo lead puede aportar
+    // hasta 2 menciones si mencionó ambos tipos en su conversación).
+    function contarCategorias(campos) {
       const conteos = {};
       for (const r of resultados) {
-        const valor = r?.[campo];
-        if (!valor || typeof valor !== "string") continue;
-        const clave = normalizarParaComparar(valor);
-        if (!clave) continue;
-        conteos[clave] = (conteos[clave] || 0) + 1;
+        for (const campo of campos) {
+          const valor = r?.[campo];
+          if (!valor || typeof valor !== "string") continue;
+          const clave = normalizarParaComparar(valor);
+          if (!clave) continue;
+          conteos[clave] = (conteos[clave] || 0) + 1;
+        }
       }
       return conteos;
     }
 
-    // Cada tipo (salud, estético, obstáculo) se ordena de mayor a menor
-    // frecuencia y se arma como su propia lista de filas [categoria, cantidad,
-    // porcentaje] — así en el CSV quedan como bloques de columnas separados
-    // uno al lado del otro, en vez de una sola lista larga mezclada por tipo
-    // (mucho más fácil de leer en Excel).
+    // Se ordena de mayor a menor frecuencia y se arma como su propia lista
+    // de filas [categoria, cantidad, porcentaje] — así en el CSV quedan como
+    // bloques de columnas separados uno al lado del otro (Dolor / Obstáculo),
+    // mucho más fácil de leer en Excel que una sola lista larga mezclada.
     function filasDeCategoria(conteos) {
       const entradas = Object.entries(conteos).sort((a, b) => b[1] - a[1]);
       return entradas.map(([categoria, cantidad]) => {
@@ -5880,9 +5884,8 @@ app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) =>
       });
     }
 
-    const filasSalud = filasDeCategoria(contarCategorias("dolor_salud"));
-    const filasEstetico = filasDeCategoria(contarCategorias("dolor_estetico"));
-    const filasObstaculo = filasDeCategoria(contarCategorias("obstaculo"));
+    const filasDolor = filasDeCategoria(contarCategorias(["dolor_salud", "dolor_estetico"]));
+    const filasObstaculo = filasDeCategoria(contarCategorias(["obstaculo"]));
 
     const escaparCSV = (valor) => {
       const txt = String(valor ?? "");
@@ -5893,21 +5896,19 @@ app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) =>
       : filtro === "enlace" ? "Solo leads con enlace de calendario enviado"
       : "Todos los leads";
 
-    // Encabezado de 3 bloques de 3 columnas (Categoria, Cantidad, %), con una
+    // Encabezado de 2 bloques de 3 columnas (Categoria, Cantidad, %), con una
     // columna en blanco de separación entre bloques.
     const encabezadoBloques = [
-      "Dolor de salud", "Cantidad", "Porcentaje", "",
-      "Motivo estético", "Cantidad", "Porcentaje", "",
+      "Dolor", "Cantidad", "Porcentaje", "",
       "Obstáculo", "Cantidad", "Porcentaje"
     ];
 
-    const totalFilas = Math.max(filasSalud.length, filasEstetico.length, filasObstaculo.length);
+    const totalFilas = Math.max(filasDolor.length, filasObstaculo.length);
     const filasCombinadas = [];
     for (let i = 0; i < totalFilas; i++) {
-      const salud = filasSalud[i] || ["", "", ""];
-      const estetico = filasEstetico[i] || ["", "", ""];
+      const dolor = filasDolor[i] || ["", "", ""];
       const obstaculo = filasObstaculo[i] || ["", "", ""];
-      filasCombinadas.push([...salud, "", ...estetico, "", ...obstaculo]);
+      filasCombinadas.push([...dolor, "", ...obstaculo]);
     }
 
     const lineas = [
