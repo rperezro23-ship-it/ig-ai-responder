@@ -1643,18 +1643,41 @@ async function procesarBuffer(senderId) {
       // TODOS los pasos configurados (ver programarSeguimientosDB).
       if (configActual.enlace_calificacion?.trim() && textoAEnviar.includes(configActual.enlace_calificacion.trim())) {
         console.log(`🔗 Enlace de calificación detectado en la respuesta a ${senderId}. Se marca (permanente) y arranca el seguimiento especial completo.`);
-        await guardarConversacion(senderId, {
+        const camposEnlace = {
           enlace_enviado: true,
           enlace_enviado_en: new Date().toISOString(),
           enlace_pasos_enviados: 0
-        });
+        };
+
+        // Calificación automática y 100% determinista (sin IA): si tu flujo
+        // de etapas ya está diseñado para que solo se llegue a mandar este
+        // enlace cuando el lead realmente calificó (y si no califica, se le
+        // manda otra cosa — ej. un lead magnet — y no se le manda esto),
+        // entonces el propio envío del enlace ES la señal de calificación.
+        // Esto evita depender de que la IA vuelva a evaluar los criterios
+        // por su cuenta (que puede ser inconsistente entre leads similares).
+        if (configActual.calificar_automatico_con_enlace) {
+          const convParaCalificar = await obtenerConversacion(senderId);
+          if (!convParaCalificar.califica) {
+            console.log(`🏷️ ${senderId} CALIFICA automáticamente: se le mandó el enlace de calendario/formulario.`);
+            camposEnlace.califica = true;
+            camposEnlace.calificado_en = new Date().toISOString();
+            camposEnlace.razon_calificacion = "Se le mandó el enlace de calendario/formulario (calificación automática, sin evaluar criterios por IA).";
+          }
+        }
+
+        await guardarConversacion(senderId, camposEnlace);
       }
 
-      // Calificación automática: solo si está activada, hay criterios definidos,
-      // y esta conversación todavía no había calificado antes. Esto solo pone
-      // la etiqueta "califica" para poder filtrar/exportar leads en /chats — el
-      // envío del enlace/formulario lo hace el propio prompt, no este bloque.
-      if (configActual.calificacion_activa && configActual.criterios_calificacion?.trim()) {
+      // Calificación automática POR CRITERIOS (evaluados por IA): solo si
+      // está activada, hay criterios definidos, esta conversación todavía no
+      // había calificado antes, y NO se está usando ya la calificación
+      // automática por enlace de arriba (si esa está activa, tiene
+      // prioridad — es más confiable porque no depende de que la IA
+      // interprete la conversación). Esto solo pone la etiqueta "califica"
+      // para poder filtrar/exportar leads en /chats — el envío del
+      // enlace/formulario lo hace el propio prompt, no este bloque.
+      if (!configActual.calificar_automatico_con_enlace && configActual.calificacion_activa && configActual.criterios_calificacion?.trim()) {
         const convActualizada = await obtenerConversacion(senderId);
         if (!convActualizada.califica) {
           const evaluacion = await evaluarCalificacion(convActualizada.historial || [], configActual.criterios_calificacion);
@@ -2401,6 +2424,7 @@ let configActual = {
   max_historial: MAX_HISTORIAL,
   openai_api_key: OPENAI_API_KEY || "",
   calificacion_activa: false,
+  calificar_automatico_con_enlace: false,
   criterios_calificacion: "",
   enlace_calificacion: "",
   seguimientos: SEGUIMIENTOS_CONFIG,
@@ -2819,7 +2843,7 @@ function filtrarDestinosDeTransicionValidos(transiciones, clavesValidas) {
 app.post("/config", requireAdminKey, async (req, res) => {
   try {
     const { ai_prompt, contexto_base, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
-            calificacion_activa, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
+            calificacion_activa, calificar_automatico_con_enlace, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
             transiciones_generales_elegir_mejor } = req.body || {};
 
     const nuevaConfig = {};
@@ -2833,6 +2857,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
     // Solo se actualiza si mandaron una clave nueva; si viene vacío, se deja la que ya había.
     if (typeof openai_api_key === "string" && openai_api_key.trim()) nuevaConfig.openai_api_key = openai_api_key.trim();
     if (typeof calificacion_activa === "boolean") nuevaConfig.calificacion_activa = calificacion_activa;
+    if (typeof calificar_automatico_con_enlace === "boolean") nuevaConfig.calificar_automatico_con_enlace = calificar_automatico_con_enlace;
     if (typeof criterios_calificacion === "string") nuevaConfig.criterios_calificacion = criterios_calificacion.trim();
     if (typeof enlace_calificacion === "string") nuevaConfig.enlace_calificacion = enlace_calificacion.trim();
     if (Array.isArray(disparadores)) nuevaConfig.disparadores = normalizarDisparadores(disparadores);
@@ -3504,17 +3529,18 @@ ${estilosBase()}
         </div>
 
         <div class="card">
-          <h2>Calificación automática de leads</h2>
+          <h2>Calificación automática de leads (por criterios, evaluados por IA)</h2>
           <details class="ayuda">
             <summary>¿Cómo funciona esto?</summary>
             <div class="hint-contenido">
               <p class="hint">Define los criterios que debe cumplir un lead para calificar. Después de cada respuesta, la IA revisa la conversación y, en cuanto se cumplen TODOS, marca la conversación con la etiqueta ✅ Califica (puedes filtrarlos y exportarlos en Chats). El envío del enlace/formulario lo hace directamente tu prompt de arriba, no este bloque.</p>
+              <p class="hint">⚠️ Si activaste la casilla "Marcar como calificado automáticamente" en la tarjeta de arriba (junto al enlace), <b>esta sección se ignora por completo</b> — esa forma es más confiable porque no depende de que la IA interprete la conversación.</p>
             </div>
           </details>
 
           <label style="display:flex; align-items:center; gap:10px; cursor:pointer; margin-bottom:16px;">
             <input type="checkbox" id="calificacionActiva" style="width:18px; height:18px; accent-color:var(--green); cursor:pointer;">
-            <span style="color:var(--text); font-size:14.5px; font-weight:500;">Activar calificación automática</span>
+            <span style="color:var(--text); font-size:14.5px; font-weight:500;">Activar calificación automática por criterios</span>
           </label>
 
           <label for="criteriosCalificacion">Criterios de calificación</label>
@@ -3588,6 +3614,13 @@ ${estilosBase()}
           <span class="enlace-tag">Debe coincidir tal cual aparece en el mensaje que manda el bot</span>
           <br>
           <span class="pausa-tag">Tip: en tu prompt escribe algo como "Perfecto, te dejo el enlace por aquí 👇[[pausa:6]]https://tu-enlace..." para que el enlace llegue solo, en su propio mensaje.</span>
+
+          <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; margin:18px 0 0; padding:12px 14px; border-radius:10px; background:var(--green-soft); border:1px solid rgba(49,217,124,.3);">
+            <input type="checkbox" id="calificarAutomaticoConEnlace" style="width:18px; height:18px; accent-color:var(--green); cursor:pointer; margin-top:1px; flex-shrink:0;">
+            <span style="color:var(--text); font-size:14px; font-weight:500; line-height:1.55;">
+              🏷️ Marcar como calificado AUTOMÁTICAMENTE en cuanto se manda este enlace (sin evaluar los criterios con IA). Recomendado si tu flujo de etapas ya está diseñado para solo llegar a este enlace cuando el lead realmente calificó — es 100% determinista, así que no vas a ver inconsistencias entre leads con el mismo perfil. Si lo activas, la calificación por criterios de abajo se ignora.
+            </span>
+          </label>
 
           <div style="height:1px; background:var(--border); margin:24px 0;"></div>
 
@@ -4358,6 +4391,7 @@ ${estilosBase()}
     document.getElementById("maxDelay").value = cfg.max_delay ?? 15;
     document.getElementById("maxHistorial").value = cfg.max_historial ?? 20;
     document.getElementById("calificacionActiva").checked = Boolean(cfg.calificacion_activa);
+    document.getElementById("calificarAutomaticoConEnlace").checked = Boolean(cfg.calificar_automatico_con_enlace);
     document.getElementById("criteriosCalificacion").value = cfg.criterios_calificacion || "";
     document.getElementById("enlaceCalificacion").value = cfg.enlace_calificacion || "";
     pintarEstadoClave(cfg);
@@ -4585,6 +4619,7 @@ ${estilosBase()}
       seguimientos: pasos,
       seguimientos_enlace: pasosEnlace,
       calificacion_activa: document.getElementById("calificacionActiva").checked,
+      calificar_automatico_con_enlace: document.getElementById("calificarAutomaticoConEnlace").checked,
       criterios_calificacion: document.getElementById("criteriosCalificacion").value,
       enlace_calificacion: document.getElementById("enlaceCalificacion").value,
       disparadores: disparadores,
