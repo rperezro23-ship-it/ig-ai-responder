@@ -175,11 +175,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null };
   }
 
   return data;
@@ -340,6 +340,16 @@ async function procesarSeguimientosPendientesDB() {
     // alguien que ya se auto-descartó con un criterio duro.
     if (configActual.no_seguir_si_no_califica && conv.no_califica) {
       console.log(`🚫 Seguimiento (${tipo}, paso ${pasoIndex}) para ${senderId} descartado: el lead está marcado como "no califica".`);
+      await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
+      continue;
+    }
+
+    // Si el lead ya CONFIRMÓ que agendó (etiqueta "agendo", distinta de solo
+    // haber recibido el enlace) y tienes activada la opción de no seguirle
+    // insistiendo, se descarta CUALQUIER seguimiento — tanto los normales
+    // como los especiales del enlace — porque ya logró lo que se buscaba.
+    if (configActual.parar_seguimientos_si_agendo && conv.agendo) {
+      console.log(`📅 Seguimiento (${tipo}, paso ${pasoIndex}) para ${senderId} descartado: el lead ya confirmó que agendó.`);
       await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
       continue;
     }
@@ -1558,6 +1568,17 @@ async function procesarBuffer(senderId) {
           camposTransicion.razon_no_califica = transicion.motivo_no_califica || null;
         }
 
+        // Etiqueta "AGENDÓ": se pone cuando el lead CONFIRMA que ya reservó
+        // su espacio en el calendario (distinto de "enlace_enviado", que solo
+        // significa que se le mandó el link, no que de verdad agendó). Sirve
+        // para detener sus seguimientos — ya no tiene sentido seguir
+        // empujándolo a agendar si ya lo hizo (ver "parar_seguimientos_si_agendo").
+        if (transicion.agendo) {
+          console.log(`📅 ${senderId} AGENDÓ — se detienen sus seguimientos (si esa opción está activada).`);
+          camposTransicion.agendo = true;
+          camposTransicion.agendo_en = new Date().toISOString();
+        }
+
         await guardarConversacion(senderId, camposTransicion);
         transicionAplicada = true;
       } else {
@@ -2059,7 +2080,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa")
       .order("actualizado_en", { ascending: false })
       .limit(200);
 
@@ -2094,6 +2115,8 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         no_califica: Boolean(c.no_califica),
         no_califica_en: c.no_califica_en || null,
         razon_no_califica: c.razon_no_califica || null,
+        agendo: Boolean(c.agendo),
+        agendo_en: c.agendo_en || null,
         enlace_enviado: Boolean(c.enlace_enviado),
         enlace_enviado_en: c.enlace_enviado_en || null,
         enlace_pasos_enviados: pasosEnviados,
@@ -2475,6 +2498,7 @@ let configActual = {
   calificacion_activa: false,
   calificar_automatico_con_enlace: false,
   no_seguir_si_no_califica: false,
+  parar_seguimientos_si_agendo: false,
   criterios_calificacion: "",
   enlace_calificacion: "",
   seguimientos: SEGUIMIENTOS_CONFIG,
@@ -2835,7 +2859,8 @@ function normalizarTransiciones(transiciones) {
         coincidencia,
         silenciosa: Boolean(t.silenciosa),
         no_califica: Boolean(t.no_califica),
-        motivo_no_califica: typeof t.motivo_no_califica === "string" ? t.motivo_no_califica.trim() : ""
+        motivo_no_califica: typeof t.motivo_no_califica === "string" ? t.motivo_no_califica.trim() : "",
+        agendo: Boolean(t.agendo)
       };
     })
     .filter(t => t.coincidencia === "condicion" ? Boolean(t.condicion) : t.frases.length > 0);
@@ -2895,7 +2920,7 @@ function filtrarDestinosDeTransicionValidos(transiciones, clavesValidas) {
 app.post("/config", requireAdminKey, async (req, res) => {
   try {
     const { ai_prompt, contexto_base, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
-            calificacion_activa, calificar_automatico_con_enlace, no_seguir_si_no_califica, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
+            calificacion_activa, calificar_automatico_con_enlace, no_seguir_si_no_califica, parar_seguimientos_si_agendo, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
             transiciones_generales_elegir_mejor } = req.body || {};
 
     const nuevaConfig = {};
@@ -2911,6 +2936,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof calificacion_activa === "boolean") nuevaConfig.calificacion_activa = calificacion_activa;
     if (typeof calificar_automatico_con_enlace === "boolean") nuevaConfig.calificar_automatico_con_enlace = calificar_automatico_con_enlace;
     if (typeof no_seguir_si_no_califica === "boolean") nuevaConfig.no_seguir_si_no_califica = no_seguir_si_no_califica;
+    if (typeof parar_seguimientos_si_agendo === "boolean") nuevaConfig.parar_seguimientos_si_agendo = parar_seguimientos_si_agendo;
     if (typeof criterios_calificacion === "string") nuevaConfig.criterios_calificacion = criterios_calificacion.trim();
     if (typeof enlace_calificacion === "string") nuevaConfig.enlace_calificacion = enlace_calificacion.trim();
     if (Array.isArray(disparadores)) nuevaConfig.disparadores = normalizarDisparadores(disparadores);
@@ -3697,10 +3723,17 @@ ${estilosBase()}
             </div>
           </details>
 
-          <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; margin:0 0 18px; padding:12px 14px; border-radius:10px; background:var(--red-soft); border:1px solid rgba(255,93,93,.3);">
+          <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; margin:0 0 14px; padding:12px 14px; border-radius:10px; background:var(--red-soft); border:1px solid rgba(255,93,93,.3);">
             <input type="checkbox" id="noSeguirSiNoCalifica" style="width:18px; height:18px; accent-color:var(--red); cursor:pointer; margin-top:1px; flex-shrink:0;">
             <span style="color:var(--text); font-size:14px; font-weight:500; line-height:1.55;">
               🚫 NO mandar ninguno de estos seguimientos a leads marcados como "NO CALIFICA" (ver la casilla en cada Transición). Útil si quieres dejar de insistirle a alguien que ya se auto-descartó con un criterio duro (ej. dijo tener menos de 40 años, o que quiere subir de peso en vez de bajar).
+            </span>
+          </label>
+
+          <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; margin:0 0 18px; padding:12px 14px; border-radius:10px; background:var(--green-soft); border:1px solid rgba(49,217,124,.3);">
+            <input type="checkbox" id="pararSeguimientosSiAgendo" style="width:18px; height:18px; accent-color:var(--green); cursor:pointer; margin-top:1px; flex-shrink:0;">
+            <span style="color:var(--text); font-size:14px; font-weight:500; line-height:1.55;">
+              📅 NO mandar NINGÚN seguimiento (ni estos normales, ni los especiales del enlace) a leads marcados como "AGENDÓ" (ver la casilla en cada Transición). Esta etiqueta es distinta de solo "enlace enviado" — se pone cuando el lead CONFIRMA con sus propias palabras que ya reservó su espacio, no solo cuando se le mandó el link.
             </span>
           </label>
 
@@ -4100,6 +4133,10 @@ ${estilosBase()}
         <label style="margin-top:10px;">Motivo (opcional, se guarda como referencia)</label>
         <input type="text" class="\${prefijoClase}-motivo-no-califica" data-i="\${i}" value="\${(t.motivo_no_califica || "").replace(/"/g,"&quot;")}" placeholder="Ej: Menor de 40 años">
         \` : ''}
+        <label style="display:flex; align-items:center; gap:9px; cursor:pointer; margin:10px 0 0;">
+          <input type="checkbox" class="\${prefijoClase}-agendo" data-i="\${i}"\${t.agendo ? " checked" : ""} style="width:16px; height:16px; accent-color:var(--green); cursor:pointer;">
+          <span style="color:var(--text); font-size:13.5px; font-weight:500;">📅 Marcar como "AGENDÓ" al activarse (detiene sus seguimientos, si lo configuras así)</span>
+        </label>
       \`;
       cont.appendChild(div);
     });
@@ -4159,6 +4196,11 @@ ${estilosBase()}
       if(!lista[i]) return;
       lista[i].motivo_no_califica = input.value;
     });
+    document.querySelectorAll(\`.\${prefijoClase}-agendo\`).forEach((chk) => {
+      const i = +chk.dataset.i;
+      if(!lista[i]) return;
+      lista[i].agendo = chk.checked;
+    });
   }
 
   let transicionesGenerales = [];
@@ -4176,7 +4218,7 @@ ${estilosBase()}
       alert("Primero crea al menos una etapa para poder mandar al lead hacia ella.");
       return;
     }
-    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "" });
+    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "", agendo: false });
     renderTransicionesGenerales();
   });
 
@@ -4429,7 +4471,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].transiciones) etapas[i].transiciones = [];
-      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "" });
+      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "", agendo: false });
       renderEtapas();
     }));
   }
@@ -4476,6 +4518,7 @@ ${estilosBase()}
     document.getElementById("calificacionActiva").checked = Boolean(cfg.calificacion_activa);
     document.getElementById("calificarAutomaticoConEnlace").checked = Boolean(cfg.calificar_automatico_con_enlace);
     document.getElementById("noSeguirSiNoCalifica").checked = Boolean(cfg.no_seguir_si_no_califica);
+    document.getElementById("pararSeguimientosSiAgendo").checked = Boolean(cfg.parar_seguimientos_si_agendo);
     document.getElementById("criteriosCalificacion").value = cfg.criterios_calificacion || "";
     document.getElementById("enlaceCalificacion").value = cfg.enlace_calificacion || "";
     pintarEstadoClave(cfg);
@@ -4705,6 +4748,7 @@ ${estilosBase()}
       calificacion_activa: document.getElementById("calificacionActiva").checked,
       calificar_automatico_con_enlace: document.getElementById("calificarAutomaticoConEnlace").checked,
       no_seguir_si_no_califica: document.getElementById("noSeguirSiNoCalifica").checked,
+      parar_seguimientos_si_agendo: document.getElementById("pararSeguimientosSiAgendo").checked,
       criterios_calificacion: document.getElementById("criteriosCalificacion").value,
       enlace_calificacion: document.getElementById("enlaceCalificacion").value,
       disparadores: disparadores,
@@ -4777,6 +4821,8 @@ ${estilosBase()}
   .chat-tab.tab-handoff.active{ background:var(--red-soft); color:var(--red); border-color:rgba(255,93,93,.3); }
   .chat-tab.tab-califica.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.4); }
   .chat-tab.tab-nocalifica.active{ background:var(--red-soft); color:var(--red); border-color:rgba(255,93,93,.4); }
+  .chat-tab.tab-agendo.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.4); }
+  .chat-tab.tab-agendo.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.4); }
   .chat-tab.tab-enlace.active{ background:rgba(63,199,232,.14); color:#3FC7E8; border-color:rgba(63,199,232,.4); }
   .chat-tab .count{ font-family:var(--mono); font-size:10.5px; opacity:.85; margin-left:2px; }
   .califica-badge{
@@ -4969,6 +5015,7 @@ ${estilosBase()}
           <div class="chat-tab active" id="tabTodas" data-filtro="todas" title="Todas">Todas <span class="count" id="countTodas"></span></div>
           <div class="chat-tab tab-califica" id="tabCalifica" data-filtro="califica" title="Califica">✅ <span class="count" id="countCalifica"></span></div>
           <div class="chat-tab tab-nocalifica" id="tabNoCalifica" data-filtro="nocalifica" title="No Califica">🚫 <span class="count" id="countNoCalifica"></span></div>
+          <div class="chat-tab tab-agendo" id="tabAgendo" data-filtro="agendo" title="Agendó">📅 <span class="count" id="countAgendo"></span></div>
           <div class="chat-tab tab-enlace" id="tabEnlace" data-filtro="enlace" title="Enlace enviado">🔗 <span class="count" id="countEnlace"></span></div>
           <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff" title="Handoff (+24h)">⏰ <span class="count" id="countHandoff"></span></div>
         </div>
@@ -4995,6 +5042,7 @@ ${estilosBase()}
         </div>
         <div class="califica-banner" id="calificaBanner"></div>
         <div class="califica-banner" id="noCalificaBanner" style="background:var(--red-soft); color:var(--red); border-bottom-color:rgba(255,93,93,.25);"></div>
+        <div class="califica-banner" id="agendoBanner"></div>
         <div class="enlace-banner" id="enlaceBanner"></div>
         <div class="etapa-banner" id="etapaBanner" style="display:none;">
           <span>🧭 Etapa actual:</span>
@@ -5074,11 +5122,13 @@ ${estilosBase()}
     const totalHandoff = conversaciones.filter(c => !c.en_ventana_24h).length;
     const totalCalifica = conversaciones.filter(c => c.califica).length;
     const totalNoCalifica = conversaciones.filter(c => c.no_califica).length;
+    const totalAgendo = conversaciones.filter(c => c.agendo).length;
     const totalEnlace = conversaciones.filter(c => c.enlace_enviado).length;
     document.getElementById("countTodas").textContent = conversaciones.length;
     document.getElementById("countHandoff").textContent = totalHandoff;
     document.getElementById("countCalifica").textContent = totalCalifica;
     document.getElementById("countNoCalifica").textContent = totalNoCalifica;
+    document.getElementById("countAgendo").textContent = totalAgendo;
     document.getElementById("countEnlace").textContent = totalEnlace;
     actualizarBotonExportar({ totalHandoff, totalCalifica, totalEnlace });
   }
@@ -5109,6 +5159,7 @@ ${estilosBase()}
     if(filtroActual === "handoff") return conversaciones.filter(c => !c.en_ventana_24h);
     if(filtroActual === "califica") return conversaciones.filter(c => c.califica);
     if(filtroActual === "nocalifica") return conversaciones.filter(c => c.no_califica);
+    if(filtroActual === "agendo") return conversaciones.filter(c => c.agendo);
     if(filtroActual === "enlace") return conversaciones.filter(c => c.enlace_enviado);
     return conversaciones;
   }
@@ -5135,6 +5186,7 @@ ${estilosBase()}
             <span class="uname">\${escapar(nombreMostrar(c))}</span>
             \${c.califica ? '<span class="califica-badge" title="Califica">✅</span>' : ''}
             \${c.no_califica ? '<span class="califica-badge" title="No Califica' + (c.razon_no_califica ? ": " + escapar(c.razon_no_califica) : "") + '">🚫</span>' : ''}
+            \${c.agendo ? '<span class="califica-badge" title="Agendó">📅</span>' : ''}
             \${c.enlace_enviado ? '<span class="enlace-badge" title="Enlace enviado">🔗</span>' : ''}
             \${c.etapa_nombre ? '<span class="etapa-chip" title="Etapa actual">' + escapar(c.etapa_nombre) + '</span>' : ''}
             \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
@@ -5218,6 +5270,7 @@ ${estilosBase()}
     const banner = document.getElementById("handoffBanner");
     const bannerCalifica = document.getElementById("calificaBanner");
     const bannerNoCalifica = document.getElementById("noCalificaBanner");
+    const bannerAgendo = document.getElementById("agendoBanner");
     const bannerEnlace = document.getElementById("enlaceBanner");
     const bannerEtapa = document.getElementById("etapaBanner");
     if(!senderSeleccionado){
@@ -5225,6 +5278,7 @@ ${estilosBase()}
       banner.classList.remove("visible");
       bannerCalifica.classList.remove("visible");
       bannerNoCalifica.classList.remove("visible");
+      bannerAgendo.classList.remove("visible");
       bannerEnlace.classList.remove("visible");
       bannerEtapa.style.display = "none";
       return;
@@ -5233,7 +5287,7 @@ ${estilosBase()}
     head.innerHTML = \`
       \${avatarHTML(conv)}
       <div class="chat-window-head-text">
-        <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}\${conv.califica ? ' <span title="Califica">✅</span>' : ''}\${conv.no_califica ? ' <span title="No Califica">🚫</span>' : ''}\${conv.enlace_enviado ? ' <span title="Enlace enviado">🔗</span>' : ''}</div>
+        <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}\${conv.califica ? ' <span title="Califica">✅</span>' : ''}\${conv.no_califica ? ' <span title="No Califica">🚫</span>' : ''}\${conv.agendo ? ' <span title="Agendó">📅</span>' : ''}\${conv.enlace_enviado ? ' <span title="Enlace enviado">🔗</span>' : ''}</div>
         <div class="chat-window-head-id">\${conv.sender_id}</div>
       </div>
     \`;
@@ -5251,6 +5305,13 @@ ${estilosBase()}
       bannerNoCalifica.classList.add("visible");
     } else {
       bannerNoCalifica.classList.remove("visible");
+    }
+
+    if(conv.agendo){
+      bannerAgendo.textContent = "📅 Este lead confirmó que ya agendó" + (conv.agendo_en ? " (" + formatearFecha(conv.agendo_en) + ")" : "") + ".";
+      bannerAgendo.classList.add("visible");
+    } else {
+      bannerAgendo.classList.remove("visible");
     }
 
     if(conv.enlace_enviado){
@@ -5530,6 +5591,12 @@ ${estilosBase()}
     filtroActual = "nocalifica";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabNoCalifica").classList.add("active");
+    renderLista();
+  });
+  document.getElementById("tabAgendo").addEventListener("click", () => {
+    filtroActual = "agendo";
+    document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
+    document.getElementById("tabAgendo").classList.add("active");
     renderLista();
   });
   document.getElementById("tabEnlace").addEventListener("click", () => {
