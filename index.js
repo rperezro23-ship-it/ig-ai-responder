@@ -3710,6 +3710,14 @@ ${estilosBase()}
               <p class="hint">Se dispara solo con los leads a los que ya se les mandó el enlace de arriba. Las horas se cuentan desde el momento en que se envió el enlace, no desde el último mensaje del cliente. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en estos mensajes. Con la casilla <b>"Solo enviar si el mensaje anterior ya está visto"</b> puedes hacer que un paso específico espere a que el cliente haya leído lo último que le mandaste (usando el estado de "visto" de Instagram) antes de mandarle ese seguimiento — si todavía no lo ha visto, simplemente espera y lo vuelve a revisar más tarde, sin cancelar el envío.</p>
             </div>
           </details>
+
+          <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; margin:0 0 18px; padding:12px 14px; border-radius:10px; background:var(--green-soft); border:1px solid rgba(49,217,124,.3);">
+            <input type="checkbox" id="pararSeguimientosSiAgendoEnlace" style="width:18px; height:18px; accent-color:var(--green); cursor:pointer; margin-top:1px; flex-shrink:0;">
+            <span style="color:var(--text); font-size:14px; font-weight:500; line-height:1.55;">
+              📅 NO mandar más de estos seguimientos a leads marcados como "AGENDÓ" (ver la casilla en cada Transición). Aquí es donde más sentido tiene: es en este seguimiento donde el lead normalmente confirma si ya agendó o no — en cuanto lo confirme, esta casilla detiene tanto estos seguimientos del enlace como los normales (es la misma opción que en la tarjeta de "Seguimientos automáticos").
+            </span>
+          </label>
+
           <div id="pasosEnlace"></div>
           <button class="add-paso" id="addPasoEnlace" type="button">+ Agregar paso de seguimiento al enlace</button>
         </div>
@@ -3930,6 +3938,18 @@ ${estilosBase()}
   document.getElementById("addPasoEnlace").addEventListener("click", () => {
     pasosEnlace.push({ horas: 4, mensajes: ["Ey, ¿cómo vas? ¿Pudiste encontrar un espacio que te quede bien?"], solo_si_visto: false });
     renderPasosEnlace();
+  });
+
+  // Las dos casillas de "parar seguimientos si agendó" (una en Seguimientos
+  // automáticos, otra en Seguimiento especial al enlace) representan la
+  // MISMA opción global — se mantienen sincronizadas entre sí para que no
+  // parezca que son cosas distintas, sin importar desde cuál de las dos la
+  // actives.
+  document.getElementById("pararSeguimientosSiAgendo").addEventListener("change", (e) => {
+    document.getElementById("pararSeguimientosSiAgendoEnlace").checked = e.target.checked;
+  });
+  document.getElementById("pararSeguimientosSiAgendoEnlace").addEventListener("change", (e) => {
+    document.getElementById("pararSeguimientosSiAgendo").checked = e.target.checked;
   });
 
   function leerPasosEnlaceDelDOM(){
@@ -4519,6 +4539,7 @@ ${estilosBase()}
     document.getElementById("calificarAutomaticoConEnlace").checked = Boolean(cfg.calificar_automatico_con_enlace);
     document.getElementById("noSeguirSiNoCalifica").checked = Boolean(cfg.no_seguir_si_no_califica);
     document.getElementById("pararSeguimientosSiAgendo").checked = Boolean(cfg.parar_seguimientos_si_agendo);
+    document.getElementById("pararSeguimientosSiAgendoEnlace").checked = Boolean(cfg.parar_seguimientos_si_agendo);
     document.getElementById("criteriosCalificacion").value = cfg.criterios_calificacion || "";
     document.getElementById("enlaceCalificacion").value = cfg.enlace_calificacion || "";
     pintarEstadoClave(cfg);
