@@ -1682,29 +1682,6 @@ async function procesarBuffer(senderId) {
 
         await guardarConversacion(senderId, camposEnlace);
       }
-
-      // Calificación automática POR CRITERIOS (evaluados por IA): solo si
-      // está activada, hay criterios definidos, esta conversación todavía no
-      // había calificado antes, y NO se está usando ya la calificación
-      // automática por enlace de arriba (si esa está activa, tiene
-      // prioridad — es más confiable porque no depende de que la IA
-      // interprete la conversación). Esto solo pone la etiqueta "califica"
-      // para poder filtrar/exportar leads en /chats — el envío del
-      // enlace/formulario lo hace el propio prompt, no este bloque.
-      if (!configActual.calificar_automatico_con_enlace && configActual.calificacion_activa && configActual.criterios_calificacion?.trim()) {
-        const convActualizada = await obtenerConversacion(senderId);
-        if (!convActualizada.califica) {
-          const evaluacion = await evaluarCalificacion(convActualizada.historial || [], configActual.criterios_calificacion);
-          if (evaluacion?.califica) {
-            console.log(`🏷️ ${senderId} CALIFICA: ${evaluacion.razon}`);
-            await guardarConversacion(senderId, {
-              califica: true,
-              calificado_en: new Date().toISOString(),
-              razon_calificacion: evaluacion.razon || null
-            });
-          }
-        }
-      }
     }
 
     // Se mandan todos los disparadores activados (ya calculados arriba). Si
@@ -1721,6 +1698,35 @@ async function procesarBuffer(senderId) {
     } // fin del "else" de disparador exclusivo
 
     } // fin del "else" de transición silenciosa
+
+    // Calificación automática POR CRITERIOS (evaluados por IA): vive FUERA de
+    // la cadena de arriba (mensaje fijo / silenciosa / respuesta normal) a
+    // propósito — así se evalúa SIEMPRE que el cliente escribe algo, sin
+    // importar qué camino tomó la respuesta ese turno. Antes vivía adentro
+    // de la rama de "respuesta normal", lo que causaba que se saltara por
+    // completo cuando el mensaje disparaba una transición silenciosa o caía
+    // en una etapa con mensaje fijo (ej. un obstáculo que cae en la
+    // transición "otro" con mensaje fijo configurado) — el lead podía dar
+    // una respuesta que sí calificaba, pero nunca se llegaba a evaluar.
+    // Solo si está activada, hay criterios definidos, esta conversación
+    // todavía no había calificado antes, y NO se está usando ya la
+    // calificación automática por enlace (si esa está activa, tiene
+    // prioridad — es más confiable porque no depende de que la IA
+    // interprete la conversación).
+    if (!configActual.calificar_automatico_con_enlace && configActual.calificacion_activa && configActual.criterios_calificacion?.trim()) {
+      const convActualizada = await obtenerConversacion(senderId);
+      if (!convActualizada.califica) {
+        const evaluacion = await evaluarCalificacion(convActualizada.historial || [], configActual.criterios_calificacion);
+        if (evaluacion?.califica) {
+          console.log(`🏷️ ${senderId} CALIFICA: ${evaluacion.razon}`);
+          await guardarConversacion(senderId, {
+            califica: true,
+            calificado_en: new Date().toISOString(),
+            razon_calificacion: evaluacion.razon || null
+          });
+        }
+      }
+    }
   } catch (err) {
     console.error(`❌ Error al responder:`, err.response?.data || err.message);
   }
