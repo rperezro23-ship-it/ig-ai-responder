@@ -175,11 +175,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null };
   }
 
   return data;
@@ -329,6 +329,17 @@ async function procesarSeguimientosPendientesDB() {
 
     if (!sigueVigente) {
       console.log(`⏭️ Seguimiento (${tipo}, paso ${pasoIndex}) para ${senderId} descartado: fuera de la ventana de 24h.`);
+      await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
+      continue;
+    }
+
+    // Si el lead quedó marcado como "NO CALIFICA" (ej. dijo tener menos de 40
+    // años, o que quiere subir de peso en vez de bajar) y tienes activada la
+    // opción de no seguirle insistiendo a esos leads, este seguimiento se
+    // descarta por completo — no tiene sentido invertir en re-enganchar a
+    // alguien que ya se auto-descartó con un criterio duro.
+    if (configActual.no_seguir_si_no_califica && conv.no_califica) {
+      console.log(`🚫 Seguimiento (${tipo}, paso ${pasoIndex}) para ${senderId} descartado: el lead está marcado como "no califica".`);
       await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
       continue;
     }
@@ -1532,7 +1543,22 @@ async function procesarBuffer(senderId) {
         console.log(`🧭 Transición automática (${origenTransicion}) de ${senderId}: "${etapaActualClave || "general"}" -> "${transicion.etapa_destino || "general"}"`);
         etapaActualClave = transicion.etapa_destino || null;
         etapaConfig = nuevaEtapaConfig;
-        await guardarConversacion(senderId, { etapa: etapaActualClave });
+
+        const camposTransicion = { etapa: etapaActualClave };
+
+        // Etiqueta "NO CALIFICA": permanente, igual que "califica" pero en la
+        // dirección contraria — se pone cuando el lead descarta explícitamente
+        // un criterio duro (ej. dice tener menos de 40 años, o que quiere subir
+        // de peso en vez de bajar). Sirve para poder excluir a estos leads de
+        // los seguimientos automáticos (ver "no_seguir_si_no_califica" más abajo).
+        if (transicion.no_califica) {
+          console.log(`🚫 ${senderId} NO CALIFICA: ${transicion.motivo_no_califica || "(sin motivo especificado)"}`);
+          camposTransicion.no_califica = true;
+          camposTransicion.no_califica_en = new Date().toISOString();
+          camposTransicion.razon_no_califica = transicion.motivo_no_califica || null;
+        }
+
+        await guardarConversacion(senderId, camposTransicion);
         transicionAplicada = true;
       } else {
         console.warn(`⚠️ Una transición apunta a la etapa "${transicion.etapa_destino}" pero no existe (o se borró) en /panel. Se ignora.`);
@@ -2033,7 +2059,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa")
       .order("actualizado_en", { ascending: false })
       .limit(200);
 
@@ -2065,6 +2091,9 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         califica: Boolean(c.califica),
         calificado_en: c.calificado_en || null,
         razon_calificacion: c.razon_calificacion || null,
+        no_califica: Boolean(c.no_califica),
+        no_califica_en: c.no_califica_en || null,
+        razon_no_califica: c.razon_no_califica || null,
         enlace_enviado: Boolean(c.enlace_enviado),
         enlace_enviado_en: c.enlace_enviado_en || null,
         enlace_pasos_enviados: pasosEnviados,
@@ -2445,6 +2474,7 @@ let configActual = {
   openai_api_key: OPENAI_API_KEY || "",
   calificacion_activa: false,
   calificar_automatico_con_enlace: false,
+  no_seguir_si_no_califica: false,
   criterios_calificacion: "",
   enlace_calificacion: "",
   seguimientos: SEGUIMIENTOS_CONFIG,
@@ -2803,7 +2833,9 @@ function normalizarTransiciones(transiciones) {
         frases: Array.isArray(t.frases) ? t.frases.map(f => String(f).trim()).filter(Boolean) : [],
         condicion: typeof t.condicion === "string" ? t.condicion.trim() : "",
         coincidencia,
-        silenciosa: Boolean(t.silenciosa)
+        silenciosa: Boolean(t.silenciosa),
+        no_califica: Boolean(t.no_califica),
+        motivo_no_califica: typeof t.motivo_no_califica === "string" ? t.motivo_no_califica.trim() : ""
       };
     })
     .filter(t => t.coincidencia === "condicion" ? Boolean(t.condicion) : t.frases.length > 0);
@@ -2863,7 +2895,7 @@ function filtrarDestinosDeTransicionValidos(transiciones, clavesValidas) {
 app.post("/config", requireAdminKey, async (req, res) => {
   try {
     const { ai_prompt, contexto_base, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
-            calificacion_activa, calificar_automatico_con_enlace, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
+            calificacion_activa, calificar_automatico_con_enlace, no_seguir_si_no_califica, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
             transiciones_generales_elegir_mejor } = req.body || {};
 
     const nuevaConfig = {};
@@ -2878,6 +2910,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof openai_api_key === "string" && openai_api_key.trim()) nuevaConfig.openai_api_key = openai_api_key.trim();
     if (typeof calificacion_activa === "boolean") nuevaConfig.calificacion_activa = calificacion_activa;
     if (typeof calificar_automatico_con_enlace === "boolean") nuevaConfig.calificar_automatico_con_enlace = calificar_automatico_con_enlace;
+    if (typeof no_seguir_si_no_califica === "boolean") nuevaConfig.no_seguir_si_no_califica = no_seguir_si_no_califica;
     if (typeof criterios_calificacion === "string") nuevaConfig.criterios_calificacion = criterios_calificacion.trim();
     if (typeof enlace_calificacion === "string") nuevaConfig.enlace_calificacion = enlace_calificacion.trim();
     if (Array.isArray(disparadores)) nuevaConfig.disparadores = normalizarDisparadores(disparadores);
@@ -3663,6 +3696,14 @@ ${estilosBase()}
               <p class="hint">Si el cliente deja de responder, el bot le manda estos mensajes después de X horas de silencio (siempre dentro de la ventana de 24h que permite Instagram). Cada paso rota entre varias opciones de mensaje para no sonar repetitivo. Estos NO se usan si ya se le mandó el enlace de calificación. También puedes usar marcadores <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[audio:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[foto:...]]</code> / <code style="background:var(--surface-3); padding:2px 6px; border-radius:5px; font-family:var(--mono);">[[pausa:N]]</code> en cualquiera de estos mensajes. Con la casilla <b>"Solo enviar si el mensaje anterior ya está visto"</b> algunos pasos pueden esperar a que el cliente haya leído tu último mensaje antes de mandarle ese paso — útil para, por ejemplo, mandar 3 seguimientos siempre y que los siguientes 4 solo se manden una vez que sepas que de verdad está viendo la conversación.</p>
             </div>
           </details>
+
+          <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer; margin:0 0 18px; padding:12px 14px; border-radius:10px; background:var(--red-soft); border:1px solid rgba(255,93,93,.3);">
+            <input type="checkbox" id="noSeguirSiNoCalifica" style="width:18px; height:18px; accent-color:var(--red); cursor:pointer; margin-top:1px; flex-shrink:0;">
+            <span style="color:var(--text); font-size:14px; font-weight:500; line-height:1.55;">
+              🚫 NO mandar ninguno de estos seguimientos a leads marcados como "NO CALIFICA" (ver la casilla en cada Transición). Útil si quieres dejar de insistirle a alguien que ya se auto-descartó con un criterio duro (ej. dijo tener menos de 40 años, o que quiere subir de peso en vez de bajar).
+            </span>
+          </label>
+
           <div id="pasos"></div>
           <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
         </div>
@@ -4047,13 +4088,25 @@ ${estilosBase()}
         \${campoActivador}
         <label>Mover a la etapa</label>
         <select class="\${prefijoClase}-destino" data-i="\${i}" style="margin-bottom:10px;">\${opcionesEtapaDestinoHTML(t.etapa_destino, incluirSalir)}</select>
-        <label style="display:flex; align-items:center; gap:9px; cursor:pointer; margin:0;">
+        <label style="display:flex; align-items:center; gap:9px; cursor:pointer; margin:0 0 10px;">
           <input type="checkbox" class="\${prefijoClase}-silenciosa" data-i="\${i}"\${t.silenciosa ? " checked" : ""} style="width:16px; height:16px; accent-color:#C99BFF; cursor:pointer;">
           <span style="color:var(--text); font-size:13.5px; font-weight:500;">🔇 No responder nada al activarse (solo cambia de etapa)</span>
         </label>
+        <label style="display:flex; align-items:center; gap:9px; cursor:pointer; margin:0;">
+          <input type="checkbox" class="\${prefijoClase}-no-califica" data-i="\${i}"\${t.no_califica ? " checked" : ""} style="width:16px; height:16px; accent-color:var(--red); cursor:pointer;">
+          <span style="color:var(--text); font-size:13.5px; font-weight:500;">🚫 Marcar como "NO CALIFICA" al activarse (para excluirlo de seguimientos, si lo configuras así)</span>
+        </label>
+        \${t.no_califica ? \`
+        <label style="margin-top:10px;">Motivo (opcional, se guarda como referencia)</label>
+        <input type="text" class="\${prefijoClase}-motivo-no-califica" data-i="\${i}" value="\${(t.motivo_no_califica || "").replace(/"/g,"&quot;")}" placeholder="Ej: Menor de 40 años">
+        \` : ''}
       \`;
       cont.appendChild(div);
     });
+    cont.querySelectorAll(\`.\${prefijoClase}-no-califica\`).forEach(chk => chk.addEventListener("change", () => {
+      alCambiar();
+      renderTransicionesEnContenedor(cont, lista, prefijoClase, alCambiar, incluirSalir);
+    }));
     cont.querySelectorAll(\`.\${prefijoClase}-quitar\`).forEach(b => b.addEventListener("click", e => {
       alCambiar();
       lista.splice(+e.target.dataset.i, 1);
@@ -4096,6 +4149,16 @@ ${estilosBase()}
       if(!lista[i]) return;
       lista[i].silenciosa = chk.checked;
     });
+    document.querySelectorAll(\`.\${prefijoClase}-no-califica\`).forEach((chk) => {
+      const i = +chk.dataset.i;
+      if(!lista[i]) return;
+      lista[i].no_califica = chk.checked;
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-motivo-no-califica\`).forEach((input) => {
+      const i = +input.dataset.i;
+      if(!lista[i]) return;
+      lista[i].motivo_no_califica = input.value;
+    });
   }
 
   let transicionesGenerales = [];
@@ -4113,7 +4176,7 @@ ${estilosBase()}
       alert("Primero crea al menos una etapa para poder mandar al lead hacia ella.");
       return;
     }
-    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene", condicion: "", silenciosa: false });
+    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "" });
     renderTransicionesGenerales();
   });
 
@@ -4366,7 +4429,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].transiciones) etapas[i].transiciones = [];
-      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene", condicion: "", silenciosa: false });
+      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "" });
       renderEtapas();
     }));
   }
@@ -4412,6 +4475,7 @@ ${estilosBase()}
     document.getElementById("maxHistorial").value = cfg.max_historial ?? 20;
     document.getElementById("calificacionActiva").checked = Boolean(cfg.calificacion_activa);
     document.getElementById("calificarAutomaticoConEnlace").checked = Boolean(cfg.calificar_automatico_con_enlace);
+    document.getElementById("noSeguirSiNoCalifica").checked = Boolean(cfg.no_seguir_si_no_califica);
     document.getElementById("criteriosCalificacion").value = cfg.criterios_calificacion || "";
     document.getElementById("enlaceCalificacion").value = cfg.enlace_calificacion || "";
     pintarEstadoClave(cfg);
@@ -4640,6 +4704,7 @@ ${estilosBase()}
       seguimientos_enlace: pasosEnlace,
       calificacion_activa: document.getElementById("calificacionActiva").checked,
       calificar_automatico_con_enlace: document.getElementById("calificarAutomaticoConEnlace").checked,
+      no_seguir_si_no_califica: document.getElementById("noSeguirSiNoCalifica").checked,
       criterios_calificacion: document.getElementById("criteriosCalificacion").value,
       enlace_calificacion: document.getElementById("enlaceCalificacion").value,
       disparadores: disparadores,
@@ -4711,6 +4776,7 @@ ${estilosBase()}
   .chat-tab.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.3); }
   .chat-tab.tab-handoff.active{ background:var(--red-soft); color:var(--red); border-color:rgba(255,93,93,.3); }
   .chat-tab.tab-califica.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.4); }
+  .chat-tab.tab-nocalifica.active{ background:var(--red-soft); color:var(--red); border-color:rgba(255,93,93,.4); }
   .chat-tab.tab-enlace.active{ background:rgba(63,199,232,.14); color:#3FC7E8; border-color:rgba(63,199,232,.4); }
   .chat-tab .count{ font-family:var(--mono); font-size:10.5px; opacity:.85; margin-left:2px; }
   .califica-badge{
@@ -4902,6 +4968,7 @@ ${estilosBase()}
         <div class="chat-tabs">
           <div class="chat-tab active" id="tabTodas" data-filtro="todas" title="Todas">Todas <span class="count" id="countTodas"></span></div>
           <div class="chat-tab tab-califica" id="tabCalifica" data-filtro="califica" title="Califica">✅ <span class="count" id="countCalifica"></span></div>
+          <div class="chat-tab tab-nocalifica" id="tabNoCalifica" data-filtro="nocalifica" title="No Califica">🚫 <span class="count" id="countNoCalifica"></span></div>
           <div class="chat-tab tab-enlace" id="tabEnlace" data-filtro="enlace" title="Enlace enviado">🔗 <span class="count" id="countEnlace"></span></div>
           <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff" title="Handoff (+24h)">⏰ <span class="count" id="countHandoff"></span></div>
         </div>
@@ -4927,6 +4994,7 @@ ${estilosBase()}
           ⏰ Esta conversación salió de la ventana de 24 horas de Instagram — el bot ya no puede mandar mensajes normales aquí, se requiere atención manual (o una plantilla aprobada).
         </div>
         <div class="califica-banner" id="calificaBanner"></div>
+        <div class="califica-banner" id="noCalificaBanner" style="background:var(--red-soft); color:var(--red); border-bottom-color:rgba(255,93,93,.25);"></div>
         <div class="enlace-banner" id="enlaceBanner"></div>
         <div class="etapa-banner" id="etapaBanner" style="display:none;">
           <span>🧭 Etapa actual:</span>
@@ -5005,10 +5073,12 @@ ${estilosBase()}
   function actualizarContadores(){
     const totalHandoff = conversaciones.filter(c => !c.en_ventana_24h).length;
     const totalCalifica = conversaciones.filter(c => c.califica).length;
+    const totalNoCalifica = conversaciones.filter(c => c.no_califica).length;
     const totalEnlace = conversaciones.filter(c => c.enlace_enviado).length;
     document.getElementById("countTodas").textContent = conversaciones.length;
     document.getElementById("countHandoff").textContent = totalHandoff;
     document.getElementById("countCalifica").textContent = totalCalifica;
+    document.getElementById("countNoCalifica").textContent = totalNoCalifica;
     document.getElementById("countEnlace").textContent = totalEnlace;
     actualizarBotonExportar({ totalHandoff, totalCalifica, totalEnlace });
   }
@@ -5038,6 +5108,7 @@ ${estilosBase()}
   function conversacionesFiltradas(){
     if(filtroActual === "handoff") return conversaciones.filter(c => !c.en_ventana_24h);
     if(filtroActual === "califica") return conversaciones.filter(c => c.califica);
+    if(filtroActual === "nocalifica") return conversaciones.filter(c => c.no_califica);
     if(filtroActual === "enlace") return conversaciones.filter(c => c.enlace_enviado);
     return conversaciones;
   }
@@ -5063,6 +5134,7 @@ ${estilosBase()}
           <div class="uname-row">
             <span class="uname">\${escapar(nombreMostrar(c))}</span>
             \${c.califica ? '<span class="califica-badge" title="Califica">✅</span>' : ''}
+            \${c.no_califica ? '<span class="califica-badge" title="No Califica' + (c.razon_no_califica ? ": " + escapar(c.razon_no_califica) : "") + '">🚫</span>' : ''}
             \${c.enlace_enviado ? '<span class="enlace-badge" title="Enlace enviado">🔗</span>' : ''}
             \${c.etapa_nombre ? '<span class="etapa-chip" title="Etapa actual">' + escapar(c.etapa_nombre) + '</span>' : ''}
             \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
@@ -5145,12 +5217,14 @@ ${estilosBase()}
     const head = document.getElementById("chatHead");
     const banner = document.getElementById("handoffBanner");
     const bannerCalifica = document.getElementById("calificaBanner");
+    const bannerNoCalifica = document.getElementById("noCalificaBanner");
     const bannerEnlace = document.getElementById("enlaceBanner");
     const bannerEtapa = document.getElementById("etapaBanner");
     if(!senderSeleccionado){
       head.innerHTML = '<span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>';
       banner.classList.remove("visible");
       bannerCalifica.classList.remove("visible");
+      bannerNoCalifica.classList.remove("visible");
       bannerEnlace.classList.remove("visible");
       bannerEtapa.style.display = "none";
       return;
@@ -5159,7 +5233,7 @@ ${estilosBase()}
     head.innerHTML = \`
       \${avatarHTML(conv)}
       <div class="chat-window-head-text">
-        <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}\${conv.califica ? ' <span title="Califica">✅</span>' : ''}\${conv.enlace_enviado ? ' <span title="Enlace enviado">🔗</span>' : ''}</div>
+        <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}\${conv.califica ? ' <span title="Califica">✅</span>' : ''}\${conv.no_califica ? ' <span title="No Califica">🚫</span>' : ''}\${conv.enlace_enviado ? ' <span title="Enlace enviado">🔗</span>' : ''}</div>
         <div class="chat-window-head-id">\${conv.sender_id}</div>
       </div>
     \`;
@@ -5170,6 +5244,13 @@ ${estilosBase()}
       bannerCalifica.classList.add("visible");
     } else {
       bannerCalifica.classList.remove("visible");
+    }
+
+    if(conv.no_califica){
+      bannerNoCalifica.textContent = "🚫 Este lead NO califica" + (conv.razon_no_califica ? ": " + conv.razon_no_califica : ".");
+      bannerNoCalifica.classList.add("visible");
+    } else {
+      bannerNoCalifica.classList.remove("visible");
     }
 
     if(conv.enlace_enviado){
@@ -5443,6 +5524,12 @@ ${estilosBase()}
     filtroActual = "califica";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabCalifica").classList.add("active");
+    renderLista();
+  });
+  document.getElementById("tabNoCalifica").addEventListener("click", () => {
+    filtroActual = "nocalifica";
+    document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
+    document.getElementById("tabNoCalifica").classList.add("active");
     renderLista();
   });
   document.getElementById("tabEnlace").addEventListener("click", () => {
