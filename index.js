@@ -2,6 +2,7 @@ const express = require("express");
 const crypto  = require("crypto");
 const axios   = require("axios");
 const OpenAI  = require("openai");
+const { toFile } = OpenAI;
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
@@ -1390,6 +1391,35 @@ async function evaluarCalificacion(historial, criterios) {
 // cliente y usarlo en publicidad/comunicación. Se le pide a la IA una
 // etiqueta CORTA y reutilizable (no una frase larga) para poder agrupar y
 // contar categorías repetidas entre distintas conversaciones.
+// Transcribe un audio que mandó el CLIENTE por Instagram (un mensaje de voz).
+// Instagram no manda ninguna transcripción propia por la API — solo la URL
+// del archivo de audio — así que se descarga y se manda a transcribir con
+// el modelo de audio de OpenAI. El texto resultante se trata exactamente
+// igual que si el cliente lo hubiera escrito: pasa por los mismos
+// disparadores, transiciones, y por el mismo historial.
+async function transcribirAudioDeInstagram(url) {
+  try {
+    const respuesta = await axios.get(url, { responseType: "arraybuffer", timeout: 20000 });
+    const buffer = Buffer.from(respuesta.data);
+
+    // El nombre con extensión ayuda al modelo a reconocer el formato del
+    // archivo (Instagram manda sus audios como .mp4/AAC, no como .mp3).
+    const archivo = await toFile(buffer, "audio.mp4");
+
+    const transcripcion = await openaiClient.audio.transcriptions.create({
+      file: archivo,
+      model: "whisper-1",
+      language: "es"
+    });
+
+    const texto = transcripcion?.text?.trim();
+    return texto || null;
+  } catch (err) {
+    console.error("❌ Error transcribiendo audio de Instagram:", err.response?.data || err.message);
+    return null;
+  }
+}
+
 async function analizarDoloresYObstaculos(transcripcion) {
   try {
     const resp = await openaiClient.chat.completions.create({
@@ -1856,24 +1886,53 @@ app.post("/webhook", async (req, res) => {
         continue;
       }
 
-      const mensaje = event.message?.text;
-      if (!mensaje) {
-        // El mensaje no trae texto — probablemente el cliente mandó un audio,
-        // una foto, un video, o algo compartido (un reel, un post, etc.).
-        // Se registra el evento COMPLETO tal cual lo mandó Instagram, para
-        // poder ver exactamente qué estructura trae (ej. si un audio viene
-        // con una URL descargable en "attachments" o no) antes de construir
-        // cualquier función que dependa de eso.
-        if (event.message?.attachments?.length > 0 && !event.message?.is_echo) {
-          console.log(`📎 Mensaje SIN TEXTO recibido de ${senderId} (probablemente audio/foto/video/compartido). Evento completo: ${JSON.stringify(event)}`);
-        }
-        continue;
-      }
-      if (event.message?.is_echo) continue;
+      const mensajeTexto = event.message?.text;
+      let mensaje = mensajeTexto;
 
-      const msgId = event.message?.mid;
-      if (msgId && yaRespondidos.has(msgId)) continue;
-      if (msgId) yaRespondidos.add(msgId);
+      if (!mensaje) {
+        if (event.message?.is_echo) continue;
+
+        // Si lo que mandó el cliente es un audio (mensaje de voz), se
+        // transcribe con IA y se trata exactamente igual que si lo hubiera
+        // escrito — Instagram no manda ninguna transcripción propia por la
+        // API, así que hay que hacerla nosotros mismos.
+        const adjuntoAudio = event.message?.attachments?.find(a => a.type === "audio" && a.payload?.url);
+
+        if (adjuntoAudio) {
+          const msgId = event.message?.mid;
+          if (msgId && yaRespondidos.has(msgId)) continue;
+          if (msgId) yaRespondidos.add(msgId);
+
+          console.log(`🎤 Audio recibido de ${senderId}, transcribiendo...`);
+          const textoTranscrito = await transcribirAudioDeInstagram(adjuntoAudio.payload.url);
+
+          if (!textoTranscrito) {
+            console.warn(`⚠️ No se pudo transcribir el audio de ${senderId} — se ignora este mensaje (el cliente no recibirá respuesta a este audio en particular).`);
+            continue;
+          }
+
+          // El emoji 🎤 al frente es solo para que se distinga en /chats que
+          // este mensaje vino de un audio transcrito, no escrito — no afecta
+          // en nada la detección de disparadores/transiciones (que buscan la
+          // frase en cualquier parte del mensaje).
+          mensaje = `🎤 ${textoTranscrito}`;
+          console.log(`🎤 Audio de ${senderId} transcrito: "${textoTranscrito}"`);
+        } else {
+          // No es audio — probablemente una foto, video, o algo compartido
+          // (un reel, un post, etc.). Se registra el evento completo para
+          // poder revisar la estructura si en algún momento se quiere
+          // soportar también.
+          if (event.message?.attachments?.length > 0) {
+            console.log(`📎 Mensaje SIN TEXTO recibido de ${senderId} (foto/video/compartido, no audio). Evento completo: ${JSON.stringify(event)}`);
+          }
+          continue;
+        }
+      } else {
+        if (event.message?.is_echo) continue;
+        const msgId = event.message?.mid;
+        if (msgId && yaRespondidos.has(msgId)) continue;
+        if (msgId) yaRespondidos.add(msgId);
+      }
 
       console.log(`📨 Mensaje recibido de ${senderId}: "${mensaje}" (esperando a ver si manda más líneas...)`);
 
