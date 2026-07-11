@@ -1397,6 +1397,21 @@ async function evaluarCalificacion(historial, criterios) {
 // el modelo de audio de OpenAI. El texto resultante se trata exactamente
 // igual que si el cliente lo hubiera escrito: pasa por los mismos
 // disparadores, transiciones, y por el mismo historial.
+// Si por lo que sea no se pudo transcribir un audio (error de red, archivo
+// corrupto, formato raro, etc.), se le avisa al cliente con una excusa
+// creíble y se le pide que lo vuelva a mandar — en vez de simplemente
+// quedarse callado, que se sentiría como que el bot lo ignoró. Rotan varias
+// para no sonar repetitivo si le llega a pasar a distintos leads. Esto es
+// solo el valor POR DEFECTO — se puede personalizar desde /panel
+// (configActual.mensajes_error_audio); si el admin no puso ninguno, se cae
+// a esta lista.
+const MENSAJES_ERROR_AUDIO_DEFECTO = [
+  "Se me cortó tu audio a la mitad, no me llegó completo 😅 ¿me lo puedes volver a mandar?",
+  "Uy, no me cargó bien tu audio, se ve que hubo un error de conexión. ¿Me lo mandas de nuevo?",
+  "Se me trabó tu audio y no lo pude escuchar completo, disculpa. ¿Lo puedes volver a enviar?",
+  "No me llegó tu audio como debía, creo que hubo un problema de conexión. ¿Me lo reenvías?"
+];
+
 async function transcribirAudioDeInstagram(url) {
   try {
     const respuesta = await axios.get(url, { responseType: "arraybuffer", timeout: 20000 });
@@ -1907,7 +1922,11 @@ app.post("/webhook", async (req, res) => {
           const textoTranscrito = await transcribirAudioDeInstagram(adjuntoAudio.payload.url);
 
           if (!textoTranscrito) {
-            console.warn(`⚠️ No se pudo transcribir el audio de ${senderId} — se ignora este mensaje (el cliente no recibirá respuesta a este audio en particular).`);
+            console.warn(`⚠️ No se pudo transcribir el audio de ${senderId} — se le avisa y se le pide que lo mande de nuevo.`);
+            const listaMensajesError = (configActual.mensajes_error_audio?.length > 0) ? configActual.mensajes_error_audio : MENSAJES_ERROR_AUDIO_DEFECTO;
+            const mensajeError = listaMensajesError[Math.floor(Math.random() * listaMensajesError.length)];
+            await agregarAlHistorialDB(senderId, "assistant", mensajeError);
+            await enviarMensajeInstagram(senderId, mensajeError);
             continue;
           }
 
@@ -2569,6 +2588,12 @@ let configActual = {
   calificar_automatico_con_enlace: false,
   no_seguir_si_no_califica: false,
   parar_seguimientos_si_agendo: false,
+  mensajes_error_audio: [
+    "Se me cortó tu audio a la mitad, no me llegó completo 😅 ¿me lo puedes volver a mandar?",
+    "Uy, no me cargó bien tu audio, se ve que hubo un error de conexión. ¿Me lo mandas de nuevo?",
+    "Se me trabó tu audio y no lo pude escuchar completo, disculpa. ¿Lo puedes volver a enviar?",
+    "No me llegó tu audio como debía, creo que hubo un problema de conexión. ¿Me lo reenvías?"
+  ],
   criterios_calificacion: "",
   enlace_calificacion: "",
   seguimientos: SEGUIMIENTOS_CONFIG,
@@ -2991,7 +3016,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
   try {
     const { ai_prompt, contexto_base, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
             calificacion_activa, calificar_automatico_con_enlace, no_seguir_si_no_califica, parar_seguimientos_si_agendo, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
-            transiciones_generales_elegir_mejor } = req.body || {};
+            transiciones_generales_elegir_mejor, mensajes_error_audio } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -3007,6 +3032,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof calificar_automatico_con_enlace === "boolean") nuevaConfig.calificar_automatico_con_enlace = calificar_automatico_con_enlace;
     if (typeof no_seguir_si_no_califica === "boolean") nuevaConfig.no_seguir_si_no_califica = no_seguir_si_no_califica;
     if (typeof parar_seguimientos_si_agendo === "boolean") nuevaConfig.parar_seguimientos_si_agendo = parar_seguimientos_si_agendo;
+    if (Array.isArray(mensajes_error_audio)) nuevaConfig.mensajes_error_audio = mensajes_error_audio.map(m => String(m).trim()).filter(Boolean);
     if (typeof criterios_calificacion === "string") nuevaConfig.criterios_calificacion = criterios_calificacion.trim();
     if (typeof enlace_calificacion === "string") nuevaConfig.enlace_calificacion = enlace_calificacion.trim();
     if (Array.isArray(disparadores)) nuevaConfig.disparadores = normalizarDisparadores(disparadores);
@@ -3736,6 +3762,12 @@ ${estilosBase()}
           </div>
           <button class="add-paso" id="btnSubirFoto" type="button" style="margin-top:12px;">⬆ Subir foto</button>
           <p class="hint" id="fotoSubidaMsg" style="margin:10px 0 0;"></p>
+
+          <div style="height:1px; background:var(--border); margin:24px 0;"></div>
+
+          <p style="font-family:var(--display); font-weight:600; font-size:14.5px; margin:0 0 5px;">🎙️ Si un audio del CLIENTE no se puede transcribir</p>
+          <p class="hint" style="margin:0 0 10px;">Cuando un lead te manda un audio, el bot lo transcribe con IA para poder entenderlo y responder. Si por lo que sea la transcripción falla (error de red, archivo raro, etc.), en vez de quedarse callado le manda uno de estos mensajes pidiéndole que lo vuelva a mandar — rotan entre ellos para no sonar repetitivo. Uno por línea.</p>
+          <textarea id="mensajesErrorAudio" rows="5" placeholder="Ej: Se me cortó tu audio, no me llegó completo. ¿me lo puedes volver a mandar?"></textarea>
         </div>
 
         <div class="card card-destacada">
@@ -4610,6 +4642,7 @@ ${estilosBase()}
     document.getElementById("noSeguirSiNoCalifica").checked = Boolean(cfg.no_seguir_si_no_califica);
     document.getElementById("pararSeguimientosSiAgendo").checked = Boolean(cfg.parar_seguimientos_si_agendo);
     document.getElementById("pararSeguimientosSiAgendoEnlace").checked = Boolean(cfg.parar_seguimientos_si_agendo);
+    document.getElementById("mensajesErrorAudio").value = Array.isArray(cfg.mensajes_error_audio) ? cfg.mensajes_error_audio.join("\\n") : "";
     document.getElementById("criteriosCalificacion").value = cfg.criterios_calificacion || "";
     document.getElementById("enlaceCalificacion").value = cfg.enlace_calificacion || "";
     pintarEstadoClave(cfg);
@@ -4840,6 +4873,7 @@ ${estilosBase()}
       calificar_automatico_con_enlace: document.getElementById("calificarAutomaticoConEnlace").checked,
       no_seguir_si_no_califica: document.getElementById("noSeguirSiNoCalifica").checked,
       parar_seguimientos_si_agendo: document.getElementById("pararSeguimientosSiAgendo").checked,
+      mensajes_error_audio: document.getElementById("mensajesErrorAudio").value.split("\\n").map(m => m.trim()).filter(Boolean),
       criterios_calificacion: document.getElementById("criteriosCalificacion").value,
       enlace_calificacion: document.getElementById("enlaceCalificacion").value,
       disparadores: disparadores,
