@@ -5137,48 +5137,41 @@ ${estilosBase()}
     border-bottom:1px solid rgba(255,93,93,.25); display:none; align-items:center; gap:8px;
   }
   .handoff-banner.visible{ display:flex; }
-  .califica-banner{
-    background:var(--green-soft); color:var(--green); font-size:13px; padding:11px 20px;
-    border-bottom:1px solid rgba(49,217,124,.25); display:none; align-items:center; gap:8px;
+  .chat-status-bar{
+    background:var(--surface); padding:8px 14px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:7px; flex-wrap:wrap;
   }
-  .califica-banner.visible{ display:flex; }
-  .enlace-banner{
-    background:rgba(63,199,232,.1); color:#3FC7E8; font-size:13px; padding:11px 20px;
-    border-bottom:1px solid rgba(63,199,232,.28); display:none; align-items:center; gap:8px;
+  .status-sep{ color:var(--muted-dim); font-size:12px; flex-shrink:0; }
+  .status-chip{
+    display:inline-flex; align-items:center; font-size:11.5px; font-weight:600;
+    padding:4px 9px; border-radius:20px; white-space:nowrap; cursor:default;
   }
-  .enlace-banner.visible{ display:flex; }
-  .etapa-banner{
-    background:rgba(201,155,255,.08); color:#C99BFF; font-size:13px; padding:11px 20px;
-    border-bottom:1px solid rgba(201,155,255,.25); display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  .status-chip-califica{ background:var(--green-soft); color:var(--green); }
+  .status-chip-nocalifica{ background:var(--red-soft); color:var(--red); }
+  .status-chip-agendo{ background:rgba(49,217,124,.14); color:var(--green); }
+  .status-chip-enlace{ background:rgba(63,199,232,.12); color:#3FC7E8; }
+  .status-select{
+    background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:7px; padding:5px 8px; font-size:11.5px; font-family:var(--body); max-width:150px;
   }
-  .etapa-banner select{
-    background:var(--surface-3); border:1px solid rgba(201,155,255,.35); color:var(--text);
-    border-radius:8px; padding:6px 10px; font-size:13px; font-family:var(--body);
-  }
-  .etiquetas-banner{
-    background:rgba(255,197,66,.08); font-size:13px; padding:11px 20px;
-    border-bottom:1px solid rgba(255,197,66,.25); display:flex; align-items:center; gap:10px;
-    flex-wrap:wrap; position:relative;
-  }
-  .etiquetas-banner-label{ color:#FFC542; font-weight:600; flex-shrink:0; }
-  .etiquetas-lista{ display:flex; gap:6px; flex-wrap:wrap; }
+  .etiquetas-lista{ display:flex; gap:5px; flex-wrap:wrap; }
   .etiqueta-chip{
-    display:inline-flex; align-items:center; gap:6px; background:rgba(255,197,66,.14);
+    display:inline-flex; align-items:center; gap:5px; background:rgba(255,197,66,.14);
     color:#FFC542; border:1px solid rgba(255,197,66,.35); border-radius:20px;
-    padding:4px 6px 4px 12px; font-size:12.5px; font-weight:600;
+    padding:3px 5px 3px 10px; font-size:11.5px; font-weight:600;
   }
   .etiqueta-chip button{
-    background:none; border:none; color:#FFC542; cursor:pointer; font-size:14px;
-    line-height:1; padding:2px 4px; opacity:.7; border-radius:50%;
+    background:none; border:none; color:#FFC542; cursor:pointer; font-size:13px;
+    line-height:1; padding:1px 3px; opacity:.7; border-radius:50%;
   }
   .etiqueta-chip button:hover{ opacity:1; background:rgba(255,197,66,.2); }
   .btn-add-etiqueta{
     background:var(--surface-3); border:1px solid var(--border); color:var(--text);
-    border-radius:20px; padding:5px 12px; font-size:12.5px; font-weight:600; cursor:pointer;
+    border-radius:20px; padding:4px 9px; font-size:11.5px; font-weight:600; cursor:pointer;
   }
   .btn-add-etiqueta:hover{ border-color:#FFC542; color:#FFC542; }
   .etiqueta-popover{
-    position:absolute; top:100%; left:20px; margin-top:6px; background:var(--surface-2);
+    position:absolute; top:100%; left:14px; margin-top:6px; background:var(--surface-2);
     border:1px solid var(--border); border-radius:10px; padding:10px; display:flex; gap:8px;
     box-shadow:0 8px 24px rgba(0,0,0,.35); z-index:20;
   }
@@ -5368,18 +5361,16 @@ ${estilosBase()}
         <div class="handoff-banner" id="handoffBanner">
           ⏰ Esta conversación salió de la ventana de 24 horas de Instagram — el bot ya no puede mandar mensajes normales aquí, se requiere atención manual (o una plantilla aprobada).
         </div>
-        <div class="califica-banner" id="calificaBanner"></div>
-        <div class="califica-banner" id="noCalificaBanner" style="background:var(--red-soft); color:var(--red); border-bottom-color:rgba(255,93,93,.25);"></div>
-        <div class="califica-banner" id="agendoBanner"></div>
-        <div class="enlace-banner" id="enlaceBanner"></div>
-        <div class="etapa-banner" id="etapaBanner" style="display:none;">
-          <span>🧭 Etapa actual:</span>
-          <select id="selectEtapa"><option value="">Sin etapa (general)</option></select>
-        </div>
-        <div class="etiquetas-banner" id="etiquetasBanner" style="display:none;">
-          <span class="etiquetas-banner-label">🏷️ Etiquetas:</span>
+        <div class="chat-status-bar" id="chatStatusBar" style="display:none;">
+          <span class="status-chip status-chip-califica" id="chipCalifica" style="display:none;">✅ Califica</span>
+          <span class="status-chip status-chip-nocalifica" id="chipNoCalifica" style="display:none;">🚫 No Califica</span>
+          <span class="status-chip status-chip-agendo" id="chipAgendo" style="display:none;">📅 Agendó</span>
+          <span class="status-chip status-chip-enlace" id="chipEnlace" style="display:none;">🔗 Enlace</span>
+          <span class="status-sep">·</span>
+          <select id="selectEtapa" class="status-select"><option value="">Sin etapa (general)</option></select>
+          <span class="status-sep">·</span>
           <div class="etiquetas-lista" id="etiquetasLista"></div>
-          <button type="button" class="btn-add-etiqueta" id="btnAddEtiqueta">+ Agregar</button>
+          <button type="button" class="btn-add-etiqueta" id="btnAddEtiqueta">+ 🏷️</button>
           <div class="etiqueta-popover" id="etiquetaPopover" style="display:none;">
             <input type="text" id="inputNuevaEtiqueta" placeholder="Escribe o elige una etiqueta..." list="listaEtiquetasExistentes" autocomplete="off">
             <datalist id="listaEtiquetasExistentes"></datalist>
@@ -5607,21 +5598,15 @@ ${estilosBase()}
   function renderHead(){
     const head = document.getElementById("chatHead");
     const banner = document.getElementById("handoffBanner");
-    const bannerCalifica = document.getElementById("calificaBanner");
-    const bannerNoCalifica = document.getElementById("noCalificaBanner");
-    const bannerAgendo = document.getElementById("agendoBanner");
-    const bannerEnlace = document.getElementById("enlaceBanner");
-    const bannerEtapa = document.getElementById("etapaBanner");
-    const bannerEtiquetas = document.getElementById("etiquetasBanner");
+    const statusBar = document.getElementById("chatStatusBar");
+    const chipCalifica = document.getElementById("chipCalifica");
+    const chipNoCalifica = document.getElementById("chipNoCalifica");
+    const chipAgendo = document.getElementById("chipAgendo");
+    const chipEnlace = document.getElementById("chipEnlace");
     if(!senderSeleccionado){
       head.innerHTML = '<span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>';
       banner.classList.remove("visible");
-      bannerCalifica.classList.remove("visible");
-      bannerNoCalifica.classList.remove("visible");
-      bannerAgendo.classList.remove("visible");
-      bannerEnlace.classList.remove("visible");
-      bannerEtapa.style.display = "none";
-      bannerEtiquetas.style.display = "none";
+      statusBar.style.display = "none";
       return;
     }
     const conv = conversaciones.find(c => c.sender_id === senderSeleccionado) || { sender_id: senderSeleccionado, en_ventana_24h: true };
@@ -5633,49 +5618,50 @@ ${estilosBase()}
       </div>
     \`;
     banner.classList.toggle("visible", conv.en_ventana_24h === false);
+    statusBar.style.display = "flex";
 
+    // Cada chip es pequeño y solo muestra el detalle (razón/fecha) al pasar
+    // el mouse por encima (title) — así la barra queda compacta aunque
+    // varios estados estén activos a la vez, en vez de apilar un banner
+    // completo por cada uno.
     if(conv.califica){
-      bannerCalifica.textContent = "✅ Este lead califica" + (conv.razon_calificacion ? ": " + conv.razon_calificacion : ".");
-      bannerCalifica.classList.add("visible");
+      chipCalifica.title = "Califica" + (conv.razon_calificacion ? ": " + conv.razon_calificacion : "");
+      chipCalifica.style.display = "inline-flex";
     } else {
-      bannerCalifica.classList.remove("visible");
+      chipCalifica.style.display = "none";
     }
 
     if(conv.no_califica){
-      bannerNoCalifica.textContent = "🚫 Este lead NO califica" + (conv.razon_no_califica ? ": " + conv.razon_no_califica : ".");
-      bannerNoCalifica.classList.add("visible");
+      chipNoCalifica.title = "No Califica" + (conv.razon_no_califica ? ": " + conv.razon_no_califica : "");
+      chipNoCalifica.style.display = "inline-flex";
     } else {
-      bannerNoCalifica.classList.remove("visible");
+      chipNoCalifica.style.display = "none";
     }
 
     if(conv.agendo){
-      bannerAgendo.textContent = "📅 Este lead confirmó que ya agendó" + (conv.agendo_en ? " (" + formatearFecha(conv.agendo_en) + ")" : "") + ".";
-      bannerAgendo.classList.add("visible");
+      chipAgendo.title = "Confirmó que ya agendó" + (conv.agendo_en ? " (" + formatearFecha(conv.agendo_en) + ")" : "");
+      chipAgendo.style.display = "inline-flex";
     } else {
-      bannerAgendo.classList.remove("visible");
+      chipAgendo.style.display = "none";
     }
 
     if(conv.enlace_enviado){
       const estadoSeguimiento = conv.enlace_seguimiento_activo
         ? "seguimiento especial en curso (paso " + ((conv.enlace_pasos_enviados || 0) + 1) + ")"
         : "seguimiento especial terminado, ahora sigue el normal";
-      bannerEnlace.textContent = "🔗 Ya se le mandó el enlace de calificación" + (conv.enlace_enviado_en ? " (" + formatearFecha(conv.enlace_enviado_en) + ")" : "") + " — " + estadoSeguimiento + ".";
-      bannerEnlace.classList.add("visible");
+      chipEnlace.title = "Enlace de calificación enviado" + (conv.enlace_enviado_en ? " (" + formatearFecha(conv.enlace_enviado_en) + ")" : "") + " — " + estadoSeguimiento;
+      chipEnlace.style.display = "inline-flex";
     } else {
-      bannerEnlace.classList.remove("visible");
+      chipEnlace.style.display = "none";
     }
 
     // Selector de etapa: siempre visible mientras haya una conversación
     // seleccionada, sirve tanto para ver la etapa actual como para cambiarla
     // a mano (útil si la IA no puso el marcador [[etapa:..]] correctamente).
-    bannerEtapa.style.display = "flex";
     const selectEtapa = document.getElementById("selectEtapa");
     selectEtapa.innerHTML = opcionesEtapaHTML(conv.etapa || "");
 
-    // Etiquetas manuales: siempre visible mientras haya una conversación
-    // seleccionada, para poder agregar la primera etiqueta aunque todavía
-    // no tenga ninguna.
-    bannerEtiquetas.style.display = "flex";
+    // Etiquetas manuales
     const listaEtiquetas = document.getElementById("etiquetasLista");
     const etiquetas = Array.isArray(conv.etiquetas) ? conv.etiquetas : [];
     listaEtiquetas.innerHTML = etiquetas.map(et => \`
