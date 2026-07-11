@@ -2523,33 +2523,49 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
 // o pagó).
 app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
   try {
-    const contar = async (filtroFn) => {
-      let consulta = supabase.from("conversaciones").select("*", { count: "exact", head: true });
-      consulta = filtroFn(consulta);
-      const { count, error } = await consulta;
-      if (error) throw error;
-      return count || 0;
+    // Cada conteo se hace por separado y con su propio manejo de error — así,
+    // si alguna columna todavía no existe (ej. no corriste alguna de las
+    // migraciones de etiquetas/monto_pagado), esa parte en particular se
+    // queda en 0 en vez de tumbar TODO el dashboard.
+    const contar = async (filtroFn, etiquetaError) => {
+      try {
+        let consulta = supabase.from("conversaciones").select("*", { count: "exact", head: true });
+        consulta = filtroFn(consulta);
+        const { count, error } = await consulta;
+        if (error) throw error;
+        return count || 0;
+      } catch (err) {
+        console.error(`❌ Error contando "${etiquetaError}" en el dashboard (¿corriste todas las migraciones?):`, err.message);
+        return 0;
+      }
     };
 
-    const total = await contar(q => q);
-    const totalCalifica = await contar(q => q.eq("califica", true));
-    const totalNoCalifica = await contar(q => q.eq("no_califica", true));
-    const totalEnlace = await contar(q => q.eq("enlace_enviado", true));
-    const totalAgendo = await contar(q => q.eq("agendo", true));
+    const total = await contar(q => q, "total");
+    const totalCalifica = await contar(q => q.eq("califica", true), "califica");
+    const totalNoCalifica = await contar(q => q.eq("no_califica", true), "no_califica");
+    const totalEnlace = await contar(q => q.eq("enlace_enviado", true), "enlace_enviado");
+    const totalAgendo = await contar(q => q.eq("agendo", true), "agendo");
 
     const etiquetaAsistio = configActual.dashboard_etiqueta_asistio?.trim();
     const etiquetaCompro = configActual.dashboard_etiqueta_compro?.trim();
 
-    const totalAsistio = etiquetaAsistio ? await contar(q => q.contains("etiquetas", [etiquetaAsistio])) : 0;
-    const totalCompro = etiquetaCompro ? await contar(q => q.contains("etiquetas", [etiquetaCompro])) : 0;
+    const totalAsistio = etiquetaAsistio ? await contar(q => q.contains("etiquetas", [etiquetaAsistio]), "asistio") : 0;
+    const totalCompro = etiquetaCompro ? await contar(q => q.contains("etiquetas", [etiquetaCompro]), "compro") : 0;
 
     // Cash collected: suma de todos los montos pagados registrados a mano.
-    const { data: pagos, error: errorPagos } = await supabase
-      .from("conversaciones")
-      .select("monto_pagado")
-      .gt("monto_pagado", 0);
-    if (errorPagos) throw errorPagos;
-    const cashCollected = (pagos || []).reduce((suma, p) => suma + (Number(p.monto_pagado) || 0), 0);
+    // Igual que arriba, si la columna todavía no existe, se queda en 0 en
+    // vez de romper el resto del dashboard.
+    let cashCollected = 0;
+    try {
+      const { data: pagos, error: errorPagos } = await supabase
+        .from("conversaciones")
+        .select("monto_pagado")
+        .gt("monto_pagado", 0);
+      if (errorPagos) throw errorPagos;
+      cashCollected = (pagos || []).reduce((suma, p) => suma + (Number(p.monto_pagado) || 0), 0);
+    } catch (err) {
+      console.error("❌ Error sumando monto_pagado en el dashboard (¿corriste migracion_dashboard.sql?):", err.message);
+    }
 
     const porcentaje = (parte, base) => (base > 0 ? (parte / base) * 100 : 0);
 
@@ -4170,25 +4186,41 @@ ${estilosBase()}
   }
 
   async function cargarDashboard(){
-    const res = await fetch("/dashboard/datos");
-    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
-    const data = await res.json();
-    if(data.error) return;
+    let data;
+    try {
+      const res = await fetch("/dashboard/datos");
+      if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+      data = await res.json();
+    } catch (err) {
+      console.error("Error cargando /dashboard/datos:", err);
+      return;
+    }
+
+    if(!data || data.error){
+      console.error("El servidor no pudo calcular los datos del dashboard:", data?.error || "(respuesta vacía)");
+      return;
+    }
+
+    // Defensivo: si por lo que sea faltara algún campo esperado en la
+    // respuesta, se usan valores en 0 en vez de romper la página — y se dej
+    // a un registro en consola para poder diagnosticar qué vino distinto.
+    const porcentajes = data.porcentajes || {};
+    if(!data.porcentajes) console.warn("La respuesta de /dashboard/datos no trajo \"porcentajes\":", data);
 
     document.getElementById("dashCash").textContent = formatearMoneda(data.cashCollected);
-    document.getElementById("dashNoCalifica").textContent = data.totalNoCalifica;
-    document.getElementById("dashTotal").textContent = data.total;
-    document.getElementById("dashCalifica").textContent = data.totalCalifica;
-    document.getElementById("dashEnlace").textContent = data.totalEnlace;
-    document.getElementById("dashAgendo").textContent = data.totalAgendo;
-    document.getElementById("dashAsistio").textContent = data.totalAsistio;
-    document.getElementById("dashCompro").textContent = data.totalCompro;
+    document.getElementById("dashNoCalifica").textContent = data.totalNoCalifica ?? 0;
+    document.getElementById("dashTotal").textContent = data.total ?? 0;
+    document.getElementById("dashCalifica").textContent = data.totalCalifica ?? 0;
+    document.getElementById("dashEnlace").textContent = data.totalEnlace ?? 0;
+    document.getElementById("dashAgendo").textContent = data.totalAgendo ?? 0;
+    document.getElementById("dashAsistio").textContent = data.totalAsistio ?? 0;
+    document.getElementById("dashCompro").textContent = data.totalCompro ?? 0;
 
-    document.getElementById("pctCalifica").textContent = formatearPct(data.porcentajes.califica_de_total);
-    document.getElementById("pctEnlace").textContent = formatearPct(data.porcentajes.enlace_de_califica);
-    document.getElementById("pctAgendo").textContent = formatearPct(data.porcentajes.agendo_de_enlace);
-    document.getElementById("pctAsistio").textContent = formatearPct(data.porcentajes.asistio_de_agendo);
-    document.getElementById("pctCompro").textContent = formatearPct(data.porcentajes.compro_de_asistio);
+    document.getElementById("pctCalifica").textContent = formatearPct(porcentajes.califica_de_total);
+    document.getElementById("pctEnlace").textContent = formatearPct(porcentajes.enlace_de_califica);
+    document.getElementById("pctAgendo").textContent = formatearPct(porcentajes.agendo_de_enlace);
+    document.getElementById("pctAsistio").textContent = formatearPct(porcentajes.asistio_de_agendo);
+    document.getElementById("pctCompro").textContent = formatearPct(porcentajes.compro_de_asistio);
 
     const avisos = [];
     if(!data.etiquetaAsistioConfigurada) avisos.push('"Asistió"');
