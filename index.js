@@ -181,11 +181,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [] };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0 };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [] };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0 };
   }
 
   return data;
@@ -852,6 +852,7 @@ function sidebarHTML(activo) {
     <div class="brand-name">IG AI Responder</div>
   </div>
   <nav class="side-nav">
+    ${link("/dashboard", "DSH", "Dashboard", "dashboard")}
     ${link("/cuentas", "CTA", "Cuentas", "cuentas")}
     ${link("/panel", "CFG", "Configuración", "panel")}
     ${link("/chats", "CHT", "Chats", "chats")}
@@ -2457,7 +2458,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado")
       .order("actualizado_en", { ascending: false })
       .limit(200);
 
@@ -2500,13 +2501,81 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         enlace_seguimiento_activo: Boolean(c.enlace_enviado) && pasosEnviados < totalPasosEnlace,
         etapa: c.etapa || null,
         etapa_nombre: etapaConfig ? (etapaConfig.nombre || etapaConfig.clave) : null,
-        etiquetas: Array.isArray(c.etiquetas) ? c.etiquetas : []
+        etiquetas: Array.isArray(c.etiquetas) ? c.etiquetas : [],
+        monto_pagado: Number(c.monto_pagado) || 0
       };
     }));
 
 
     res.json({ conversaciones: resumen });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Datos agregados del embudo completo para /dashboard: cuenta cada paso
+// (conversaciones -> califica -> enlace -> agendó -> asistió -> compró) y
+// calcula el % de conversión de un paso al siguiente, además del total de
+// "cash collected" (suma de lo que cada lead pagó, registrado a mano desde
+// /chats). "Asistió" y "Compró" se identifican por las etiquetas manuales
+// que elijas en la configuración del dashboard (no son automáticas, porque
+// el bot no tiene forma de saber por su cuenta si alguien fue a la llamada
+// o pagó).
+app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
+  try {
+    const contar = async (filtroFn) => {
+      let consulta = supabase.from("conversaciones").select("*", { count: "exact", head: true });
+      consulta = filtroFn(consulta);
+      const { count, error } = await consulta;
+      if (error) throw error;
+      return count || 0;
+    };
+
+    const total = await contar(q => q);
+    const totalCalifica = await contar(q => q.eq("califica", true));
+    const totalNoCalifica = await contar(q => q.eq("no_califica", true));
+    const totalEnlace = await contar(q => q.eq("enlace_enviado", true));
+    const totalAgendo = await contar(q => q.eq("agendo", true));
+
+    const etiquetaAsistio = configActual.dashboard_etiqueta_asistio?.trim();
+    const etiquetaCompro = configActual.dashboard_etiqueta_compro?.trim();
+
+    const totalAsistio = etiquetaAsistio ? await contar(q => q.contains("etiquetas", [etiquetaAsistio])) : 0;
+    const totalCompro = etiquetaCompro ? await contar(q => q.contains("etiquetas", [etiquetaCompro])) : 0;
+
+    // Cash collected: suma de todos los montos pagados registrados a mano.
+    const { data: pagos, error: errorPagos } = await supabase
+      .from("conversaciones")
+      .select("monto_pagado")
+      .gt("monto_pagado", 0);
+    if (errorPagos) throw errorPagos;
+    const cashCollected = (pagos || []).reduce((suma, p) => suma + (Number(p.monto_pagado) || 0), 0);
+
+    const porcentaje = (parte, base) => (base > 0 ? (parte / base) * 100 : 0);
+
+    res.json({
+      total,
+      totalCalifica,
+      totalNoCalifica,
+      totalEnlace,
+      totalAgendo,
+      totalAsistio,
+      totalCompro,
+      cashCollected,
+      etiquetaAsistioConfigurada: Boolean(etiquetaAsistio),
+      etiquetaCompraConfigurada: Boolean(etiquetaCompro),
+      etiquetaAsistio: etiquetaAsistio || null,
+      etiquetaCompro: etiquetaCompro || null,
+      porcentajes: {
+        califica_de_total: porcentaje(totalCalifica, total),
+        enlace_de_califica: porcentaje(totalEnlace, totalCalifica),
+        agendo_de_enlace: porcentaje(totalAgendo, totalEnlace),
+        asistio_de_agendo: porcentaje(totalAsistio, totalAgendo),
+        compro_de_asistio: porcentaje(totalCompro, totalAsistio)
+      }
+    });
+  } catch (err) {
+    console.error("❌ Error calculando datos del dashboard:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -2593,6 +2662,26 @@ app.post("/chats/etiqueta/quitar", requireAdminKey, async (req, res) => {
     await guardarConversacion(senderId, { etiquetas: etiquetasNuevas });
 
     res.json({ ok: true, etiquetas: etiquetasNuevas });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Guarda cuánto pagó un lead (para el "cash collected" del dashboard). Es
+// manual — se escribe a mano desde /chats cuando el pago se confirma por
+// fuera del bot (transferencia, tarjeta, lo que sea).
+app.post("/chats/monto-pagado", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId, monto } = req.body || {};
+    if (!senderId) return res.status(400).json({ error: "Falta senderId." });
+
+    const montoNumero = Number(monto);
+    if (!Number.isFinite(montoNumero) || montoNumero < 0) {
+      return res.status(400).json({ error: "El monto debe ser un número válido, mayor o igual a 0." });
+    }
+
+    await guardarConversacion(senderId, { monto_pagado: montoNumero });
+    res.json({ ok: true, monto_pagado: montoNumero });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2995,7 +3084,9 @@ let configActual = {
   calendly_pregunta_instagram: "", // texto EXACTO de la pregunta personalizada en Calendly que pide el usuario de Instagram
   calendly_organization_uri: "",
   calendly_webhook_uri: "",
-  calendly_conectado_en: null
+  calendly_conectado_en: null,
+  dashboard_etiqueta_asistio: "", // nombre exacto de la etiqueta manual que representa "asistió a la llamada"
+  dashboard_etiqueta_compro: ""   // nombre exacto de la etiqueta manual que representa "compró / se cerró"
 };
 
 // Cliente de OpenAI: se reconstruye cada vez que cambia configActual.openai_api_key
@@ -3411,7 +3502,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
   try {
     const { ai_prompt, contexto_base, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
             calificacion_activa, calificar_automatico_con_enlace, no_seguir_si_no_califica, parar_seguimientos_si_agendo, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
-            transiciones_generales_elegir_mejor, mensajes_error_audio, calendly_token, calendly_pregunta_instagram } = req.body || {};
+            transiciones_generales_elegir_mejor, mensajes_error_audio, calendly_token, calendly_pregunta_instagram,
+            dashboard_etiqueta_asistio, dashboard_etiqueta_compro } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -3426,6 +3518,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
     // Mismo criterio para el token de Calendly — no se pisa con vacío.
     if (typeof calendly_token === "string" && calendly_token.trim()) nuevaConfig.calendly_token = calendly_token.trim();
     if (typeof calendly_pregunta_instagram === "string") nuevaConfig.calendly_pregunta_instagram = calendly_pregunta_instagram.trim();
+    if (typeof dashboard_etiqueta_asistio === "string") nuevaConfig.dashboard_etiqueta_asistio = dashboard_etiqueta_asistio.trim();
+    if (typeof dashboard_etiqueta_compro === "string") nuevaConfig.dashboard_etiqueta_compro = dashboard_etiqueta_compro.trim();
     if (typeof calificacion_activa === "boolean") nuevaConfig.calificacion_activa = calificacion_activa;
     if (typeof calificar_automatico_con_enlace === "boolean") nuevaConfig.calificar_automatico_con_enlace = calificar_automatico_con_enlace;
     if (typeof no_seguir_si_no_califica === "boolean") nuevaConfig.no_seguir_si_no_califica = no_seguir_si_no_califica;
@@ -3874,6 +3968,295 @@ ${estilosBase()}
   }
 
   cargarCuentaActual();
+</script>
+</body>
+</html>
+  `);
+});
+
+app.get("/dashboard", requireAdminSesion, (req, res) => {
+  res.type("html").send(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard — Instagram AI Responder</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+${FUENTES_HTML}
+${estilosBase()}
+<style>
+  .dash-cash-card{
+    background:linear-gradient(135deg, rgba(49,217,124,.12), rgba(49,217,124,.03));
+    border:1px solid rgba(49,217,124,.3); border-radius:var(--radius-lg);
+    padding:24px 28px; margin-bottom:22px; display:flex; align-items:center; justify-content:space-between;
+    flex-wrap:wrap; gap:16px;
+  }
+  .dash-cash-label{ font-family:var(--display); font-size:15px; font-weight:600; color:var(--muted); }
+  .dash-cash-value{ font-family:var(--display); font-size:38px; font-weight:700; color:var(--green); }
+  .dash-side-stats{ display:flex; gap:14px; margin-bottom:22px; flex-wrap:wrap; }
+  .dash-side-stat{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    padding:14px 18px; flex:1; min-width:160px;
+  }
+  .dash-side-stat-label{ font-size:12.5px; color:var(--muted); margin-bottom:5px; }
+  .dash-side-stat-value{ font-family:var(--display); font-size:22px; font-weight:700; }
+  .dash-funnel{ display:flex; flex-direction:column; align-items:stretch; gap:0; margin-bottom:26px; }
+  .dash-step{
+    background:var(--surface); border:1px solid var(--border); border-radius:14px;
+    padding:20px 26px; display:flex; align-items:center; justify-content:space-between;
+    transition:border-color .15s;
+  }
+  .dash-step-left{ display:flex; align-items:center; gap:14px; }
+  .dash-step-icon{ font-size:26px; flex-shrink:0; }
+  .dash-step-label{ font-family:var(--display); font-size:16px; font-weight:600; }
+  .dash-step-sub{ font-size:12.5px; color:var(--muted); margin-top:2px; }
+  .dash-step-value{ font-family:var(--display); font-size:30px; font-weight:700; flex-shrink:0; }
+  .dash-arrow-row{
+    display:flex; align-items:center; justify-content:center; gap:10px;
+    padding:8px 0; color:var(--muted); font-size:13px; font-family:var(--mono);
+  }
+  .dash-arrow-row .arrow-line{ flex:1; max-width:60px; height:1px; background:var(--border); }
+  .dash-arrow-pct{
+    font-weight:700; font-size:14px; padding:3px 10px; border-radius:20px;
+    background:var(--surface-3); color:var(--text);
+  }
+  .dash-step.step-total{ border-color:rgba(255,255,255,.15); }
+  .dash-step.step-califica{ border-color:rgba(49,217,124,.35); }
+  .dash-step.step-califica .dash-step-value{ color:var(--green); }
+  .dash-step.step-enlace{ border-color:rgba(63,199,232,.35); }
+  .dash-step.step-enlace .dash-step-value{ color:#3FC7E8; }
+  .dash-step.step-agendo{ border-color:rgba(49,217,124,.35); }
+  .dash-step.step-agendo .dash-step-value{ color:var(--green); }
+  .dash-step.step-asistio{ border-color:rgba(201,155,255,.35); }
+  .dash-step.step-asistio .dash-step-value{ color:#C99BFF; }
+  .dash-step.step-compro{ border-color:rgba(255,197,66,.4); }
+  .dash-step.step-compro .dash-step-value{ color:#FFC542; }
+  .dash-config-card{
+    background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg);
+    padding:22px 26px; margin-top:8px;
+  }
+  .dash-config-row{ display:flex; gap:16px; flex-wrap:wrap; margin-top:14px; }
+  .dash-config-field{ flex:1; min-width:220px; }
+  .dash-config-field label{ display:block; font-size:13px; color:var(--muted); margin-bottom:6px; }
+  .dash-config-field select{
+    width:100%; background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:9px 10px; font-size:13.5px; font-family:var(--body);
+  }
+  .dash-config-msg{ font-size:13px; margin-top:12px; min-height:18px; }
+  .dash-warning{
+    background:rgba(255,197,66,.08); border:1px solid rgba(255,197,66,.3); border-radius:10px;
+    padding:12px 16px; font-size:13px; color:#FFC542; margin-bottom:18px;
+  }
+</style>
+</head>
+<body>
+  <div class="app-shell">
+  ${sidebarHTML("dashboard")}
+  <div class="content-area">
+  <div class="main">
+    <div class="page-header">
+      <div class="page-header-left">
+        <p class="page-eyebrow">Instagram</p>
+        <h1 class="page-title">Dashboard</h1>
+      </div>
+    </div>
+    <p class="page-sub">Cómo va funcionando tu embudo completo, paso a paso — para saber dónde mejorar.</p>
+
+    <div id="dashSinEtiquetas" class="dash-warning" style="display:none;"></div>
+
+    <div class="dash-cash-card">
+      <div>
+        <div class="dash-cash-label">💰 Cash Collected</div>
+        <div class="dash-side-stat-label" style="margin-top:4px;">Suma de todo lo que has registrado como pagado, desde /chats</div>
+      </div>
+      <div class="dash-cash-value" id="dashCash">$0</div>
+    </div>
+
+    <div class="dash-side-stats">
+      <div class="dash-side-stat">
+        <div class="dash-side-stat-label">🚫 No Califica</div>
+        <div class="dash-side-stat-value" id="dashNoCalifica">–</div>
+      </div>
+    </div>
+
+    <div class="dash-funnel">
+      <div class="dash-step step-total">
+        <div class="dash-step-left">
+          <span class="dash-step-icon">💬</span>
+          <div><div class="dash-step-label">Conversaciones totales</div><div class="dash-step-sub">Todos los leads que le han escrito al bot</div></div>
+        </div>
+        <div class="dash-step-value" id="dashTotal">–</div>
+      </div>
+
+      <div class="dash-arrow-row"><span class="arrow-line"></span><span class="dash-arrow-pct" id="pctCalifica">–</span><span class="arrow-line"></span></div>
+
+      <div class="dash-step step-califica">
+        <div class="dash-step-left">
+          <span class="dash-step-icon">✅</span>
+          <div><div class="dash-step-label">Califican</div><div class="dash-step-sub">% del total de conversaciones</div></div>
+        </div>
+        <div class="dash-step-value" id="dashCalifica">–</div>
+      </div>
+
+      <div class="dash-arrow-row"><span class="arrow-line"></span><span class="dash-arrow-pct" id="pctEnlace">–</span><span class="arrow-line"></span></div>
+
+      <div class="dash-step step-enlace">
+        <div class="dash-step-left">
+          <span class="dash-step-icon">🔗</span>
+          <div><div class="dash-step-label">Enlace enviado</div><div class="dash-step-sub">% de los que califican</div></div>
+        </div>
+        <div class="dash-step-value" id="dashEnlace">–</div>
+      </div>
+
+      <div class="dash-arrow-row"><span class="arrow-line"></span><span class="dash-arrow-pct" id="pctAgendo">–</span><span class="arrow-line"></span></div>
+
+      <div class="dash-step step-agendo">
+        <div class="dash-step-left">
+          <span class="dash-step-icon">📅</span>
+          <div><div class="dash-step-label">Agendaron (confirmado)</div><div class="dash-step-sub">% de los que recibieron el enlace</div></div>
+        </div>
+        <div class="dash-step-value" id="dashAgendo">–</div>
+      </div>
+
+      <div class="dash-arrow-row"><span class="arrow-line"></span><span class="dash-arrow-pct" id="pctAsistio">–</span><span class="arrow-line"></span></div>
+
+      <div class="dash-step step-asistio">
+        <div class="dash-step-left">
+          <span class="dash-step-icon">🙋</span>
+          <div><div class="dash-step-label">Asistieron</div><div class="dash-step-sub" id="subAsistio">% de los que agendaron</div></div>
+        </div>
+        <div class="dash-step-value" id="dashAsistio">–</div>
+      </div>
+
+      <div class="dash-arrow-row"><span class="arrow-line"></span><span class="dash-arrow-pct" id="pctCompro">–</span><span class="arrow-line"></span></div>
+
+      <div class="dash-step step-compro">
+        <div class="dash-step-left">
+          <span class="dash-step-icon">🎉</span>
+          <div><div class="dash-step-label">Compraron / se cerraron</div><div class="dash-step-sub" id="subCompro">% de los que asistieron</div></div>
+        </div>
+        <div class="dash-step-value" id="dashCompro">–</div>
+      </div>
+    </div>
+
+    <div class="dash-config-card">
+      <h2 style="font-family:var(--display); font-size:16px; font-weight:600; margin:0 0 5px;">⚙️ Configurar el embudo</h2>
+      <p class="hint" style="margin:0;">"Asistió" y "Compró" no los detecta el bot solo — se basan en las etiquetas manuales que le pongas a cada lead desde /chats. Elige aquí cuál etiqueta representa cada cosa.</p>
+      <div class="dash-config-row">
+        <div class="dash-config-field">
+          <label for="selectEtiquetaAsistio">Etiqueta que representa "Asistió"</label>
+          <select id="selectEtiquetaAsistio"><option value="">— Elegir etiqueta —</option></select>
+        </div>
+        <div class="dash-config-field">
+          <label for="selectEtiquetaCompro">Etiqueta que representa "Compró / se cerró"</label>
+          <select id="selectEtiquetaCompro"><option value="">— Elegir etiqueta —</option></select>
+        </div>
+      </div>
+      <button class="add-paso" id="btnGuardarConfigDash" type="button" style="margin-top:16px;">Guardar configuración</button>
+      <p class="dash-config-msg" id="dashConfigMsg"></p>
+    </div>
+
+  </div>
+  </div>
+  </div>
+
+<script>
+  function formatearMoneda(n){
+    return "$" + Number(n || 0).toLocaleString("es-MX", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  }
+  function formatearPct(n){
+    return Number(n || 0).toFixed(1) + "%";
+  }
+
+  async function cargarDashboard(){
+    const res = await fetch("/dashboard/datos");
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+    const data = await res.json();
+    if(data.error) return;
+
+    document.getElementById("dashCash").textContent = formatearMoneda(data.cashCollected);
+    document.getElementById("dashNoCalifica").textContent = data.totalNoCalifica;
+    document.getElementById("dashTotal").textContent = data.total;
+    document.getElementById("dashCalifica").textContent = data.totalCalifica;
+    document.getElementById("dashEnlace").textContent = data.totalEnlace;
+    document.getElementById("dashAgendo").textContent = data.totalAgendo;
+    document.getElementById("dashAsistio").textContent = data.totalAsistio;
+    document.getElementById("dashCompro").textContent = data.totalCompro;
+
+    document.getElementById("pctCalifica").textContent = formatearPct(data.porcentajes.califica_de_total);
+    document.getElementById("pctEnlace").textContent = formatearPct(data.porcentajes.enlace_de_califica);
+    document.getElementById("pctAgendo").textContent = formatearPct(data.porcentajes.agendo_de_enlace);
+    document.getElementById("pctAsistio").textContent = formatearPct(data.porcentajes.asistio_de_agendo);
+    document.getElementById("pctCompro").textContent = formatearPct(data.porcentajes.compro_de_asistio);
+
+    const avisos = [];
+    if(!data.etiquetaAsistioConfigurada) avisos.push('"Asistió"');
+    if(!data.etiquetaCompraConfigurada) avisos.push('"Compró"');
+    const avisoBox = document.getElementById("dashSinEtiquetas");
+    if(avisos.length > 0){
+      avisoBox.style.display = "block";
+      avisoBox.textContent = "⚠️ Todavía no configuraste qué etiqueta representa " + avisos.join(" ni ") + " — configúralo abajo para que esos pasos del embudo funcionen.";
+    } else {
+      avisoBox.style.display = "none";
+    }
+
+    document.getElementById("subAsistio").textContent = data.etiquetaAsistio ? 'Etiqueta: "' + data.etiquetaAsistio + '"' : "% de los que agendaron (sin configurar)";
+    document.getElementById("subCompro").textContent = data.etiquetaCompro ? 'Etiqueta: "' + data.etiquetaCompro + '"' : "% de los que asistieron (sin configurar)";
+
+    if(document.getElementById("selectEtiquetaAsistio").value === "" && data.etiquetaAsistio){
+      document.getElementById("selectEtiquetaAsistio").value = data.etiquetaAsistio;
+    }
+    if(document.getElementById("selectEtiquetaCompro").value === "" && data.etiquetaCompro){
+      document.getElementById("selectEtiquetaCompro").value = data.etiquetaCompro;
+    }
+  }
+
+  async function cargarEtiquetasDisponibles(){
+    const res = await fetch("/etiquetas");
+    if(res.status === 401) return;
+    const data = await res.json();
+    const etiquetas = data?.etiquetas || [];
+    const selects = [document.getElementById("selectEtiquetaAsistio"), document.getElementById("selectEtiquetaCompro")];
+    selects.forEach(select => {
+      const valorActual = select.value;
+      etiquetas.forEach(et => {
+        if(select.querySelector(\`option[value="\${et}"]\`)) return;
+        const opt = document.createElement("option");
+        opt.value = et;
+        opt.textContent = et;
+        select.appendChild(opt);
+      });
+      if(valorActual) select.value = valorActual;
+    });
+  }
+
+  document.getElementById("btnGuardarConfigDash").addEventListener("click", async () => {
+    const msg = document.getElementById("dashConfigMsg");
+    msg.textContent = "Guardando…";
+    msg.style.color = "";
+    try {
+      const res = await fetch("/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dashboard_etiqueta_asistio: document.getElementById("selectEtiquetaAsistio").value,
+          dashboard_etiqueta_compro: document.getElementById("selectEtiquetaCompro").value
+        })
+      });
+      if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+      if(!res.ok) throw new Error("No se pudo guardar.");
+      msg.textContent = "✓ Guardado";
+      msg.style.color = "var(--green)";
+      await cargarDashboard();
+    } catch (err) {
+      msg.textContent = "❌ " + err.message;
+      msg.style.color = "var(--red)";
+    }
+    setTimeout(() => { msg.textContent = ""; }, 2500);
+  });
+
+  cargarEtiquetasDisponibles().then(cargarDashboard);
+  setInterval(cargarDashboard, 15000);
 </script>
 </body>
 </html>
@@ -5668,6 +6051,7 @@ ${estilosBase()}
           <span class="status-chip status-chip-nocalifica" id="chipNoCalifica" style="display:none;">🚫 No Califica</span>
           <span class="status-chip status-chip-agendo" id="chipAgendo" style="display:none;">📅 Agendó</span>
           <span class="status-chip status-chip-enlace" id="chipEnlace" style="display:none;">🔗 Enlace</span>
+          <span class="status-chip status-chip-monto" id="chipMonto" style="display:none; background:rgba(255,197,66,.14); color:#FFC542;"></span>
           <span class="status-sep">·</span>
           <select id="selectEtapa" class="status-select"><option value="">Sin etapa (general)</option></select>
           <span class="status-sep">·</span>
@@ -5678,6 +6062,13 @@ ${estilosBase()}
               <input type="text" id="inputNuevaEtiqueta" placeholder="Escribe o elige una etiqueta..." list="listaEtiquetasExistentes" autocomplete="off">
               <datalist id="listaEtiquetasExistentes"></datalist>
               <button type="button" id="btnConfirmarEtiqueta">Agregar</button>
+            </div>
+          </div>
+          <div class="add-etiqueta-wrap">
+            <button type="button" class="btn-add-etiqueta" id="btnAddMonto">+ 💰</button>
+            <div class="etiqueta-popover" id="montoPopover" style="display:none;">
+              <input type="number" id="inputMontoPagado" placeholder="Ej: 100" min="0" step="0.01" style="width:120px;">
+              <button type="button" id="btnConfirmarMonto">Guardar</button>
             </div>
           </div>
         </div>
@@ -5907,6 +6298,7 @@ ${estilosBase()}
     const chipNoCalifica = document.getElementById("chipNoCalifica");
     const chipAgendo = document.getElementById("chipAgendo");
     const chipEnlace = document.getElementById("chipEnlace");
+    const chipMonto = document.getElementById("chipMonto");
     if(!senderSeleccionado){
       head.innerHTML = '<span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>';
       banner.classList.remove("visible");
@@ -5957,6 +6349,14 @@ ${estilosBase()}
       chipEnlace.style.display = "inline-flex";
     } else {
       chipEnlace.style.display = "none";
+    }
+
+    if(conv.monto_pagado > 0){
+      chipMonto.textContent = "💰 $" + Number(conv.monto_pagado).toLocaleString("es-MX");
+      chipMonto.title = "Monto pagado registrado — clic en + 💰 para editarlo";
+      chipMonto.style.display = "inline-flex";
+    } else {
+      chipMonto.style.display = "none";
     }
 
     // Selector de etapa: siempre visible mientras haya una conversación
@@ -6030,6 +6430,48 @@ ${estilosBase()}
   document.addEventListener("click", (e) => {
     if(popoverEtiqueta.style.display !== "none" && !popoverEtiqueta.contains(e.target) && e.target.id !== "btnAddEtiqueta"){
       popoverEtiqueta.style.display = "none";
+    }
+  });
+
+  // --- Popover para registrar cuánto pagó el lead (cash collected) ---
+  const popoverMonto = document.getElementById("montoPopover");
+  const inputMontoPagado = document.getElementById("inputMontoPagado");
+
+  document.getElementById("btnAddMonto").addEventListener("click", () => {
+    const abriendo = popoverMonto.style.display === "none";
+    popoverMonto.style.display = abriendo ? "flex" : "none";
+    if(abriendo){
+      const c = conversaciones.find(c => c.sender_id === senderSeleccionado);
+      inputMontoPagado.value = (c?.monto_pagado > 0) ? c.monto_pagado : "";
+      inputMontoPagado.focus();
+    }
+  });
+
+  async function confirmarMontoPagado(){
+    if(!senderSeleccionado) return;
+    const monto = inputMontoPagado.value.trim();
+    if(monto === "" || isNaN(Number(monto)) || Number(monto) < 0) return;
+    const res = await fetch("/chats/monto-pagado", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ senderId: senderSeleccionado, monto: Number(monto) })
+    });
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+    const data = await res.json();
+    if(data.ok){
+      const c = conversaciones.find(c => c.sender_id === senderSeleccionado);
+      if(c) c.monto_pagado = data.monto_pagado;
+      popoverMonto.style.display = "none";
+      renderHead();
+    }
+  }
+
+  document.getElementById("btnConfirmarMonto").addEventListener("click", confirmarMontoPagado);
+  inputMontoPagado.addEventListener("keydown", (e) => {
+    if(e.key === "Enter"){ e.preventDefault(); confirmarMontoPagado(); }
+  });
+  document.addEventListener("click", (e) => {
+    if(popoverMonto.style.display !== "none" && !popoverMonto.contains(e.target) && e.target.id !== "btnAddMonto"){
+      popoverMonto.style.display = "none";
     }
   });
 
