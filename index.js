@@ -4,6 +4,11 @@ const axios   = require("axios");
 const OpenAI  = require("openai");
 const { toFile } = OpenAI;
 const { createClient } = require("@supabase/supabase-js");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const ffmpeg = require("fluent-ffmpeg");
+ffmpeg.setFfmpegPath(require("@ffmpeg-installer/ffmpeg").path);
 
 const app = express();
 
@@ -176,11 +181,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [] };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [] };
   }
 
   return data;
@@ -1412,6 +1417,43 @@ const MENSAJES_ERROR_AUDIO_DEFECTO = [
   "No me llegó tu audio como debía, creo que hubo un problema de conexión. ¿Me lo reenvías?"
 ];
 
+// Convierte un audio a MP4/AAC — el formato que el Send API de Instagram
+// realmente acepta. Los navegadores graban el audio del micrófono en
+// WEBM/Opus por defecto, y ese formato NO es uno de los que Instagram
+// soporta para mandar audios (da el error "This attachment format is not
+// supported"), así que hay que convertirlo antes de subirlo. Usa un binario
+// de ffmpeg empaquetado (no depende de que el sistema operativo lo tenga
+// instalado), y trabaja con archivos temporales porque fluent-ffmpeg no
+// soporta bien streams/buffers directamente para este tipo de conversión.
+async function convertirAudioAMp4(bufferEntrada) {
+  const carpetaTemp = os.tmpdir();
+  const rutaEntrada = path.join(carpetaTemp, `audio_in_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+  const rutaSalida = `${rutaEntrada}.mp4`;
+
+  try {
+    fs.writeFileSync(rutaEntrada, bufferEntrada);
+
+    await new Promise((resolve, reject) => {
+      ffmpeg(rutaEntrada)
+        .noVideo()
+        .audioCodec("aac")
+        .audioBitrate("128k")
+        .audioFrequency(44100)
+        .toFormat("mp4")
+        .on("error", reject)
+        .on("end", resolve)
+        .save(rutaSalida);
+    });
+
+    return fs.readFileSync(rutaSalida);
+  } finally {
+    // Se limpian los archivos temporales pase lo que pase, para no ir
+    // acumulando basura en el disco del servidor con cada audio enviado.
+    fs.promises.unlink(rutaEntrada).catch(() => {});
+    fs.promises.unlink(rutaSalida).catch(() => {});
+  }
+}
+
 async function transcribirAudioDeInstagram(url) {
   try {
     const respuesta = await axios.get(url, { responseType: "arraybuffer", timeout: 20000 });
@@ -1440,7 +1482,7 @@ async function analizarDoloresYObstaculos(transcripcion) {
     const resp = await openaiClient.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
-      max_tokens: 150,
+      max_tokens: 300,
       response_format: { type: "json_object" },
       messages: [
         {
@@ -1450,15 +1492,21 @@ async function analizarDoloresYObstaculos(transcripcion) {
             "(1) un problema o dolor de SALUD/energía (ej. hipertension, diabetes, cansancio, colesterol, " +
             "articulaciones, azucar, higado graso, poca energia — o cualquier otro que se mencione), " +
             "(2) un motivo o problema ESTÉTICO/de apariencia (ej. estetica, verme bien, fisico, panza, guata, " +
-            "barriga, u otro), y (3) el principal OBSTÁCULO que dice tener para lograrlo por su cuenta (ej. " +
+            "barriga, u otro), (3) el principal OBSTÁCULO que dice tener para lograrlo por su cuenta (ej. " +
             "falta de tiempo, no sabe que rutina hacer, falta de disciplina, intentos fallidos, no sabe de " +
-            "nutricion, lesion, motivacion, dinero, u otro).\n\n" +
-            "Usa una etiqueta CORTA (1 a 3 palabras), en minúsculas, sin acentos, y reutiliza la MISMA " +
-            "etiqueta que usarías para un caso similar en otra conversación (para poder agruparlas después " +
-            "— ej. usa siempre \"cansancio\", no alternes entre \"cansancio\"/\"cansado\"/\"fatiga\"). Si algo " +
-            "no se menciona en la conversación, usa null (no inventes ni asumas). Responde ÚNICAMENTE un " +
-            "JSON con este formato exacto, sin texto adicional: " +
-            '{"dolor_salud": "etiqueta o null", "dolor_estetico": "etiqueta o null", "obstaculo": "etiqueta o null"}'
+            "nutricion, lesion, motivacion, dinero, u otro), (4) cuánto peso quiere perder (la cantidad tal " +
+            "cual la haya dicho, ej. \"15 kg\", \"20 libras\", \"no especifica cantidad exacta\"), y (5) un " +
+            "detalle breve en UNA sola oración (máximo 20 palabras) explicando, en palabras propias, cómo le " +
+            "afecta su situación o por qué quiere bajar de peso — combinando lo que haya dicho de salud y/o " +
+            "estética en una frase legible y natural (esto es para un reporte que lea un humano, no para " +
+            "agrupar categorías).\n\n" +
+            "Para los campos (1), (2) y (3): usa una etiqueta CORTA (1 a 3 palabras), en minúsculas, sin " +
+            "acentos, y reutiliza la MISMA etiqueta que usarías para un caso similar en otra conversación " +
+            "(para poder agruparlas después — ej. usa siempre \"cansancio\", no alternes entre " +
+            "\"cansancio\"/\"cansado\"/\"fatiga\"). Para los campos (4) y (5), pueden ser frases normales, no " +
+            "hace falta acortarlas a una etiqueta. Si algo no se menciona en la conversación, usa null (no " +
+            "inventes ni asumas). Responde ÚNICAMENTE un JSON con este formato exacto, sin texto adicional: " +
+            '{"dolor_salud": "etiqueta o null", "dolor_estetico": "etiqueta o null", "obstaculo": "etiqueta o null", "peso_a_perder": "texto o null", "detalle": "oracion o null"}'
         },
         { role: "user", content: transcripcion }
       ]
@@ -1469,11 +1517,13 @@ async function analizarDoloresYObstaculos(transcripcion) {
     return {
       dolor_salud: limpiarEtiquetaIA(parsed.dolor_salud),
       dolor_estetico: limpiarEtiquetaIA(parsed.dolor_estetico),
-      obstaculo: limpiarEtiquetaIA(parsed.obstaculo)
+      obstaculo: limpiarEtiquetaIA(parsed.obstaculo),
+      peso_a_perder: limpiarEtiquetaIA(parsed.peso_a_perder),
+      detalle: limpiarEtiquetaIA(parsed.detalle)
     };
   } catch (err) {
     console.error("⚠️ Error analizando dolores/obstáculos de una conversación:", err.response?.data || err.message);
-    return { dolor_salud: null, dolor_estetico: null, obstaculo: null };
+    return { dolor_salud: null, dolor_estetico: null, obstaculo: null, peso_a_perder: null, detalle: null };
   }
 }
 
@@ -2169,7 +2219,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas")
       .order("actualizado_en", { ascending: false })
       .limit(200);
 
@@ -2211,12 +2261,100 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         enlace_pasos_enviados: pasosEnviados,
         enlace_seguimiento_activo: Boolean(c.enlace_enviado) && pasosEnviados < totalPasosEnlace,
         etapa: c.etapa || null,
-        etapa_nombre: etapaConfig ? (etapaConfig.nombre || etapaConfig.clave) : null
+        etapa_nombre: etapaConfig ? (etapaConfig.nombre || etapaConfig.clave) : null,
+        etiquetas: Array.isArray(c.etiquetas) ? c.etiquetas : []
       };
     }));
 
 
     res.json({ conversaciones: resumen });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Etiquetas manuales: el admin puede crear cualquier etiqueta libre (ej.
+// "compró") y asignarla a mano desde /chats — distinto de las etiquetas
+// automáticas (califica, no_califica, agendo) que pone el propio bot. Se
+// guarda una lista de "todas las etiquetas que alguna vez se crearon" en
+// app_config (para poder mostrarlas como opciones ya existentes al agregar
+// una nueva, en vez de que el admin tenga que escribir el nombre exacto de
+// memoria cada vez), y cada conversación guarda su propio array de
+// etiquetas asignadas.
+async function obtenerEtiquetasCreadas() {
+  const { data, error } = await supabase
+    .from("app_config")
+    .select("*")
+    .eq("key", "etiquetas_creadas")
+    .maybeSingle();
+
+  if (error) {
+    console.error("❌ Error leyendo la lista de etiquetas creadas:", error.message);
+    return [];
+  }
+  return Array.isArray(data?.valor) ? data.valor : [];
+}
+
+async function registrarEtiquetaCreada(etiqueta) {
+  const actuales = await obtenerEtiquetasCreadas();
+  if (actuales.includes(etiqueta)) return;
+
+  const { error } = await supabase
+    .from("app_config")
+    .upsert({ key: "etiquetas_creadas", valor: [...actuales, etiqueta], actualizado_en: new Date().toISOString() });
+  if (error) console.error("❌ Error guardando la etiqueta nueva en la lista global:", error.message);
+}
+
+// Devuelve todas las etiquetas que alguna vez se crearon, para poblar el
+// selector de "agregar etiqueta" en /chats (además de poder escribir una
+// nueva que no esté en la lista).
+app.get("/etiquetas", requireAdminKey, async (req, res) => {
+  try {
+    const etiquetas = await obtenerEtiquetasCreadas();
+    res.json({ etiquetas });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Agrega una etiqueta a una conversación específica (y la registra en la
+// lista global si es la primera vez que se usa).
+app.post("/chats/etiqueta/agregar", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId, etiqueta } = req.body || {};
+    const etiquetaLimpia = typeof etiqueta === "string" ? etiqueta.trim() : "";
+    if (!senderId || !etiquetaLimpia) return res.status(400).json({ error: "Falta senderId o etiqueta." });
+    if (etiquetaLimpia.length > 40) return res.status(400).json({ error: "La etiqueta es demasiado larga (máx. 40 caracteres)." });
+
+    const conv = await obtenerConversacion(senderId);
+    const etiquetasActuales = Array.isArray(conv.etiquetas) ? conv.etiquetas : [];
+    if (etiquetasActuales.includes(etiquetaLimpia)) {
+      return res.json({ ok: true, etiquetas: etiquetasActuales }); // ya la tenía, no hay nada que hacer
+    }
+
+    const etiquetasNuevas = [...etiquetasActuales, etiquetaLimpia];
+    await guardarConversacion(senderId, { etiquetas: etiquetasNuevas });
+    await registrarEtiquetaCreada(etiquetaLimpia);
+
+    res.json({ ok: true, etiquetas: etiquetasNuevas });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Quita una etiqueta de una conversación específica (no la borra de la
+// lista global — otras conversaciones pueden seguir teniéndola).
+app.post("/chats/etiqueta/quitar", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId, etiqueta } = req.body || {};
+    if (!senderId || !etiqueta) return res.status(400).json({ error: "Falta senderId o etiqueta." });
+
+    const conv = await obtenerConversacion(senderId);
+    const etiquetasActuales = Array.isArray(conv.etiquetas) ? conv.etiquetas : [];
+    const etiquetasNuevas = etiquetasActuales.filter(e => e !== etiqueta);
+    await guardarConversacion(senderId, { etiquetas: etiquetasNuevas });
+
+    res.json({ ok: true, etiquetas: etiquetasNuevas });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2324,22 +2462,33 @@ app.post("/chats/enviar-foto", requireAdminKey, async (req, res) => {
 // como una nota de voz reproducible dentro de /chats.
 app.post("/chats/enviar-audio", requireAdminKey, async (req, res) => {
   try {
-    const { senderId, base64, tipo } = req.body || {};
+    const { senderId, base64 } = req.body || {};
     if (!senderId || !base64) {
       return res.status(400).json({ error: "Falta el destinatario o el audio." });
     }
 
-    const extension = (tipo && tipo.includes("/")) ? tipo.split("/")[1].split(";")[0].replace(/;.*$/, "") : "webm";
-    const rutaArchivo = `manual/${senderId}_${Date.now()}.${extension}`;
-    const buffer = Buffer.from(base64, "base64");
+    const bufferOriginal = Buffer.from(base64, "base64");
 
-    if (buffer.length > 15 * 1024 * 1024) {
+    if (bufferOriginal.length > 15 * 1024 * 1024) {
       return res.status(400).json({ error: "El audio pesa más de 15MB, prueba con una grabación más corta." });
     }
 
+    // El navegador graba el audio del micrófono en WEBM/Opus, que Instagram
+    // NO acepta para mandar audios ("This attachment format is not
+    // supported") — se convierte a MP4/AAC antes de subirlo, que sí acepta.
+    let bufferMp4;
+    try {
+      bufferMp4 = await convertirAudioAMp4(bufferOriginal);
+    } catch (errorConversion) {
+      console.error(`❌ Error convirtiendo audio manual a mp4 para ${senderId}:`, errorConversion.message);
+      return res.status(500).json({ error: "No se pudo procesar el audio grabado. Intenta grabarlo de nuevo." });
+    }
+
+    const rutaArchivo = `manual/${senderId}_${Date.now()}.mp4`;
+
     const { error: errorSubida } = await supabase.storage
       .from("audios")
-      .upload(rutaArchivo, buffer, { contentType: tipo || "audio/webm", upsert: true });
+      .upload(rutaArchivo, bufferMp4, { contentType: "audio/mp4", upsert: true });
 
     if (errorSubida) {
       return res.status(500).json({ error: "No se pudo subir el audio: " + errorSubida.message + ". ¿Existe el bucket 'audios' y es público? Revisa migracion_supabase.sql." });
@@ -3070,7 +3219,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
 
 app.post("/audios/subir", requireAdminKey, async (req, res) => {
   try {
-    const { nombre, base64, tipo } = req.body || {};
+    const { nombre, base64 } = req.body || {};
     if (!nombre || !nombre.trim()) return res.status(400).json({ error: "Falta el nombre del audio." });
     if (!base64) return res.status(400).json({ error: "Falta el archivo de audio." });
 
@@ -3082,17 +3231,29 @@ app.post("/audios/subir", requireAdminKey, async (req, res) => {
 
     if (!clave) return res.status(400).json({ error: "El nombre no dejó ningún caracter válido, prueba con otro." });
 
-    const extension = (tipo && tipo.includes("/")) ? tipo.split("/")[1].split(";")[0] : "mp3";
-    const rutaArchivo = `${clave}_${Date.now()}.${extension}`;
-    const buffer = Buffer.from(base64, "base64");
+    const bufferOriginal = Buffer.from(base64, "base64");
 
-    if (buffer.length > 15 * 1024 * 1024) {
+    if (bufferOriginal.length > 15 * 1024 * 1024) {
       return res.status(400).json({ error: "El audio pesa más de 15MB, prueba con un archivo más liviano." });
     }
 
+    // Se convierte SIEMPRE a MP4/AAC, sin importar el formato original que
+    // hayas subido (mp3, wav, m4a, etc.) — así se garantiza que Instagram
+    // pueda mandarlo sin el error "This attachment format is not supported",
+    // que puede pasar con formatos que no sean exactamente MP4/AAC.
+    let bufferMp4;
+    try {
+      bufferMp4 = await convertirAudioAMp4(bufferOriginal);
+    } catch (errorConversion) {
+      console.error("❌ Error convirtiendo audio pregrabado a mp4:", errorConversion.message);
+      return res.status(500).json({ error: "No se pudo procesar ese archivo de audio. Prueba con otro formato (mp3, wav, m4a)." });
+    }
+
+    const rutaArchivo = `${clave}_${Date.now()}.mp4`;
+
     const { error: errorSubida } = await supabase.storage
       .from("audios")
-      .upload(rutaArchivo, buffer, { contentType: tipo || "audio/mpeg", upsert: true });
+      .upload(rutaArchivo, bufferMp4, { contentType: "audio/mp4", upsert: true });
 
     if (errorSubida) {
       console.error("❌ Error subiendo audio a Supabase Storage:", errorSubida.message);
@@ -4961,6 +5122,11 @@ ${estilosBase()}
     background:rgba(201,155,255,.12); border:1px solid rgba(201,155,255,.3); border-radius:6px;
     padding:2px 7px; margin-left:7px; flex-shrink:0; vertical-align:middle;
   }
+  .etiqueta-chip-mini{
+    display:inline-block; font-size:10.5px; font-weight:600; color:#FFC542;
+    background:rgba(255,197,66,.12); border:1px solid rgba(255,197,66,.3); border-radius:6px;
+    padding:2px 7px; margin-left:7px; flex-shrink:0; vertical-align:middle;
+  }
   .handoff-dot{
     width:8px; height:8px; border-radius:50%; background:var(--red); flex-shrink:0;
     display:inline-block; margin-left:7px; box-shadow:0 0 0 2px rgba(255,93,93,.18);
@@ -4988,6 +5154,41 @@ ${estilosBase()}
   .etapa-banner select{
     background:var(--surface-3); border:1px solid rgba(201,155,255,.35); color:var(--text);
     border-radius:8px; padding:6px 10px; font-size:13px; font-family:var(--body);
+  }
+  .etiquetas-banner{
+    background:rgba(255,197,66,.08); font-size:13px; padding:11px 20px;
+    border-bottom:1px solid rgba(255,197,66,.25); display:flex; align-items:center; gap:10px;
+    flex-wrap:wrap; position:relative;
+  }
+  .etiquetas-banner-label{ color:#FFC542; font-weight:600; flex-shrink:0; }
+  .etiquetas-lista{ display:flex; gap:6px; flex-wrap:wrap; }
+  .etiqueta-chip{
+    display:inline-flex; align-items:center; gap:6px; background:rgba(255,197,66,.14);
+    color:#FFC542; border:1px solid rgba(255,197,66,.35); border-radius:20px;
+    padding:4px 6px 4px 12px; font-size:12.5px; font-weight:600;
+  }
+  .etiqueta-chip button{
+    background:none; border:none; color:#FFC542; cursor:pointer; font-size:14px;
+    line-height:1; padding:2px 4px; opacity:.7; border-radius:50%;
+  }
+  .etiqueta-chip button:hover{ opacity:1; background:rgba(255,197,66,.2); }
+  .btn-add-etiqueta{
+    background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:20px; padding:5px 12px; font-size:12.5px; font-weight:600; cursor:pointer;
+  }
+  .btn-add-etiqueta:hover{ border-color:#FFC542; color:#FFC542; }
+  .etiqueta-popover{
+    position:absolute; top:100%; left:20px; margin-top:6px; background:var(--surface-2);
+    border:1px solid var(--border); border-radius:10px; padding:10px; display:flex; gap:8px;
+    box-shadow:0 8px 24px rgba(0,0,0,.35); z-index:20;
+  }
+  .etiqueta-popover input{
+    background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:7px; padding:7px 10px; font-size:13px; font-family:var(--body); width:200px;
+  }
+  .etiqueta-popover button{
+    background:#FFC542; border:none; color:#1a1a1a; border-radius:7px; padding:7px 12px;
+    font-size:13px; font-weight:700; cursor:pointer; white-space:nowrap;
   }
   /* --- Barra compacta: segmento del resumen + botón resumen + exportar CSV --- */
   .chat-toolbar{
@@ -5148,7 +5349,9 @@ ${estilosBase()}
           <select id="segmentoReporteDolores" class="select-mini" title="Segmento a analizar en el resumen de dolores/obstáculos">
             <option value="todos">Todos</option>
             <option value="califica">✅ Califican</option>
-            <option value="enlace">🔗 Agendaron</option>
+            <option value="nocalifica">🚫 No califican</option>
+            <option value="agendo">📅 Agendaron (confirmado)</option>
+            <option value="enlace">🔗 Enlace enviado</option>
           </select>
           <button type="button" class="btn-mini" id="btnReporteDolores" title="Analiza tus conversaciones y descarga un CSV con las frecuencias de dolores y obstáculos que mencionaron tus leads.">📊 Resumen</button>
           <div class="chat-export" id="chatExportWrap" style="display:none;">
@@ -5172,6 +5375,16 @@ ${estilosBase()}
         <div class="etapa-banner" id="etapaBanner" style="display:none;">
           <span>🧭 Etapa actual:</span>
           <select id="selectEtapa"><option value="">Sin etapa (general)</option></select>
+        </div>
+        <div class="etiquetas-banner" id="etiquetasBanner" style="display:none;">
+          <span class="etiquetas-banner-label">🏷️ Etiquetas:</span>
+          <div class="etiquetas-lista" id="etiquetasLista"></div>
+          <button type="button" class="btn-add-etiqueta" id="btnAddEtiqueta">+ Agregar</button>
+          <div class="etiqueta-popover" id="etiquetaPopover" style="display:none;">
+            <input type="text" id="inputNuevaEtiqueta" placeholder="Escribe o elige una etiqueta..." list="listaEtiquetasExistentes" autocomplete="off">
+            <datalist id="listaEtiquetasExistentes"></datalist>
+            <button type="button" id="btnConfirmarEtiqueta">Agregar</button>
+          </div>
         </div>
         <div class="chat-messages" id="chatMensajes">
           <div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>
@@ -5313,6 +5526,7 @@ ${estilosBase()}
             \${c.no_califica ? '<span class="califica-badge" title="No Califica' + (c.razon_no_califica ? ": " + escapar(c.razon_no_califica) : "") + '">🚫</span>' : ''}
             \${c.agendo ? '<span class="califica-badge" title="Agendó">📅</span>' : ''}
             \${c.enlace_enviado ? '<span class="enlace-badge" title="Enlace enviado">🔗</span>' : ''}
+            \${(c.etiquetas && c.etiquetas.length > 0) ? '<span class="etiqueta-chip-mini" title="' + escapar(c.etiquetas.join(", ")) + '">🏷️ ' + escapar(c.etiquetas[0]) + (c.etiquetas.length > 1 ? ' +' + (c.etiquetas.length - 1) : '') + '</span>' : ''}
             \${c.etapa_nombre ? '<span class="etapa-chip" title="Etapa actual">' + escapar(c.etapa_nombre) + '</span>' : ''}
             \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
           </div>
@@ -5398,6 +5612,7 @@ ${estilosBase()}
     const bannerAgendo = document.getElementById("agendoBanner");
     const bannerEnlace = document.getElementById("enlaceBanner");
     const bannerEtapa = document.getElementById("etapaBanner");
+    const bannerEtiquetas = document.getElementById("etiquetasBanner");
     if(!senderSeleccionado){
       head.innerHTML = '<span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>';
       banner.classList.remove("visible");
@@ -5406,6 +5621,7 @@ ${estilosBase()}
       bannerAgendo.classList.remove("visible");
       bannerEnlace.classList.remove("visible");
       bannerEtapa.style.display = "none";
+      bannerEtiquetas.style.display = "none";
       return;
     }
     const conv = conversaciones.find(c => c.sender_id === senderSeleccionado) || { sender_id: senderSeleccionado, en_ventana_24h: true };
@@ -5455,7 +5671,77 @@ ${estilosBase()}
     bannerEtapa.style.display = "flex";
     const selectEtapa = document.getElementById("selectEtapa");
     selectEtapa.innerHTML = opcionesEtapaHTML(conv.etapa || "");
+
+    // Etiquetas manuales: siempre visible mientras haya una conversación
+    // seleccionada, para poder agregar la primera etiqueta aunque todavía
+    // no tenga ninguna.
+    bannerEtiquetas.style.display = "flex";
+    const listaEtiquetas = document.getElementById("etiquetasLista");
+    const etiquetas = Array.isArray(conv.etiquetas) ? conv.etiquetas : [];
+    listaEtiquetas.innerHTML = etiquetas.map(et => \`
+      <span class="etiqueta-chip">\${escapar(et)}<button type="button" class="btn-quitar-etiqueta" data-etiqueta="\${escapar(et)}" title="Quitar etiqueta">×</button></span>
+    \`).join("");
+    listaEtiquetas.querySelectorAll(".btn-quitar-etiqueta").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const etiqueta = btn.dataset.etiqueta;
+        const res = await fetch("/chats/etiqueta/quitar", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ senderId: senderSeleccionado, etiqueta })
+        });
+        if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+        const data = await res.json();
+        if(data.ok){
+          const c = conversaciones.find(c => c.sender_id === senderSeleccionado);
+          if(c) c.etiquetas = data.etiquetas;
+          renderHead();
+        }
+      });
+    });
   }
+
+  // --- Popover para agregar una etiqueta manual ---
+  const popoverEtiqueta = document.getElementById("etiquetaPopover");
+  const inputNuevaEtiqueta = document.getElementById("inputNuevaEtiqueta");
+
+  document.getElementById("btnAddEtiqueta").addEventListener("click", async () => {
+    const abriendo = popoverEtiqueta.style.display === "none";
+    popoverEtiqueta.style.display = abriendo ? "flex" : "none";
+    if(abriendo){
+      inputNuevaEtiqueta.value = "";
+      inputNuevaEtiqueta.focus();
+      const data = await llamarGET("/etiquetas");
+      const datalist = document.getElementById("listaEtiquetasExistentes");
+      datalist.innerHTML = (data?.etiquetas || []).map(et => \`<option value="\${escapar(et)}">\`).join("");
+    }
+  });
+
+  async function confirmarNuevaEtiqueta(){
+    const etiqueta = inputNuevaEtiqueta.value.trim();
+    if(!etiqueta || !senderSeleccionado) return;
+    const res = await fetch("/chats/etiqueta/agregar", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ senderId: senderSeleccionado, etiqueta })
+    });
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+    const data = await res.json();
+    if(data.ok){
+      const c = conversaciones.find(c => c.sender_id === senderSeleccionado);
+      if(c) c.etiquetas = data.etiquetas;
+      popoverEtiqueta.style.display = "none";
+      renderHead();
+      cargarEtiquetasEnSelectorReporte();
+    }
+  }
+
+  document.getElementById("btnConfirmarEtiqueta").addEventListener("click", confirmarNuevaEtiqueta);
+  inputNuevaEtiqueta.addEventListener("keydown", (e) => {
+    if(e.key === "Enter"){ e.preventDefault(); confirmarNuevaEtiqueta(); }
+  });
+  document.addEventListener("click", (e) => {
+    if(popoverEtiqueta.style.display !== "none" && !popoverEtiqueta.contains(e.target) && e.target.id !== "btnAddEtiqueta"){
+      popoverEtiqueta.style.display = "none";
+    }
+  });
 
   document.getElementById("selectEtapa").addEventListener("change", async (e) => {
     if(!senderSeleccionado) return;
@@ -5886,7 +6172,12 @@ ${estilosBase()}
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      const sufijo = segmento === "califica" ? "_califican" : segmento === "enlace" ? "_agendaron" : "";
+      let sufijo = "";
+      if(segmento.startsWith("etiqueta:")) sufijo = "_" + segmento.slice(9).toLowerCase().replace(/\s+/g, "_");
+      else if(segmento === "califica") sufijo = "_califican";
+      else if(segmento === "nocalifica") sufijo = "_no_califican";
+      else if(segmento === "agendo") sufijo = "_agendaron";
+      else if(segmento === "enlace") sufijo = "_enlace_enviado";
       a.download = "dolores_obstaculos" + sufijo + "_" + new Date().toISOString().slice(0, 10) + ".csv";
       document.body.appendChild(a);
       a.click();
@@ -5900,8 +6191,26 @@ ${estilosBase()}
     }
   });
 
+  // Las etiquetas manuales que existan se agregan como opciones extra al
+  // selector del reporte, para poder analizar cualquier grupo (ej. "compró").
+  async function cargarEtiquetasEnSelectorReporte(){
+    const data = await llamarGET("/etiquetas");
+    const etiquetas = data?.etiquetas || [];
+    if(etiquetas.length === 0) return;
+    const select = document.getElementById("segmentoReporteDolores");
+    etiquetas.forEach(et => {
+      const valor = "etiqueta:" + et;
+      if(select.querySelector(\`option[value="\${valor}"]\`)) return; // ya estaba, no se duplica
+      const opt = document.createElement("option");
+      opt.value = valor;
+      opt.textContent = "🏷️ " + et;
+      select.appendChild(opt);
+    });
+  }
+
   cargarEtapasDisponibles();
   cargarConversaciones();
+  cargarEtiquetasEnSelectorReporte();
 </script>
 </body>
 </html>
@@ -6081,11 +6390,14 @@ const TAMANO_LOTE_REPORTE = 8;
 
 app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) => {
   try {
-    // "filtro" permite enfocar el análisis solo en el segmento que más
-    // importa para marketing: los que califican, o los que ya llegaron al
-    // enlace de calendario/formulario (leads de mayor intención) — en vez
-    // de mezclar esa información con la de leads que ni siquiera avanzaron.
-    const filtro = req.query.filtro === "califica" || req.query.filtro === "enlace" ? req.query.filtro : "todos";
+    // "filtro" permite enfocar el análisis en cualquier grupo: todos, los
+    // que califican, los que NO califican, los que agendaron, los que
+    // recibieron el enlace, o cualquier ETIQUETA manual que hayas creado
+    // (ej. "compró") — usando el prefijo "etiqueta:nombre".
+    const filtroRaw = req.query.filtro || "todos";
+    const esEtiqueta = filtroRaw.startsWith("etiqueta:");
+    const nombreEtiqueta = esEtiqueta ? filtroRaw.slice("etiqueta:".length) : null;
+    const filtro = esEtiqueta ? "etiqueta" : (["califica", "nocalifica", "agendo", "enlace"].includes(filtroRaw) ? filtroRaw : "todos");
 
     let consulta = supabase
       .from("conversaciones")
@@ -6094,7 +6406,10 @@ app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) =>
       .limit(LIMITE_CONVERSACIONES_REPORTE);
 
     if (filtro === "califica") consulta = consulta.eq("califica", true);
+    if (filtro === "nocalifica") consulta = consulta.eq("no_califica", true);
+    if (filtro === "agendo") consulta = consulta.eq("agendo", true);
     if (filtro === "enlace") consulta = consulta.eq("enlace_enviado", true);
+    if (filtro === "etiqueta" && nombreEtiqueta) consulta = consulta.contains("etiquetas", [nombreEtiqueta]);
 
     const { data: conversaciones, error } = await consulta;
 
@@ -6128,7 +6443,11 @@ app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) =>
 
         if (!transcripcion.trim()) return null;
 
-        return analizarDoloresYObstaculos(transcripcion);
+        const analisis = await analizarDoloresYObstaculos(transcripcion);
+        if (!analisis) return null;
+
+        const perfil = await obtenerPerfilInstagram(senderId);
+        return { senderId, username: perfil?.username || senderId, ...analisis };
       }));
 
       resultados.push(...analisisLote.filter(Boolean));
@@ -6173,36 +6492,58 @@ app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) =>
       return /[",\n]/.test(txt) ? '"' + txt.replace(/"/g, '""') + '"' : txt;
     };
 
-    const nombreSegmento = filtro === "califica" ? "Solo leads que califican"
-      : filtro === "enlace" ? "Solo leads con enlace de calendario enviado"
-      : "Todos los leads";
+    const nombresSegmento = {
+      todos: "Todos los leads",
+      califica: "Solo leads que califican",
+      nocalifica: "Solo leads que NO califican",
+      agendo: "Solo leads que agendaron (confirmado)",
+      enlace: "Solo leads con enlace de calendario enviado"
+    };
+    const nombreSegmento = esEtiqueta ? `Solo leads con la etiqueta "${nombreEtiqueta}"` : (nombresSegmento[filtro] || "Todos los leads");
 
-    // Encabezado de 2 bloques de 3 columnas (Categoria, Cantidad, %), con una
-    // columna en blanco de separación entre bloques.
+    // Bloque 1: resumen de frecuencias (Dolor / Obstáculo), igual que antes.
     const encabezadoBloques = [
       "Dolor", "Cantidad", "Porcentaje", "",
       "Obstáculo", "Cantidad", "Porcentaje"
     ];
 
-    const totalFilas = Math.max(filasDolor.length, filasObstaculo.length);
-    const filasCombinadas = [];
-    for (let i = 0; i < totalFilas; i++) {
+    const totalFilasResumen = Math.max(filasDolor.length, filasObstaculo.length);
+    const filasResumen = [];
+    for (let i = 0; i < totalFilasResumen; i++) {
       const dolor = filasDolor[i] || ["", "", ""];
       const obstaculo = filasObstaculo[i] || ["", "", ""];
-      filasCombinadas.push([...dolor, "", ...obstaculo]);
+      filasResumen.push([...dolor, "", ...obstaculo]);
     }
+
+    // Bloque 2: detalle por cada lead — cuánto peso quiere perder, su
+    // obstáculo, y una descripción legible de cómo le afecta / por qué
+    // quiere bajar. Pensado para redactar contenido/publicidad usando sus
+    // propias palabras, no solo para ver frecuencias agregadas.
+    const encabezadoDetalle = ["Usuario", "Cuánto peso quiere perder", "Obstáculo", "Cómo le afecta / motivo"];
+    const filasDetalle = resultados.map(r => [
+      "@" + (r.username || r.senderId),
+      r.peso_a_perder || "(no especifica)",
+      r.obstaculo || "(no menciona)",
+      r.detalle || "(no especifica)"
+    ]);
 
     const lineas = [
       `Segmento analizado:,${nombreSegmento}`,
       `Total de conversaciones analizadas:,${totalAnalizados}`,
       "",
+      "RESUMEN DE FRECUENCIAS",
       encabezadoBloques.map(escaparCSV).join(","),
-      ...filasCombinadas.map((fila) => fila.map(escaparCSV).join(","))
+      ...filasResumen.map((fila) => fila.map(escaparCSV).join(",")),
+      "",
+      "DETALLE POR LEAD",
+      encabezadoDetalle.map(escaparCSV).join(","),
+      ...filasDetalle.map((fila) => fila.map(escaparCSV).join(","))
     ];
 
     const csv = "\uFEFF" + lineas.join("\r\n");
     const fechaArchivo = new Date().toISOString().slice(0, 10);
-    const sufijoArchivo = filtro === "califica" ? "_califican" : filtro === "enlace" ? "_agendaron" : "";
+    const sufijosArchivo = { todos: "", califica: "_califican", nocalifica: "_no_califican", agendo: "_agendaron_confirmado", enlace: "_enlace_enviado" };
+    const sufijoArchivo = esEtiqueta ? "_" + normalizarParaComparar(nombreEtiqueta).replace(/\s+/g, "_") : (sufijosArchivo[filtro] || "");
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="dolores_obstaculos${sufijoArchivo}_${fechaArchivo}.csv"`);
