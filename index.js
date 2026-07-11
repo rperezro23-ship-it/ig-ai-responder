@@ -537,6 +537,67 @@ async function buscarSenderIdPorUsername(username) {
   return data?.sender_id || null;
 }
 
+// Cachea la URI de la organización de Calendly (no cambia nunca para una
+// misma cuenta) para no pedirla de nuevo en cada verificación.
+let calendlyOrgUriCache = null;
+
+// Verifica EN VIVO, consultando directamente la API de Calendly (endpoints
+// de solo lectura — funcionan en el plan gratuito, no hace falta el plan de
+// pago que sí exigen los webhooks), si un username de Instagram tiene una
+// reserva activa agendada. Se usa en el momento exacto en que un lead dice
+// "ya agendé" — no antes (no hay por qué gastar llamadas revisando a nadie
+// que no lo haya dicho) ni con webhooks (que costarían el plan Standard).
+async function verificarReservaEnCalendly(username) {
+  const limpio = (username || "").trim().replace(/^@/, "").toLowerCase();
+  if (!limpio || !configActual.calendly_token?.trim() || !configActual.calendly_pregunta_instagram?.trim()) {
+    return { encontrado: false, motivo: "Calendly no está configurado (falta token, pregunta, o el lead no tiene username)." };
+  }
+
+  try {
+    if (!calendlyOrgUriCache) {
+      const usuario = await obtenerUsuarioCalendly();
+      calendlyOrgUriCache = usuario?.current_organization || null;
+    }
+    if (!calendlyOrgUriCache) return { encontrado: false, motivo: "No se pudo obtener la organización de Calendly." };
+
+    const ahora = new Date();
+    const en90dias = new Date(ahora.getTime() + 90 * 24 * 60 * 60 * 1000);
+
+    const respEventos = await axios.get("https://api.calendly.com/scheduled_events", {
+      headers: calendlyHeaders(),
+      params: {
+        organization: calendlyOrgUriCache,
+        status: "active",
+        min_start_time: ahora.toISOString(),
+        max_start_time: en90dias.toISOString(),
+        count: 100
+      }
+    });
+
+    const eventos = respEventos.data?.collection || [];
+
+    for (const evento of eventos) {
+      const respInvitados = await axios.get(`${evento.uri}/invitees`, { headers: calendlyHeaders() });
+      const invitados = respInvitados.data?.collection || [];
+
+      for (const invitado of invitados) {
+        const preguntasYRespuestas = invitado.questions_and_answers || [];
+        const encontrada = preguntasYRespuestas.find(qa => qa.question?.trim() === configActual.calendly_pregunta_instagram.trim());
+        const respuestaUsername = (encontrada?.answer || "").trim().replace(/^@/, "").toLowerCase();
+
+        if (respuestaUsername && respuestaUsername === limpio) {
+          return { encontrado: true, event: evento };
+        }
+      }
+    }
+
+    return { encontrado: false, motivo: "No se encontró ninguna reserva activa con ese usuario de Instagram." };
+  } catch (err) {
+    console.error("❌ Error verificando reserva en Calendly:", err.response?.data || err.message);
+    return { encontrado: false, motivo: "Error consultando Calendly: " + (err.response?.data?.message || err.message) };
+  }
+}
+
 // ---------------------------------------------------------------
 // Perfil (username + foto) de cada persona que escribe por Instagram.
 // Se cachea en memoria para no pedirle su perfil a Meta en cada refresco
@@ -1716,6 +1777,27 @@ async function procesarBuffer(senderId) {
     }
 
     let transicionAplicada = entroPorEtapaDeEntrada;
+
+    // Si la transición que coincidió pide verificación con Calendly (el
+    // lead dijo algo como "ya agendé"), se consulta EN VIVO si de verdad
+    // existe esa reserva antes de creerle — en vez de aplicar la transición
+    // a ciegas solo porque lo dijo. Si no se encuentra, se cancela la
+    // transición (se sigue en la misma etapa) y se le pide al modelo, más
+    // abajo, que pida confirmación del día y la hora en vez de asumir nada.
+    let eventoCalendlyConfirmado = null;
+    let pedirConfirmacionCalendly = false;
+    if (transicion?.verificar_calendly) {
+      const resultado = await verificarReservaEnCalendly(conv.username);
+      if (resultado.encontrado) {
+        console.log(`✅ Calendly confirma la reserva de ${senderId} (@${conv.username}).`);
+        eventoCalendlyConfirmado = resultado.event;
+      } else {
+        console.log(`❌ No se encontró ninguna reserva en Calendly para ${senderId} (@${conv.username || "sin username"}): ${resultado.motivo}`);
+        transicion = null; // no se aplica el cambio de etapa todavía
+        pedirConfirmacionCalendly = true;
+      }
+    }
+
     if (transicion && transicion.etapa_destino !== (etapaActualClave || "")) {
       const nuevaEtapaConfig = transicion.etapa_destino ? obtenerEtapaConfig(transicion.etapa_destino) : null;
       if (transicion.etapa_destino === "" || nuevaEtapaConfig) {
@@ -1746,7 +1828,7 @@ async function procesarBuffer(senderId) {
         if (transicion.agendo) {
           console.log(`📅 ${senderId} AGENDÓ — se detienen sus seguimientos (si esa opción está activada).`);
           camposTransicion.agendo = true;
-          camposTransicion.agendo_en = new Date().toISOString();
+          camposTransicion.agendo_en = eventoCalendlyConfirmado?.start_time || new Date().toISOString();
         }
 
         await guardarConversacion(senderId, camposTransicion);
@@ -1828,7 +1910,17 @@ async function procesarBuffer(senderId) {
     // (ej. una etapa que solo pregunta la edad no debería, por eso, ponerse a
     // dar rutinas de ejercicio si el lead pregunta algo fuera de tema).
     const reglasGenerales = configActual.contexto_base?.trim();
-    const promptSistema = reglasGenerales ? `${reglasGenerales}\n\n${promptPropio}` : promptPropio;
+    let promptSistema = reglasGenerales ? `${reglasGenerales}\n\n${promptPropio}` : promptPropio;
+
+    // Si el lead dijo que ya agendó pero la verificación en vivo con
+    // Calendly (arriba) NO encontró ninguna reserva a su nombre, se le
+    // agrega esta nota SOLO en este turno — para que el modelo no le crea a
+    // ciegas y en vez de eso pida que confirme el día y la hora exactos que
+    // eligió, de forma natural (no como un interrogatorio ni acusándolo de
+    // mentir, puede ser simplemente un error de sincronización).
+    if (pedirConfirmacionCalendly) {
+      promptSistema += `\n\nNOTA IMPORTANTE PARA ESTE MENSAJE: el cliente acaba de decir que ya agendó su llamada, pero nuestro sistema NO encuentra ninguna reserva confirmada a su nombre en el calendario en este momento. NO le digas que no encuentras nada ni que "el sistema no lo detecta" (suena robótico y desconfiado) — en vez de eso, de forma cálida y natural, pídele que te confirme qué día y hora eligió, como si quisieras anotarlo tú mismo para tenerlo presente. Si te da el día y la hora, no hace falta que sigas insistiendo en este mensaje.`;
+    }
 
     if (etapaConfig) {
       console.log(`🧭 ${senderId} está en la etapa "${etapaConfig.clave}" — se usa su prompt propio.`);
@@ -3257,7 +3349,8 @@ function normalizarTransiciones(transiciones) {
         silenciosa: Boolean(t.silenciosa),
         no_califica: Boolean(t.no_califica),
         motivo_no_califica: typeof t.motivo_no_califica === "string" ? t.motivo_no_califica.trim() : "",
-        agendo: Boolean(t.agendo)
+        agendo: Boolean(t.agendo),
+        verificar_calendly: Boolean(t.verificar_calendly)
       };
     })
     .filter(t => t.coincidencia === "condicion" ? Boolean(t.condicion) : t.frases.length > 0);
@@ -3953,12 +4046,13 @@ ${estilosBase()}
         </div>
 
         <div class="card card-destacada">
-          <h2>📅 Conectar Calendly (verificar reservas de verdad)</h2>
+          <h2>📅 Calendly (verificar reservas de verdad)</h2>
           <details class="ayuda">
             <summary>¿Cómo funciona esto?</summary>
             <div class="hint-contenido">
-              <p class="hint">Conecta tu Calendly para que el bot sepa, con certeza real (no solo porque el lead lo dijo), si alguien ya agendó su llamada. Requiere dos cosas de tu cuenta de Calendly: (1) tu <b>Personal Access Token</b> (en Calendly: Integrations → API and Webhooks), y (2) que tu evento tenga una <b>pregunta personalizada obligatoria</b> pidiendo el usuario de Instagram — pega aquí el texto EXACTO de esa pregunta, tal cual aparece en Calendly, para que el sistema sepa cuál respuesta leer.</p>
-              <p class="hint">Después de guardar ambos campos, dale a "Conectar Calendly" — esto crea automáticamente un aviso (webhook) para que Calendly le informe a tu bot cada vez que alguien reserva. Solo hace falta hacerlo una vez.</p>
+              <p class="hint">Con esto, cuando un lead diga "ya agendé", el bot puede consultar EN VIVO tu Calendly para confirmar si es cierto — en vez de creerle a ciegas. Solo funciona en el momento exacto en que alguien lo dice (no revisa a nadie más), así que no necesitas el plan de pago de Calendly (los webhooks sí lo requieren, pero esto usa solo consultas de lectura, disponibles gratis).</p>
+              <p class="hint">Necesitas dos cosas: (1) tu <b>Personal Access Token</b> de Calendly (en Calendly: Integrations → API and Webhooks), y (2) que tu evento tenga una <b>pregunta personalizada obligatoria</b> pidiendo el usuario de Instagram — pega aquí el texto EXACTO de esa pregunta, tal cual aparece en Calendly.</p>
+              <p class="hint">Después de guardar esto (con el botón "Guardar cambios" de siempre), ve a la transición que detecta "ya agendé" (en la etapa correspondiente) y marca la casilla <b>"📆 Verificar EN VIVO en Calendly"</b> — así es como se activa la verificación en esa transición en particular.</p>
             </div>
           </details>
           <label for="calendlyToken">Personal Access Token</label>
@@ -3969,8 +4063,6 @@ ${estilosBase()}
           <p class="key-actual" id="calendlyKeyActual">Cargando estado…</p>
           <label for="calendlyPregunta" style="margin-top:14px;">Texto EXACTO de la pregunta de Instagram en tu evento de Calendly</label>
           <input type="text" id="calendlyPregunta" placeholder="Ej: ¿Cuál es tu usuario de Instagram?">
-          <button class="add-paso" id="btnConectarCalendly" type="button" style="margin-top:14px;">🔗 Conectar Calendly</button>
-          <p class="hint" id="calendlyEstadoMsg" style="margin:10px 0 0;"></p>
         </div>
 
         <div class="card card-destacada">
@@ -4307,56 +4399,6 @@ ${estilosBase()}
     input.type = input.type === "password" ? "text" : "password";
   });
 
-  document.getElementById("btnConectarCalendly").addEventListener("click", async () => {
-    const btn = document.getElementById("btnConectarCalendly");
-    const estadoMsg = document.getElementById("calendlyEstadoMsg");
-    const token = document.getElementById("calendlyToken").value.trim();
-    const pregunta = document.getElementById("calendlyPregunta").value.trim();
-
-    if(!pregunta){
-      estadoMsg.textContent = "⚠️ Escribe primero el texto exacto de la pregunta de Instagram.";
-      estadoMsg.style.color = "var(--red)";
-      return;
-    }
-
-    btn.disabled = true;
-    btn.textContent = "⏳ Conectando…";
-    estadoMsg.textContent = "";
-
-    try {
-      // Primero se guarda el token (si escribiste uno nuevo) y la pregunta,
-      // para que el servidor ya los tenga antes de intentar conectar.
-      const bodyGuardado = { calendly_pregunta_instagram: pregunta };
-      if(token) bodyGuardado.calendly_token = token;
-
-      const resGuardar = await fetch("/config", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(bodyGuardado)
-      });
-      if(resGuardar.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
-      if(!resGuardar.ok){
-        const data = await resGuardar.json().catch(() => ({}));
-        throw new Error(data.error || "No se pudo guardar la configuración.");
-      }
-
-      const resConectar = await fetch("/calendly/conectar", { method: "POST" });
-      if(resConectar.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
-      const dataConectar = await resConectar.json();
-      if(!resConectar.ok) throw new Error(dataConectar.error || "No se pudo conectar con Calendly.");
-
-      estadoMsg.textContent = "✅ ¡Listo! Calendly ya está conectado y le va a avisar al bot cada vez que alguien reserve.";
-      estadoMsg.style.color = "var(--green)";
-      document.getElementById("calendlyToken").value = "";
-      await cargarConfig();
-    } catch (err) {
-      estadoMsg.textContent = "❌ " + err.message;
-      estadoMsg.style.color = "var(--red)";
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "🔗 Conectar Calendly";
-    }
-  });
-
   // --- Seguimientos normales: editor dinámico ---
   let pasos = [];
 
@@ -4652,6 +4694,10 @@ ${estilosBase()}
           <input type="checkbox" class="\${prefijoClase}-agendo" data-i="\${i}"\${t.agendo ? " checked" : ""} style="width:16px; height:16px; accent-color:var(--green); cursor:pointer;">
           <span style="color:var(--text); font-size:13.5px; font-weight:500;">📅 Marcar como "AGENDÓ" al activarse (detiene sus seguimientos, si lo configuras así)</span>
         </label>
+        <label style="display:flex; align-items:center; gap:9px; cursor:pointer; margin:10px 0 0;">
+          <input type="checkbox" class="\${prefijoClase}-verificar-calendly" data-i="\${i}"\${t.verificar_calendly ? " checked" : ""} style="width:16px; height:16px; accent-color:#FFC542; cursor:pointer;">
+          <span style="color:var(--text); font-size:13.5px; font-weight:500;">📆 Verificar EN VIVO en Calendly antes de activarse (si no encuentra la reserva, no cambia de etapa y le pide confirmar día/hora)</span>
+        </label>
       \`;
       cont.appendChild(div);
     });
@@ -4716,6 +4762,11 @@ ${estilosBase()}
       if(!lista[i]) return;
       lista[i].agendo = chk.checked;
     });
+    document.querySelectorAll(\`.\${prefijoClase}-verificar-calendly\`).forEach((chk) => {
+      const i = +chk.dataset.i;
+      if(!lista[i]) return;
+      lista[i].verificar_calendly = chk.checked;
+    });
   }
 
   let transicionesGenerales = [];
@@ -4733,7 +4784,7 @@ ${estilosBase()}
       alert("Primero crea al menos una etapa para poder mandar al lead hacia ella.");
       return;
     }
-    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "", agendo: false });
+    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "", agendo: false, verificar_calendly: false });
     renderTransicionesGenerales();
   });
 
@@ -4986,7 +5037,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].transiciones) etapas[i].transiciones = [];
-      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "", agendo: false });
+      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "", agendo: false, verificar_calendly: false });
       renderEtapas();
     }));
   }
@@ -5240,16 +5291,6 @@ ${estilosBase()}
       estadoKey.textContent = "⚠️ No hay ningún token configurado todavía.";
       estadoKey.style.color = "var(--red)";
     }
-
-    const estadoConexion = document.getElementById("calendlyEstadoMsg");
-    if(cfg.calendly_webhook_uri){
-      const fechaConexion = cfg.calendly_conectado_en ? new Date(cfg.calendly_conectado_en).toLocaleDateString("es-MX", { day:"2-digit", month:"short", year:"numeric" }) : "";
-      estadoConexion.textContent = "✅ Calendly conectado" + (fechaConexion ? " (" + fechaConexion + ")" : "") + " — el bot ya recibe avisos automáticos cuando alguien reserva.";
-      estadoConexion.style.color = "var(--green)";
-    } else {
-      estadoConexion.textContent = "";
-      estadoConexion.style.color = "";
-    }
   }
 
   document.getElementById("btnGuardar").addEventListener("click", async () => {
@@ -5295,10 +5336,13 @@ ${estilosBase()}
       disparadores: disparadores,
       etapas: etapas,
       transiciones_generales: transicionesGenerales,
-      transiciones_generales_elegir_mejor: document.getElementById("transGeneralesElegirMejor").checked
+      transiciones_generales_elegir_mejor: document.getElementById("transGeneralesElegirMejor").checked,
+      calendly_pregunta_instagram: document.getElementById("calendlyPregunta").value
     };
     const nuevaClave = document.getElementById("openaiKey").value.trim();
     if(nuevaClave) body.openai_api_key = nuevaClave;
+    const nuevoTokenCalendly = document.getElementById("calendlyToken").value.trim();
+    if(nuevoTokenCalendly) body.calendly_token = nuevoTokenCalendly;
 
     const msg = document.getElementById("saveMsg");
     msg.style.color = "";
@@ -5307,7 +5351,9 @@ ${estilosBase()}
     if(data){
       msg.textContent = "✓ Guardado"; msg.className = "save-msg ok";
       document.getElementById("openaiKey").value = "";
+      document.getElementById("calendlyToken").value = "";
       if(data.config) pintarEstadoClave(data.config);
+      if(data.config) pintarEstadoCalendly(data.config);
       if(data.config && Array.isArray(data.config.etapas)) { etapas = JSON.parse(JSON.stringify(data.config.etapas)); renderEtapas(); }
       if(data.config && Array.isArray(data.config.transiciones_generales)) { transicionesGenerales = JSON.parse(JSON.stringify(data.config.transiciones_generales)); renderTransicionesGenerales(); }
     }
