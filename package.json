@@ -1,15 +1,22 @@
 {
-  "name": "ig-ai-server",
+  "name": "claude",
   "version": "1.0.0",
-  "description": "Instagram AI Auto Responder Server",
-  "main": "index.js",
+  "description": "",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
   },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
-    "express": "^4.18.2",
-    "axios": "^1.6.0",
-    "openai": "^4.20.0",
-    "@supabase/supabase-js": "^2.45.0"
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@supabase/supabase-js": "^2.110.0",
+    "axios": "^1.18.1",
+    "express": "^4.22.2",
+    "fluent-ffmpeg": "^2.1.3",
+    "jsdom": "^29.1.1",
+    "openai": "^6.45.0"
   }
 }
