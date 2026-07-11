@@ -5170,8 +5170,9 @@ ${estilosBase()}
     border-radius:20px; padding:4px 9px; font-size:11.5px; font-weight:600; cursor:pointer;
   }
   .btn-add-etiqueta:hover{ border-color:#FFC542; color:#FFC542; }
+  .add-etiqueta-wrap{ position:relative; display:inline-flex; flex-shrink:0; }
   .etiqueta-popover{
-    position:absolute; top:100%; left:14px; margin-top:6px; background:var(--surface-2);
+    position:absolute; top:100%; left:0; margin-top:6px; background:var(--surface-2);
     border:1px solid var(--border); border-radius:10px; padding:10px; display:flex; gap:8px;
     box-shadow:0 8px 24px rgba(0,0,0,.35); z-index:20;
   }
@@ -5370,11 +5371,13 @@ ${estilosBase()}
           <select id="selectEtapa" class="status-select"><option value="">Sin etapa (general)</option></select>
           <span class="status-sep">·</span>
           <div class="etiquetas-lista" id="etiquetasLista"></div>
-          <button type="button" class="btn-add-etiqueta" id="btnAddEtiqueta">+ 🏷️</button>
-          <div class="etiqueta-popover" id="etiquetaPopover" style="display:none;">
-            <input type="text" id="inputNuevaEtiqueta" placeholder="Escribe o elige una etiqueta..." list="listaEtiquetasExistentes" autocomplete="off">
-            <datalist id="listaEtiquetasExistentes"></datalist>
-            <button type="button" id="btnConfirmarEtiqueta">Agregar</button>
+          <div class="add-etiqueta-wrap">
+            <button type="button" class="btn-add-etiqueta" id="btnAddEtiqueta">+ 🏷️</button>
+            <div class="etiqueta-popover" id="etiquetaPopover" style="display:none;">
+              <input type="text" id="inputNuevaEtiqueta" placeholder="Escribe o elige una etiqueta..." list="listaEtiquetasExistentes" autocomplete="off">
+              <datalist id="listaEtiquetasExistentes"></datalist>
+              <button type="button" id="btnConfirmarEtiqueta">Agregar</button>
+            </div>
           </div>
         </div>
         <div class="chat-messages" id="chatMensajes">
