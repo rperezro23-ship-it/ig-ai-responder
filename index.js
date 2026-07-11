@@ -473,6 +473,71 @@ async function eliminarCuentaConectada() {
 }
 
 // ---------------------------------------------------------------
+// Conexión con Calendly: se usa para saber, con certeza real (no solo
+// porque el lead lo dijo), si alguien ya agendó su llamada. Funciona con
+// un webhook — Calendly avisa automáticamente en el instante en que
+// alguien reserva, y esa reserva se hace coincidir con la conversación
+// correcta usando la respuesta a una pregunta personalizada del formulario
+// de Calendly ("¿cuál es tu usuario de Instagram?").
+// ---------------------------------------------------------------
+
+function calendlyHeaders() {
+  return { Authorization: `Bearer ${configActual.calendly_token}`, "Content-Type": "application/json" };
+}
+
+// Obtiene la URI de la organización de Calendly del dueño del token — hace
+// falta para poder crear la suscripción del webhook con alcance "organization".
+async function obtenerUsuarioCalendly() {
+  const resp = await axios.get("https://api.calendly.com/users/me", { headers: calendlyHeaders() });
+  return resp.data?.resource; // { uri, current_organization, name, email, ... }
+}
+
+// Crea (o reemplaza) la suscripción del webhook en Calendly, apuntando al
+// endpoint de este servidor. Se llama una sola vez, desde el botón
+// "Conectar Calendly" en /panel — no hace falta repetirlo salvo que se
+// quiera reconectar.
+async function crearWebhookCalendly(urlCallback) {
+  const usuario = await obtenerUsuarioCalendly();
+  if (!usuario?.current_organization) {
+    throw new Error("No se pudo obtener la organización de Calendly con ese token.");
+  }
+
+  const resp = await axios.post(
+    "https://api.calendly.com/webhook_subscriptions",
+    {
+      url: urlCallback,
+      events: ["invitee.created"],
+      organization: usuario.current_organization,
+      scope: "organization"
+    },
+    { headers: calendlyHeaders() }
+  );
+
+  return { webhookUri: resp.data?.resource?.uri, organizationUri: usuario.current_organization };
+}
+
+// Busca en Supabase qué conversación corresponde a un usuario de Instagram
+// (comparando sin mayúsculas ni "@" de más), para poder marcarla como
+// "agendó" cuando llega el aviso de Calendly.
+async function buscarSenderIdPorUsername(username) {
+  const limpio = (username || "").trim().replace(/^@/, "").toLowerCase();
+  if (!limpio) return null;
+
+  const { data, error } = await supabase
+    .from("conversaciones")
+    .select("sender_id")
+    .ilike("username", limpio)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("❌ Error buscando conversación por username para Calendly:", error.message);
+    return null;
+  }
+  return data?.sender_id || null;
+}
+
+// ---------------------------------------------------------------
 // Perfil (username + foto) de cada persona que escribe por Instagram.
 // Se cachea en memoria para no pedirle su perfil a Meta en cada refresco
 // del chat en vivo (la pantalla de /chats hace polling cada pocos segundos).
@@ -502,6 +567,16 @@ async function obtenerPerfilInstagram(senderId) {
       obtenido_en: Date.now()
     };
     perfilesCache.set(senderId, perfil);
+
+    // Se guarda también en Supabase (no solo en la caché en memoria, que se
+    // pierde si el servidor reinicia) — sirve para poder buscar una
+    // conversación POR SU username más adelante, ej. al hacer coincidir una
+    // reserva de Calendly con el lead correcto. No se espera (fire-and-forget)
+    // para no atrasar la respuesta de este endpoint, que se llama seguido.
+    if (perfil.username) {
+      guardarConversacion(senderId, { username: perfil.username }).catch(() => {});
+    }
+
     return perfil;
   } catch (err) {
     console.error(`⚠️ No se pudo obtener el perfil de ${senderId}:`, err.response?.data || err.message);
@@ -2018,6 +2093,77 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// Se llama desde el botón "Conectar Calendly" en /panel — usa el token que
+// ya guardaste para crear la suscripción del webhook automáticamente, sin
+// que tengas que hacerlo a mano con curl.
+app.post("/calendly/conectar", requireAdminKey, async (req, res) => {
+  try {
+    if (!configActual.calendly_token?.trim()) {
+      return res.status(400).json({ error: "Primero guarda tu Personal Access Token de Calendly." });
+    }
+
+    const urlCallback = `${req.protocol}://${req.get("host")}/webhook/calendly`;
+    const { webhookUri, organizationUri } = await crearWebhookCalendly(urlCallback);
+
+    await guardarConfigDB({
+      calendly_webhook_uri: webhookUri || "",
+      calendly_organization_uri: organizationUri || "",
+      calendly_conectado_en: new Date().toISOString()
+    });
+
+    res.json({ ok: true, webhookUri });
+  } catch (err) {
+    console.error("❌ Error conectando con Calendly:", err.response?.data || err.message);
+    const detalle = err.response?.data?.message || err.response?.data?.title || err.message;
+    res.status(500).json({ error: "No se pudo conectar con Calendly: " + detalle });
+  }
+});
+
+// Recibe el aviso de Calendly cada vez que alguien reserva. Hace coincidir
+// la reserva con la conversación correcta usando la respuesta a la pregunta
+// personalizada de Instagram, y marca esa conversación como "AGENDÓ" — de
+// forma verificada, no solo porque el lead lo haya dicho en el chat.
+app.post("/webhook/calendly", async (req, res) => {
+  res.sendStatus(200); // Calendly espera una respuesta rápida, igual que Meta
+
+  try {
+    const body = req.body || {};
+    if (body.event !== "invitee.created") return;
+
+    const payload = body.payload || {};
+    const preguntaConfigurada = configActual.calendly_pregunta_instagram?.trim();
+    const preguntasYRespuestas = payload.questions_and_answers || [];
+
+    let respuestaInstagram = null;
+    if (preguntaConfigurada) {
+      const encontrada = preguntasYRespuestas.find(qa => qa.question?.trim() === preguntaConfigurada);
+      respuestaInstagram = encontrada?.answer || null;
+    }
+
+    // Si no se encontró por coincidencia exacta de la pregunta (ej. el texto
+    // configurado no quedó idéntico al de Calendly), se deja un registro
+    // completo del payload para poder revisar y ajustar el texto exacto.
+    if (!respuestaInstagram) {
+      console.warn(`⚠️ No se encontró la respuesta de Instagram en una reserva de Calendly. Pregunta configurada: "${preguntaConfigurada}". Preguntas recibidas: ${JSON.stringify(preguntasYRespuestas)}`);
+      return;
+    }
+
+    const senderId = await buscarSenderIdPorUsername(respuestaInstagram);
+    if (!senderId) {
+      console.warn(`⚠️ Reserva de Calendly de @${respuestaInstagram} — no se encontró ninguna conversación con ese username en el bot.`);
+      return;
+    }
+
+    console.log(`📅 Calendly confirma que @${respuestaInstagram} (${senderId}) agendó una llamada — se marca como AGENDÓ.`);
+    await guardarConversacion(senderId, {
+      agendo: true,
+      agendo_en: payload.event?.start_time || new Date().toISOString()
+    });
+  } catch (err) {
+    console.error("❌ Error procesando webhook de Calendly:", err.response?.data || err.message);
+  }
+});
+
 app.get("/", (req, res) => {
   res.redirect("/login");
 });
@@ -2752,7 +2898,12 @@ let configActual = {
   disparadores: [], // [{ frases: [], tipo: "audio"|"foto", clave, pausa_segundos }]  <- generales (fallback)
   etapas: [],  // [{ clave, nombre, prompt, disparadores: [...], transiciones: [...] }]
   transiciones_generales: [], // [{ frases: [], etapa_destino }]  <- entrar a una etapa por palabra clave sin depender de la IA
-  transiciones_generales_elegir_mejor: false // si hay varias condiciones generales, elegir la mejor en vez de la primera que diga sí
+  transiciones_generales_elegir_mejor: false, // si hay varias condiciones generales, elegir la mejor en vez de la primera que diga sí
+  calendly_token: "",
+  calendly_pregunta_instagram: "", // texto EXACTO de la pregunta personalizada en Calendly que pide el usuario de Instagram
+  calendly_organization_uri: "",
+  calendly_webhook_uri: "",
+  calendly_conectado_en: null
 };
 
 // Cliente de OpenAI: se reconstruye cada vez que cambia configActual.openai_api_key
@@ -2772,11 +2923,13 @@ function enmascararClave(clave) {
 }
 
 function configParaFrontend(cfg) {
-  const { openai_api_key, ...resto } = cfg;
+  const { openai_api_key, calendly_token, ...resto } = cfg;
   return {
     ...resto,
     openai_api_key_configurada: Boolean(openai_api_key),
-    openai_api_key_mascara: enmascararClave(openai_api_key)
+    openai_api_key_mascara: enmascararClave(openai_api_key),
+    calendly_token_configurado: Boolean(calendly_token),
+    calendly_token_mascara: enmascararClave(calendly_token)
   };
 }
 
@@ -3165,7 +3318,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
   try {
     const { ai_prompt, contexto_base, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
             calificacion_activa, calificar_automatico_con_enlace, no_seguir_si_no_califica, parar_seguimientos_si_agendo, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
-            transiciones_generales_elegir_mejor, mensajes_error_audio } = req.body || {};
+            transiciones_generales_elegir_mejor, mensajes_error_audio, calendly_token, calendly_pregunta_instagram } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -3177,6 +3330,9 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (Array.isArray(seguimientos_enlace)) nuevaConfig.seguimientos_enlace = seguimientos_enlace;
     // Solo se actualiza si mandaron una clave nueva; si viene vacío, se deja la que ya había.
     if (typeof openai_api_key === "string" && openai_api_key.trim()) nuevaConfig.openai_api_key = openai_api_key.trim();
+    // Mismo criterio para el token de Calendly — no se pisa con vacío.
+    if (typeof calendly_token === "string" && calendly_token.trim()) nuevaConfig.calendly_token = calendly_token.trim();
+    if (typeof calendly_pregunta_instagram === "string") nuevaConfig.calendly_pregunta_instagram = calendly_pregunta_instagram.trim();
     if (typeof calificacion_activa === "boolean") nuevaConfig.calificacion_activa = calificacion_activa;
     if (typeof calificar_automatico_con_enlace === "boolean") nuevaConfig.calificar_automatico_con_enlace = calificar_automatico_con_enlace;
     if (typeof no_seguir_si_no_califica === "boolean") nuevaConfig.no_seguir_si_no_califica = no_seguir_si_no_califica;
@@ -3797,6 +3953,27 @@ ${estilosBase()}
         </div>
 
         <div class="card card-destacada">
+          <h2>📅 Conectar Calendly (verificar reservas de verdad)</h2>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Conecta tu Calendly para que el bot sepa, con certeza real (no solo porque el lead lo dijo), si alguien ya agendó su llamada. Requiere dos cosas de tu cuenta de Calendly: (1) tu <b>Personal Access Token</b> (en Calendly: Integrations → API and Webhooks), y (2) que tu evento tenga una <b>pregunta personalizada obligatoria</b> pidiendo el usuario de Instagram — pega aquí el texto EXACTO de esa pregunta, tal cual aparece en Calendly, para que el sistema sepa cuál respuesta leer.</p>
+              <p class="hint">Después de guardar ambos campos, dale a "Conectar Calendly" — esto crea automáticamente un aviso (webhook) para que Calendly le informe a tu bot cada vez que alguien reserva. Solo hace falta hacerlo una vez.</p>
+            </div>
+          </details>
+          <label for="calendlyToken">Personal Access Token</label>
+          <div class="key-input-row">
+            <input type="password" id="calendlyToken" placeholder="eyJhbGc..." autocomplete="off">
+            <button type="button" class="btn-ojo" id="btnVerClaveCalendly" title="Mostrar/ocultar">👁</button>
+          </div>
+          <p class="key-actual" id="calendlyKeyActual">Cargando estado…</p>
+          <label for="calendlyPregunta" style="margin-top:14px;">Texto EXACTO de la pregunta de Instagram en tu evento de Calendly</label>
+          <input type="text" id="calendlyPregunta" placeholder="Ej: ¿Cuál es tu usuario de Instagram?">
+          <button class="add-paso" id="btnConectarCalendly" type="button" style="margin-top:14px;">🔗 Conectar Calendly</button>
+          <p class="hint" id="calendlyEstadoMsg" style="margin:10px 0 0;"></p>
+        </div>
+
+        <div class="card card-destacada">
           <h2>🧱 Reglas generales (siempre activas)</h2>
           <details class="ayuda">
             <summary>¿Cómo funciona esto?</summary>
@@ -4123,6 +4300,61 @@ ${estilosBase()}
   document.getElementById("btnVerClave").addEventListener("click", () => {
     const input = document.getElementById("openaiKey");
     input.type = input.type === "password" ? "text" : "password";
+  });
+
+  document.getElementById("btnVerClaveCalendly").addEventListener("click", () => {
+    const input = document.getElementById("calendlyToken");
+    input.type = input.type === "password" ? "text" : "password";
+  });
+
+  document.getElementById("btnConectarCalendly").addEventListener("click", async () => {
+    const btn = document.getElementById("btnConectarCalendly");
+    const estadoMsg = document.getElementById("calendlyEstadoMsg");
+    const token = document.getElementById("calendlyToken").value.trim();
+    const pregunta = document.getElementById("calendlyPregunta").value.trim();
+
+    if(!pregunta){
+      estadoMsg.textContent = "⚠️ Escribe primero el texto exacto de la pregunta de Instagram.";
+      estadoMsg.style.color = "var(--red)";
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = "⏳ Conectando…";
+    estadoMsg.textContent = "";
+
+    try {
+      // Primero se guarda el token (si escribiste uno nuevo) y la pregunta,
+      // para que el servidor ya los tenga antes de intentar conectar.
+      const bodyGuardado = { calendly_pregunta_instagram: pregunta };
+      if(token) bodyGuardado.calendly_token = token;
+
+      const resGuardar = await fetch("/config", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bodyGuardado)
+      });
+      if(resGuardar.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+      if(!resGuardar.ok){
+        const data = await resGuardar.json().catch(() => ({}));
+        throw new Error(data.error || "No se pudo guardar la configuración.");
+      }
+
+      const resConectar = await fetch("/calendly/conectar", { method: "POST" });
+      if(resConectar.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+      const dataConectar = await resConectar.json();
+      if(!resConectar.ok) throw new Error(dataConectar.error || "No se pudo conectar con Calendly.");
+
+      estadoMsg.textContent = "✅ ¡Listo! Calendly ya está conectado y le va a avisar al bot cada vez que alguien reserve.";
+      estadoMsg.style.color = "var(--green)";
+      document.getElementById("calendlyToken").value = "";
+      await cargarConfig();
+    } catch (err) {
+      estadoMsg.textContent = "❌ " + err.message;
+      estadoMsg.style.color = "var(--red)";
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "🔗 Conectar Calendly";
+    }
   });
 
   // --- Seguimientos normales: editor dinámico ---
@@ -4806,7 +5038,9 @@ ${estilosBase()}
     document.getElementById("mensajesErrorAudio").value = Array.isArray(cfg.mensajes_error_audio) ? cfg.mensajes_error_audio.join("\\n") : "";
     document.getElementById("criteriosCalificacion").value = cfg.criterios_calificacion || "";
     document.getElementById("enlaceCalificacion").value = cfg.enlace_calificacion || "";
+    document.getElementById("calendlyPregunta").value = cfg.calendly_pregunta_instagram || "";
     pintarEstadoClave(cfg);
+    pintarEstadoCalendly(cfg);
     pasos = Array.isArray(cfg.seguimientos) ? JSON.parse(JSON.stringify(cfg.seguimientos)) : [];
     renderPasos();
     pasosEnlace = Array.isArray(cfg.seguimientos_enlace) ? JSON.parse(JSON.stringify(cfg.seguimientos_enlace)) : [];
@@ -4994,6 +5228,27 @@ ${estilosBase()}
     } else {
       estadoKey.textContent = "⚠️ No hay ninguna clave configurada todavía.";
       estadoKey.style.color = "var(--red)";
+    }
+  }
+
+  function pintarEstadoCalendly(cfg){
+    const estadoKey = document.getElementById("calendlyKeyActual");
+    if(cfg.calendly_token_configurado){
+      estadoKey.textContent = "Token actual: " + cfg.calendly_token_mascara;
+      estadoKey.style.color = "";
+    } else {
+      estadoKey.textContent = "⚠️ No hay ningún token configurado todavía.";
+      estadoKey.style.color = "var(--red)";
+    }
+
+    const estadoConexion = document.getElementById("calendlyEstadoMsg");
+    if(cfg.calendly_webhook_uri){
+      const fechaConexion = cfg.calendly_conectado_en ? new Date(cfg.calendly_conectado_en).toLocaleDateString("es-MX", { day:"2-digit", month:"short", year:"numeric" }) : "";
+      estadoConexion.textContent = "✅ Calendly conectado" + (fechaConexion ? " (" + fechaConexion + ")" : "") + " — el bot ya recibe avisos automáticos cuando alguien reserva.";
+      estadoConexion.style.color = "var(--green)";
+    } else {
+      estadoConexion.textContent = "";
+      estadoConexion.style.color = "";
     }
   }
 
