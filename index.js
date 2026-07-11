@@ -1857,7 +1857,18 @@ app.post("/webhook", async (req, res) => {
       }
 
       const mensaje = event.message?.text;
-      if (!mensaje) continue;
+      if (!mensaje) {
+        // El mensaje no trae texto — probablemente el cliente mandó un audio,
+        // una foto, un video, o algo compartido (un reel, un post, etc.).
+        // Se registra el evento COMPLETO tal cual lo mandó Instagram, para
+        // poder ver exactamente qué estructura trae (ej. si un audio viene
+        // con una URL descargable en "attachments" o no) antes de construir
+        // cualquier función que dependa de eso.
+        if (event.message?.attachments?.length > 0 && !event.message?.is_echo) {
+          console.log(`📎 Mensaje SIN TEXTO recibido de ${senderId} (probablemente audio/foto/video/compartido). Evento completo: ${JSON.stringify(event)}`);
+        }
+        continue;
+      }
       if (event.message?.is_echo) continue;
 
       const msgId = event.message?.mid;
