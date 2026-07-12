@@ -6166,6 +6166,7 @@ ${estilosBase()}
   let cargandoAntiguos = false;
   let filtroActual = "todas";
   let etapasDisponibles = [];
+  let etiquetaCompraConfigurada = "";
 
   function formatearFecha(iso){
     if(!iso) return "";
@@ -6199,6 +6200,19 @@ ${estilosBase()}
   async function cargarEtapasDisponibles(){
     const cfg = await llamarGET("/config");
     if(cfg && Array.isArray(cfg.etapas)) etapasDisponibles = cfg.etapas;
+    if(cfg) etiquetaCompraConfigurada = cfg.dashboard_etiqueta_compro || "";
+  }
+
+  // Compara etiquetas igual que el resto del sistema: sin mayúsculas ni
+  // acentos, para que "Compró", "compro" y "COMPRÓ" cuenten como la misma.
+  function normalizarEtiqueta(t){
+    return (t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  }
+
+  function tieneEtiqueta(conv, nombreEtiqueta){
+    if(!nombreEtiqueta) return false;
+    const objetivo = normalizarEtiqueta(nombreEtiqueta);
+    return Array.isArray(conv.etiquetas) && conv.etiquetas.some(e => normalizarEtiqueta(e) === objetivo);
   }
 
   function actualizarContadores(){
@@ -6207,7 +6221,7 @@ ${estilosBase()}
     const totalNoCalifica = conversaciones.filter(c => c.no_califica).length;
     const totalAgendo = conversaciones.filter(c => c.agendo).length;
     const totalEnlace = conversaciones.filter(c => c.enlace_enviado).length;
-    const totalSeguimiento = conversaciones.filter(c => !c.en_ventana_24h && !c.no_califica && !c.agendo).length;
+    const totalSeguimiento = conversaciones.filter(c => !c.en_ventana_24h && !c.no_califica && !c.agendo && !tieneEtiqueta(c, etiquetaCompraConfigurada)).length;
     document.getElementById("countTodas").textContent = conversaciones.length;
     document.getElementById("countHandoff").textContent = totalHandoff;
     document.getElementById("countCalifica").textContent = totalCalifica;
@@ -6258,8 +6272,10 @@ ${estilosBase()}
     if(filtroActual === "enlace") return conversaciones.filter(c => c.enlace_enviado);
     // "Seguimiento pendiente": todos los que salieron de la ventana de 24h
     // (handoff), EXCLUYENDO a los que ya no califican (no vale la pena
-    // insistirles) y a los que ya agendaron (ya lograron lo que se buscaba).
-    if(filtroActual === "seguimiento") return conversaciones.filter(c => !c.en_ventana_24h && !c.no_califica && !c.agendo);
+    // insistirles), a los que ya agendaron (ya lograron lo que se buscaba),
+    // y a los que ya tienen la etiqueta de "Compró" (por si alguien cerró
+    // fuera del flujo normal del bot, sin haber confirmado "agendé").
+    if(filtroActual === "seguimiento") return conversaciones.filter(c => !c.en_ventana_24h && !c.no_califica && !c.agendo && !tieneEtiqueta(c, etiquetaCompraConfigurada));
     return conversaciones;
   }
 
@@ -7229,7 +7245,14 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
     else if (filtro === "agendo") filtradas = filtradas.filter(c => c.agendo);
     else if (filtro === "enlace") filtradas = filtradas.filter(c => c.enlace_enviado);
     else if (filtro === "handoff") filtradas = filtradas.filter(c => !c.en_ventana_24h);
-    else if (filtro === "seguimiento") filtradas = filtradas.filter(c => !c.en_ventana_24h && !c.no_califica && !c.agendo);
+    else if (filtro === "seguimiento") {
+      const etiquetaCompra = configActual.dashboard_etiqueta_compro?.trim();
+      const objetivo = etiquetaCompra ? normalizarParaComparar(etiquetaCompra) : null;
+      filtradas = filtradas.filter(c =>
+        !c.en_ventana_24h && !c.no_califica && !c.agendo &&
+        !(objetivo && Array.isArray(c.etiquetas) && c.etiquetas.some(e => normalizarParaComparar(e) === objetivo))
+      );
+    }
     // "todas" (o cualquier otro valor): sin filtro adicional.
 
     const filas = await Promise.all(filtradas.map(async (c) => {
