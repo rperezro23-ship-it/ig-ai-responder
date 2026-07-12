@@ -1632,18 +1632,19 @@ async function analizarDoloresYObstaculos(transcripcion) {
             "barriga, u otro), (3) el principal OBSTÁCULO que dice tener para lograrlo por su cuenta (ej. " +
             "falta de tiempo, no sabe que rutina hacer, falta de disciplina, intentos fallidos, no sabe de " +
             "nutricion, lesion, motivacion, dinero, u otro), (4) cuánto peso quiere perder (la cantidad tal " +
-            "cual la haya dicho, ej. \"15 kg\", \"20 libras\", \"no especifica cantidad exacta\"), y (5) un " +
+            "cual la haya dicho, ej. \"15 kg\", \"20 libras\", \"no especifica cantidad exacta\"), (5) un " +
             "detalle breve en UNA sola oración (máximo 20 palabras) explicando, en palabras propias, cómo le " +
             "afecta su situación o por qué quiere bajar de peso — combinando lo que haya dicho de salud y/o " +
             "estética en una frase legible y natural (esto es para un reporte que lea un humano, no para " +
-            "agrupar categorías).\n\n" +
+            "agrupar categorías), y (6) su EDAD (el número tal cual lo haya dicho, ej. \"45\").\n\n" +
             "Para los campos (1), (2) y (3): usa una etiqueta CORTA (1 a 3 palabras), en minúsculas, sin " +
             "acentos, y reutiliza la MISMA etiqueta que usarías para un caso similar en otra conversación " +
             "(para poder agruparlas después — ej. usa siempre \"cansancio\", no alternes entre " +
-            "\"cansancio\"/\"cansado\"/\"fatiga\"). Para los campos (4) y (5), pueden ser frases normales, no " +
-            "hace falta acortarlas a una etiqueta. Si algo no se menciona en la conversación, usa null (no " +
-            "inventes ni asumas). Responde ÚNICAMENTE un JSON con este formato exacto, sin texto adicional: " +
-            '{"dolor_salud": "etiqueta o null", "dolor_estetico": "etiqueta o null", "obstaculo": "etiqueta o null", "peso_a_perder": "texto o null", "detalle": "oracion o null"}'
+            "\"cansancio\"/\"cansado\"/\"fatiga\"). Para los campos (4), (5) y (6), pueden ser frases " +
+            "normales, no hace falta acortarlas a una etiqueta. Si algo no se menciona en la conversación, " +
+            "usa null (no inventes ni asumas). Responde ÚNICAMENTE un JSON con este formato exacto, sin " +
+            "texto adicional: " +
+            '{"dolor_salud": "etiqueta o null", "dolor_estetico": "etiqueta o null", "obstaculo": "etiqueta o null", "peso_a_perder": "texto o null", "detalle": "oracion o null", "edad": "numero o null"}'
         },
         { role: "user", content: transcripcion }
       ]
@@ -1656,7 +1657,8 @@ async function analizarDoloresYObstaculos(transcripcion) {
       dolor_estetico: limpiarEtiquetaIA(parsed.dolor_estetico),
       obstaculo: limpiarEtiquetaIA(parsed.obstaculo),
       peso_a_perder: limpiarEtiquetaIA(parsed.peso_a_perder),
-      detalle: limpiarEtiquetaIA(parsed.detalle)
+      detalle: limpiarEtiquetaIA(parsed.detalle),
+      edad: limpiarEtiquetaIA(parsed.edad)
     };
   } catch (err) {
     console.error("⚠️ Error analizando dolores/obstáculos de una conversación:", err.response?.data || err.message);
@@ -2718,6 +2720,40 @@ app.post("/chats/monto-pagado", requireAdminKey, async (req, res) => {
 
     await guardarConversacion(senderId, { monto_pagado: montoNumero });
     res.json({ ok: true, monto_pagado: montoNumero });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Genera un resumen (edad, cuánto peso quiere perder, obstáculo, y dolores
+// de salud/estética) de UNA conversación en particular — se pide bajo
+// demanda desde el desplegable en /chats, no automáticamente, para no
+// gastar en IA en conversaciones que nadie está revisando en ese momento.
+app.get("/chats/resumen/:senderId", requireAdminKey, async (req, res) => {
+  try {
+    const senderId = req.params.senderId;
+
+    const { data: mensajes, error } = await supabase
+      .from("mensajes_chat")
+      .select("role, content")
+      .eq("sender_id", senderId)
+      .order("creado_en", { ascending: true })
+      .limit(200);
+
+    if (error) return res.status(500).json({ error: error.message });
+    if (!mensajes || mensajes.length === 0 || !mensajes.some(m => m.role === "user")) {
+      return res.json({ vacio: true });
+    }
+
+    const transcripcion = mensajes
+      .filter(m => typeof m.content === "string" && !m.content.startsWith("[[imagen]]") && !m.content.startsWith("[[audio]]"))
+      .map(m => `${m.role === "user" ? "Cliente" : "Asistente"}: ${m.content}`)
+      .join("\n");
+
+    if (!transcripcion.trim()) return res.json({ vacio: true });
+
+    const resumen = await analizarDoloresYObstaculos(transcripcion);
+    res.json({ vacio: false, ...resumen });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -5883,6 +5919,27 @@ ${estilosBase()}
     background:var(--surface); padding:8px 14px; border-bottom:1px solid var(--border);
     display:flex; align-items:center; gap:7px; flex-wrap:wrap;
   }
+  .resumen-lead{ border-bottom:1px solid var(--border); background:var(--surface); }
+  .resumen-lead summary{
+    cursor:pointer; list-style:none; padding:9px 14px; font-size:12.5px; font-weight:600;
+    color:#C99BFF; display:flex; align-items:center; gap:8px; user-select:none;
+  }
+  .resumen-lead summary::-webkit-details-marker{ display:none; }
+  .resumen-lead summary::before{ content:"▸"; font-size:10px; transition:transform .15s; }
+  .resumen-lead[open] summary::before{ transform:rotate(90deg); }
+  .resumen-lead summary:hover{ color:#DDBBFF; }
+  #resumenLeadRefrescar{ cursor:pointer; opacity:.7; margin-left:auto; }
+  #resumenLeadRefrescar:hover{ opacity:1; }
+  .resumen-lead-contenido{ padding:2px 14px 14px 30px; }
+  .resumen-lead-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:10px; }
+  .resumen-lead-item{
+    background:var(--surface-3); border:1px solid var(--border); border-radius:9px; padding:9px 12px;
+  }
+  .resumen-lead-item-label{ font-size:11px; color:var(--muted); margin-bottom:3px; }
+  .resumen-lead-item-valor{ font-size:13.5px; font-weight:600; color:var(--text); }
+  .resumen-lead-detalle{
+    margin-top:10px; font-size:13px; color:var(--muted); line-height:1.5; font-style:italic;
+  }
   .status-sep{ color:var(--muted-dim); font-size:12px; flex-shrink:0; }
   .status-chip{
     display:inline-flex; align-items:center; font-size:11.5px; font-weight:600;
@@ -6131,6 +6188,12 @@ ${estilosBase()}
             </div>
           </div>
         </div>
+        <details class="resumen-lead" id="resumenLeadDetails" style="display:none;">
+          <summary>📋 Resumen del lead <span id="resumenLeadRefrescar" title="Volver a generar" style="display:none;">🔄</span></summary>
+          <div class="resumen-lead-contenido" id="resumenLeadContenido">
+            <p class="hint" style="margin:0;">Ábrelo para generarlo (analiza la conversación con IA, tarda unos segundos).</p>
+          </div>
+        </details>
         <div class="chat-messages" id="chatMensajes">
           <div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>
         </div>
@@ -6381,6 +6444,9 @@ ${estilosBase()}
     return html;
   }
 
+  let senderMostradoEnResumen = null;
+  const resumenesCache = {}; // { senderId: { ...datos } } — para no volver a gastar en IA si ya se generó
+
   function renderHead(){
     const head = document.getElementById("chatHead");
     const banner = document.getElementById("handoffBanner");
@@ -6390,11 +6456,28 @@ ${estilosBase()}
     const chipAgendo = document.getElementById("chipAgendo");
     const chipEnlace = document.getElementById("chipEnlace");
     const chipMonto = document.getElementById("chipMonto");
+    const resumenDetails = document.getElementById("resumenLeadDetails");
     if(!senderSeleccionado){
       head.innerHTML = '<span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>';
       banner.classList.remove("visible");
       statusBar.style.display = "none";
+      resumenDetails.style.display = "none";
       return;
+    }
+    resumenDetails.style.display = "block";
+    // Si se cambió de conversación (no solo un refresco de la misma), se
+    // cierra el desplegable y se limpia — cada lead tiene su propio resumen,
+    // no queremos que se quede pegado el de otra persona.
+    if(senderSeleccionado !== senderMostradoEnResumen){
+      senderMostradoEnResumen = senderSeleccionado;
+      resumenDetails.removeAttribute("open");
+      document.getElementById("resumenLeadRefrescar").style.display = "none";
+      if(resumenesCache[senderSeleccionado]){
+        renderResumenLead(resumenesCache[senderSeleccionado]);
+        document.getElementById("resumenLeadRefrescar").style.display = "inline";
+      } else {
+        document.getElementById("resumenLeadContenido").innerHTML = '<p class="hint" style="margin:0;">Ábrelo para generarlo (analiza la conversación con IA, tarda unos segundos).</p>';
+      }
     }
     const conv = conversaciones.find(c => c.sender_id === senderSeleccionado) || { sender_id: senderSeleccionado, en_ventana_24h: true };
     head.innerHTML = \`
@@ -6564,6 +6647,66 @@ ${estilosBase()}
     if(popoverMonto.style.display !== "none" && !popoverMonto.contains(e.target) && e.target.id !== "btnAddMonto"){
       popoverMonto.style.display = "none";
     }
+  });
+
+  // --- Resumen del lead (edad, peso a perder, obstáculo, dolores) ---
+  function renderResumenLead(datos){
+    const cont = document.getElementById("resumenLeadContenido");
+    if(datos.vacio){
+      cont.innerHTML = '<p class="hint" style="margin:0;">Todavía no hay suficiente conversación con este lead para generar un resumen.</p>';
+      return;
+    }
+    const item = (label, valor) => \`
+      <div class="resumen-lead-item">
+        <div class="resumen-lead-item-label">\${label}</div>
+        <div class="resumen-lead-item-valor">\${valor ? escapar(valor) : '<span style="color:var(--muted-dim); font-weight:400;">No especifica</span>'}</div>
+      </div>
+    \`;
+    cont.innerHTML = \`
+      <div class="resumen-lead-grid">
+        \${item("🎂 Edad", datos.edad)}
+        \${item("⚖️ Peso a perder", datos.peso_a_perder)}
+        \${item("🚧 Obstáculo", datos.obstaculo)}
+        \${item("💪 Dolor de salud", datos.dolor_salud)}
+        \${item("✨ Motivo estético", datos.dolor_estetico)}
+      </div>
+      \${datos.detalle ? '<div class="resumen-lead-detalle">"' + escapar(datos.detalle) + '"</div>' : ''}
+    \`;
+  }
+
+  async function generarResumenLead(senderId, forzar){
+    const cont = document.getElementById("resumenLeadContenido");
+    if(!forzar && resumenesCache[senderId]){
+      renderResumenLead(resumenesCache[senderId]);
+      return;
+    }
+    cont.innerHTML = '<p class="hint" style="margin:0;">⏳ Analizando la conversación…</p>';
+    try {
+      const res = await fetch("/chats/resumen/" + encodeURIComponent(senderId));
+      if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+      const data = await res.json();
+      if(!res.ok || data.error){
+        cont.innerHTML = '<p class="hint" style="margin:0; color:var(--red);">❌ ' + escapar(data.error || "No se pudo generar el resumen.") + '</p>';
+        return;
+      }
+      resumenesCache[senderId] = data;
+      renderResumenLead(data);
+      document.getElementById("resumenLeadRefrescar").style.display = "inline";
+    } catch (err) {
+      cont.innerHTML = '<p class="hint" style="margin:0; color:var(--red);">❌ Error de conexión: ' + escapar(err.message) + '</p>';
+    }
+  }
+
+  document.getElementById("resumenLeadDetails").addEventListener("toggle", (e) => {
+    if(e.target.open && senderSeleccionado && !resumenesCache[senderSeleccionado]){
+      generarResumenLead(senderSeleccionado, false);
+    }
+  });
+
+  document.getElementById("resumenLeadRefrescar").addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if(senderSeleccionado) generarResumenLead(senderSeleccionado, true);
   });
 
   document.getElementById("selectEtapa").addEventListener("change", async (e) => {
