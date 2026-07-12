@@ -3346,6 +3346,70 @@ async function respaldarHistorialExistenteUnaVez() {
 
 respaldarHistorialExistenteUnaVez();
 
+// ---------------------------------------------------------------
+// Respaldo inicial (una sola vez por conversación): "primer_mensaje_en" solo
+// se guarda HACIA ADELANTE desde que se agregó esa función — los leads que
+// ya le habían escrito al bot antes de ese cambio no tienen ese dato, lo
+// cual hacía que CUALQUIER filtro de periodo en el Dashboard (incluso
+// "hoy") los excluyera a todos, mostrando ceros, mientras que "Todo el
+// tiempo" sí funcionaba (porque no depende de esa fecha). Esta rutina
+// rescata la fecha real usando el mensaje MÁS VIEJO que exista en
+// mensajes_chat para cada conversación (el registro completo que ya
+// tenemos desde antes) — así el dato queda correcto sin tener que esperar
+// a que cada lead vuelva a escribir.
+// ---------------------------------------------------------------
+async function respaldarPrimerMensajeExistenteUnaVez() {
+  try {
+    const { data: conversaciones, error } = await supabase
+      .from("conversaciones")
+      .select("sender_id, ultimo_mensaje_usuario")
+      .is("primer_mensaje_en", null);
+
+    if (error) {
+      console.error("❌ Error leyendo conversaciones para el respaldo inicial de primer_mensaje_en:", error.message);
+      return;
+    }
+    if (!conversaciones || conversaciones.length === 0) return;
+
+    for (const conv of conversaciones) {
+      const { data: primerMensaje, error: errorMensaje } = await supabase
+        .from("mensajes_chat")
+        .select("creado_en")
+        .eq("sender_id", conv.sender_id)
+        .order("creado_en", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      if (errorMensaje) {
+        console.error(`❌ Error buscando el primer mensaje de ${conv.sender_id}:`, errorMensaje.message);
+        continue;
+      }
+
+      // Si por lo que sea no hay nada en mensajes_chat para ese lead
+      // (no debería pasar, ya que se respaldó antes), se usa el último
+      // mensaje conocido como aproximación — mejor eso que dejarlo vacío
+      // para siempre.
+      const fecha = primerMensaje?.creado_en || conv.ultimo_mensaje_usuario;
+      if (!fecha) continue;
+
+      const { error: errorGuardado } = await supabase
+        .from("conversaciones")
+        .update({ primer_mensaje_en: fecha })
+        .eq("sender_id", conv.sender_id);
+
+      if (errorGuardado) {
+        console.error(`❌ Error guardando primer_mensaje_en de ${conv.sender_id}:`, errorGuardado.message);
+      }
+    }
+
+    console.log(`✅ Respaldo inicial de primer_mensaje_en: ${conversaciones.length} conversación(es) revisadas.`);
+  } catch (err) {
+    console.error("❌ Error inesperado en el respaldo inicial de primer_mensaje_en:", err.message);
+  }
+}
+
+respaldarPrimerMensajeExistenteUnaVez();
+
 
 async function estaBotActivo() {
   const { data, error } = await supabase
@@ -4198,6 +4262,8 @@ ${estilosBase()}
       <span class="dash-periodo-label">📅 Periodo:</span>
       <select id="selectPeriodo" class="dash-periodo-select">
         <option value="todo">Todo el tiempo</option>
+        <option value="hoy">Hoy</option>
+        <option value="ayer">Ayer</option>
         <option value="este_mes">Este mes</option>
         <option value="mes_pasado">Mes pasado</option>
         <option value="este_anio">Este año</option>
@@ -4328,6 +4394,15 @@ ${estilosBase()}
 
   function calcularPeriodoPreset(preset){
     const hoy = new Date();
+    if(preset === "hoy"){
+      const f = formatoFecha(hoy);
+      return { desde: f, hasta: f };
+    }
+    if(preset === "ayer"){
+      const ayer = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate() - 1);
+      const f = formatoFecha(ayer);
+      return { desde: f, hasta: f };
+    }
     if(preset === "este_mes"){
       const desde = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
       const hasta = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0);
