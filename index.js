@@ -4205,7 +4205,7 @@ ${estilosBase()}
     // respuesta, se usan valores en 0 en vez de romper la página — y se dej
     // a un registro en consola para poder diagnosticar qué vino distinto.
     const porcentajes = data.porcentajes || {};
-    if(!data.porcentajes) console.warn("La respuesta de /dashboard/datos no trajo \"porcentajes\":", data);
+    if(!data.porcentajes) console.warn("La respuesta de /dashboard/datos no trajo \\"porcentajes\\":", data);
 
     document.getElementById("dashCash").textContent = formatearMoneda(data.cashCollected);
     document.getElementById("dashNoCalifica").textContent = data.totalNoCalifica ?? 0;
