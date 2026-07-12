@@ -181,11 +181,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0 };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0, primer_mensaje_en: null };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0 };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0, primer_mensaje_en: null };
   }
 
   return data;
@@ -235,7 +235,16 @@ async function guardarMensajeChatCompleto(senderId, role, content) {
 }
 
 async function registrarMensajeUsuario(senderId) {
-  await guardarConversacion(senderId, { ultimo_mensaje_usuario: new Date().toISOString() });
+  const campos = { ultimo_mensaje_usuario: new Date().toISOString() };
+
+  // "primer_mensaje_en" se guarda UNA SOLA VEZ — la primera vez que este
+  // sender_id le escribe al bot. Sirve para poder filtrar el dashboard por
+  // periodo/mes de forma correcta (cuándo empezó la conversación), en vez
+  // de por "última actividad" (que cambia cada vez que responde algo).
+  const conv = await obtenerConversacion(senderId);
+  if (!conv.primer_mensaje_en) campos.primer_mensaje_en = campos.ultimo_mensaje_usuario;
+
+  await guardarConversacion(senderId, campos);
 }
 
 async function cancelarSeguimientosPendientesDB(senderId) {
@@ -1636,15 +1645,20 @@ async function analizarDoloresYObstaculos(transcripcion) {
             "detalle breve en UNA sola oración (máximo 20 palabras) explicando, en palabras propias, cómo le " +
             "afecta su situación o por qué quiere bajar de peso — combinando lo que haya dicho de salud y/o " +
             "estética en una frase legible y natural (esto es para un reporte que lea un humano, no para " +
-            "agrupar categorías), y (6) su EDAD (el número tal cual lo haya dicho, ej. \"45\").\n\n" +
+            "agrupar categorías), (6) su EDAD (el número tal cual lo haya dicho, ej. \"45\"), (7) su PESO " +
+            "ACTUAL (el número con su unidad tal cual lo haya dicho, ej. \"90 kg\", \"200 libras\"), y (8) el " +
+            "PESO AL QUE LE GUSTARÍA LLEGAR / su peso objetivo (tal cual lo haya dicho, ej. \"75 kg\") — " +
+            "nota: (7) y (8) son el peso actual y el peso meta como números concretos, distinto de (4) que " +
+            "es la DIFERENCIA/cantidad a bajar; si el cliente solo dio la diferencia (ej. \"quiero bajar 15 " +
+            "kilos\") sin decir su peso actual ni su meta como números, deja (7) y (8) en null.\n\n" +
             "Para los campos (1), (2) y (3): usa una etiqueta CORTA (1 a 3 palabras), en minúsculas, sin " +
             "acentos, y reutiliza la MISMA etiqueta que usarías para un caso similar en otra conversación " +
             "(para poder agruparlas después — ej. usa siempre \"cansancio\", no alternes entre " +
-            "\"cansancio\"/\"cansado\"/\"fatiga\"). Para los campos (4), (5) y (6), pueden ser frases " +
+            "\"cansancio\"/\"cansado\"/\"fatiga\"). Para los campos (4) al (8), pueden ser frases " +
             "normales, no hace falta acortarlas a una etiqueta. Si algo no se menciona en la conversación, " +
             "usa null (no inventes ni asumas). Responde ÚNICAMENTE un JSON con este formato exacto, sin " +
             "texto adicional: " +
-            '{"dolor_salud": "etiqueta o null", "dolor_estetico": "etiqueta o null", "obstaculo": "etiqueta o null", "peso_a_perder": "texto o null", "detalle": "oracion o null", "edad": "numero o null"}'
+            '{"dolor_salud": "etiqueta o null", "dolor_estetico": "etiqueta o null", "obstaculo": "etiqueta o null", "peso_a_perder": "texto o null", "detalle": "oracion o null", "edad": "numero o null", "peso_actual": "texto o null", "peso_objetivo": "texto o null"}'
         },
         { role: "user", content: transcripcion }
       ]
@@ -1658,11 +1672,13 @@ async function analizarDoloresYObstaculos(transcripcion) {
       obstaculo: limpiarEtiquetaIA(parsed.obstaculo),
       peso_a_perder: limpiarEtiquetaIA(parsed.peso_a_perder),
       detalle: limpiarEtiquetaIA(parsed.detalle),
-      edad: limpiarEtiquetaIA(parsed.edad)
+      edad: limpiarEtiquetaIA(parsed.edad),
+      peso_actual: limpiarEtiquetaIA(parsed.peso_actual),
+      peso_objetivo: limpiarEtiquetaIA(parsed.peso_objetivo)
     };
   } catch (err) {
     console.error("⚠️ Error analizando dolores/obstáculos de una conversación:", err.response?.data || err.message);
-    return { dolor_salud: null, dolor_estetico: null, obstaculo: null, peso_a_perder: null, detalle: null };
+    return { dolor_salud: null, dolor_estetico: null, obstaculo: null, peso_a_perder: null, detalle: null, edad: null, peso_actual: null, peso_objetivo: null };
   }
 }
 
@@ -2525,17 +2541,34 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
 // o pagó).
 app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
   try {
+    // "desde"/"hasta" (fechas tipo YYYY-MM-DD) filtran por PRIMER MENSAJE
+    // del lead (cuándo empezó la conversación) — no por su última actividad,
+    // para que el periodo refleje "leads que llegaron en este rango",
+    // aunque hayan seguido conversando después de esa fecha.
+    const { desde, hasta } = req.query;
+    const desdeMs = desde ? new Date(desde + "T00:00:00").getTime() : null;
+    const hastaMs = hasta ? new Date(hasta + "T23:59:59.999").getTime() : null;
+
+    const dentroDelPeriodo = (fechaIso) => {
+      if (!desdeMs && !hastaMs) return true; // sin filtro, todo cuenta
+      if (!fechaIso) return false; // sin "primer_mensaje_en" no se puede ubicar en ningún periodo
+      const t = new Date(fechaIso).getTime();
+      if (desdeMs && t < desdeMs) return false;
+      if (hastaMs && t > hastaMs) return false;
+      return true;
+    };
+
     // Cada conteo se hace por separado y con su propio manejo de error — así,
     // si alguna columna todavía no existe (ej. no corriste alguna de las
-    // migraciones de etiquetas/monto_pagado), esa parte en particular se
-    // queda en 0 en vez de tumbar TODO el dashboard.
+    // migraciones de etiquetas/monto_pagado/primer_mensaje_en), esa parte en
+    // particular se queda en 0 en vez de tumbar TODO el dashboard.
     const contar = async (filtroFn, etiquetaError) => {
       try {
-        let consulta = supabase.from("conversaciones").select("*", { count: "exact", head: true });
+        let consulta = supabase.from("conversaciones").select("primer_mensaje_en", { count: "exact" });
         consulta = filtroFn(consulta);
-        const { count, error } = await consulta;
+        const { data, error } = await consulta;
         if (error) throw error;
-        return count || 0;
+        return (data || []).filter(c => dentroDelPeriodo(c.primer_mensaje_en)).length;
       } catch (err) {
         console.error(`❌ Error contando "${etiquetaError}" en el dashboard (¿corriste todas las migraciones?):`, err.message);
         return 0;
@@ -2560,9 +2593,10 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
       if (!nombreEtiqueta) return 0;
       try {
         const objetivo = normalizarParaComparar(nombreEtiqueta);
-        const { data, error } = await supabase.from("conversaciones").select("etiquetas");
+        const { data, error } = await supabase.from("conversaciones").select("etiquetas, primer_mensaje_en");
         if (error) throw error;
         return (data || []).filter(c =>
+          dentroDelPeriodo(c.primer_mensaje_en) &&
           Array.isArray(c.etiquetas) && c.etiquetas.some(e => normalizarParaComparar(e) === objetivo)
         ).length;
       } catch (err) {
@@ -2574,17 +2608,19 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
     const totalAsistio = await contarPorEtiqueta(etiquetaAsistio, "asistio");
     const totalCompro = await contarPorEtiqueta(etiquetaCompro, "compro");
 
-    // Cash collected: suma de todos los montos pagados registrados a mano.
-    // Igual que arriba, si la columna todavía no existe, se queda en 0 en
-    // vez de romper el resto del dashboard.
+    // Cash collected: suma de todos los montos pagados registrados a mano,
+    // dentro del periodo. Igual que arriba, si la columna todavía no
+    // existe, se queda en 0 en vez de romper el resto del dashboard.
     let cashCollected = 0;
     try {
       const { data: pagos, error: errorPagos } = await supabase
         .from("conversaciones")
-        .select("monto_pagado")
+        .select("monto_pagado, primer_mensaje_en")
         .gt("monto_pagado", 0);
       if (errorPagos) throw errorPagos;
-      cashCollected = (pagos || []).reduce((suma, p) => suma + (Number(p.monto_pagado) || 0), 0);
+      cashCollected = (pagos || [])
+        .filter(p => dentroDelPeriodo(p.primer_mensaje_en))
+        .reduce((suma, p) => suma + (Number(p.monto_pagado) || 0), 0);
     } catch (err) {
       console.error("❌ Error sumando monto_pagado en el dashboard (¿corriste migracion_dashboard.sql?):", err.message);
     }
@@ -2604,6 +2640,7 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
       etiquetaCompraConfigurada: Boolean(etiquetaCompro),
       etiquetaAsistio: etiquetaAsistio || null,
       etiquetaCompro: etiquetaCompro || null,
+      periodo: { desde: desde || null, hasta: hasta || null },
       porcentajes: {
         califica_de_total: porcentaje(totalCalifica, total),
         enlace_de_califica: porcentaje(totalEnlace, totalCalifica),
@@ -4127,6 +4164,21 @@ ${estilosBase()}
     background:rgba(255,197,66,.08); border:1px solid rgba(255,197,66,.3); border-radius:10px;
     padding:12px 16px; font-size:13px; color:#FFC542; margin-bottom:18px;
   }
+  .dash-periodo-bar{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:18px;
+    background:var(--surface); border:1px solid var(--border); border-radius:11px; padding:10px 16px;
+  }
+  .dash-periodo-label{ font-size:13px; font-weight:600; color:var(--muted); flex-shrink:0; }
+  .dash-periodo-select{
+    background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:7px 10px; font-size:13px; font-family:var(--body);
+  }
+  .dash-periodo-btn{
+    background:rgba(63,199,232,.12); border:1px solid rgba(63,199,232,.35); color:#3FC7E8;
+    border-radius:8px; padding:7px 14px; font-size:13px; font-weight:600; cursor:pointer;
+  }
+  .dash-periodo-btn:hover{ background:rgba(63,199,232,.2); }
+  .dash-periodo-info{ font-size:12.5px; color:var(--muted-dim); margin-left:auto; }
 </style>
 </head>
 <body>
@@ -4141,6 +4193,24 @@ ${estilosBase()}
       </div>
     </div>
     <p class="page-sub">Cómo va funcionando tu embudo completo, paso a paso — para saber dónde mejorar.</p>
+
+    <div class="dash-periodo-bar">
+      <span class="dash-periodo-label">📅 Periodo:</span>
+      <select id="selectPeriodo" class="dash-periodo-select">
+        <option value="todo">Todo el tiempo</option>
+        <option value="este_mes">Este mes</option>
+        <option value="mes_pasado">Mes pasado</option>
+        <option value="este_anio">Este año</option>
+        <option value="personalizado">Personalizado…</option>
+      </select>
+      <div id="dashFechasPersonalizadas" style="display:none; align-items:center; gap:8px;">
+        <input type="date" id="dashFechaDesde" class="dash-periodo-select">
+        <span style="color:var(--muted); font-size:12.5px;">hasta</span>
+        <input type="date" id="dashFechaHasta" class="dash-periodo-select">
+        <button class="dash-periodo-btn" id="btnAplicarPeriodo" type="button">Aplicar</button>
+      </div>
+      <span class="dash-periodo-info" id="dashPeriodoInfo"></span>
+    </div>
 
     <div id="dashSinEtiquetas" class="dash-warning" style="display:none;"></div>
 
@@ -4248,10 +4318,52 @@ ${estilosBase()}
     return Number(n || 0).toFixed(1) + "%";
   }
 
+  // { desde: "YYYY-MM-DD" o null, hasta: "YYYY-MM-DD" o null } — null en
+  // ambos significa "todo el tiempo", sin filtrar nada.
+  let periodoActual = { desde: null, hasta: null };
+
+  function formatoFecha(d){
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  }
+
+  function calcularPeriodoPreset(preset){
+    const hoy = new Date();
+    if(preset === "este_mes"){
+      const desde = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
+      const hasta = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0);
+      return { desde: formatoFecha(desde), hasta: formatoFecha(hasta) };
+    }
+    if(preset === "mes_pasado"){
+      const desde = new Date(hoy.getFullYear(), hoy.getMonth() - 1, 1);
+      const hasta = new Date(hoy.getFullYear(), hoy.getMonth(), 0);
+      return { desde: formatoFecha(desde), hasta: formatoFecha(hasta) };
+    }
+    if(preset === "este_anio"){
+      const desde = new Date(hoy.getFullYear(), 0, 1);
+      const hasta = new Date(hoy.getFullYear(), 11, 31);
+      return { desde: formatoFecha(desde), hasta: formatoFecha(hasta) };
+    }
+    return { desde: null, hasta: null }; // "todo"
+  }
+
+  function actualizarInfoPeriodo(){
+    const info = document.getElementById("dashPeriodoInfo");
+    if(!periodoActual.desde && !periodoActual.hasta){
+      info.textContent = "";
+    } else {
+      info.textContent = "Mostrando del " + periodoActual.desde + " al " + periodoActual.hasta;
+    }
+  }
+
   async function cargarDashboard(){
     let data;
     try {
-      const res = await fetch("/dashboard/datos");
+      const params = new URLSearchParams();
+      if(periodoActual.desde) params.set("desde", periodoActual.desde);
+      if(periodoActual.hasta) params.set("hasta", periodoActual.hasta);
+      const url = "/dashboard/datos" + (params.toString() ? "?" + params.toString() : "");
+
+      const res = await fetch(url);
       if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
       data = await res.json();
     } catch (err) {
@@ -4347,6 +4459,39 @@ ${estilosBase()}
       msg.style.color = "var(--red)";
     }
     setTimeout(() => { msg.textContent = ""; }, 2500);
+  });
+
+  document.getElementById("selectPeriodo").addEventListener("change", (e) => {
+    const valor = e.target.value;
+    const bloquePersonalizado = document.getElementById("dashFechasPersonalizadas");
+
+    if(valor === "personalizado"){
+      bloquePersonalizado.style.display = "flex";
+      // No se recarga todavía — se espera a que el usuario elija las
+      // fechas y le dé a "Aplicar", para no disparar cargas de más.
+      return;
+    }
+
+    bloquePersonalizado.style.display = "none";
+    periodoActual = calcularPeriodoPreset(valor);
+    actualizarInfoPeriodo();
+    cargarDashboard();
+  });
+
+  document.getElementById("btnAplicarPeriodo").addEventListener("click", () => {
+    const desde = document.getElementById("dashFechaDesde").value;
+    const hasta = document.getElementById("dashFechaHasta").value;
+    if(!desde || !hasta){
+      alert("Elige ambas fechas (desde y hasta) antes de aplicar.");
+      return;
+    }
+    if(desde > hasta){
+      alert("La fecha \\"desde\\" no puede ser después de la fecha \\"hasta\\".");
+      return;
+    }
+    periodoActual = { desde, hasta };
+    actualizarInfoPeriodo();
+    cargarDashboard();
   });
 
   cargarEtiquetasDisponibles().then(cargarDashboard);
@@ -6665,7 +6810,9 @@ ${estilosBase()}
     cont.innerHTML = \`
       <div class="resumen-lead-grid">
         \${item("🎂 Edad", datos.edad)}
-        \${item("⚖️ Peso a perder", datos.peso_a_perder)}
+        \${item("⚖️ Peso actual", datos.peso_actual)}
+        \${item("🎯 Peso objetivo", datos.peso_objetivo)}
+        \${item("📉 Peso a perder", datos.peso_a_perder)}
         \${item("🚧 Obstáculo", datos.obstaculo)}
         \${item("💪 Dolor de salud", datos.dolor_salud)}
         \${item("✨ Motivo estético", datos.dolor_estetico)}
@@ -7586,9 +7733,17 @@ app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) =>
     // obstáculo, y una descripción legible de cómo le afecta / por qué
     // quiere bajar. Pensado para redactar contenido/publicidad usando sus
     // propias palabras, no solo para ver frecuencias agregadas.
-    const encabezadoDetalle = ["Usuario", "Cuánto peso quiere perder", "Obstáculo", "Cómo le afecta / motivo"];
+    // Bloque 2: detalle por cada lead — edad, peso actual, peso objetivo,
+    // cuánto peso quiere perder, su obstáculo, y una descripción legible de
+    // cómo le afecta / por qué quiere bajar. Pensado para redactar
+    // contenido/publicidad usando sus propias palabras, no solo para ver
+    // frecuencias agregadas.
+    const encabezadoDetalle = ["Usuario", "Edad", "Peso actual", "Peso objetivo", "Cuánto peso quiere perder", "Obstáculo", "Cómo le afecta / motivo"];
     const filasDetalle = resultados.map(r => [
       "@" + (r.username || r.senderId),
+      r.edad || "(no especifica)",
+      r.peso_actual || "(no especifica)",
+      r.peso_objetivo || "(no especifica)",
       r.peso_a_perder || "(no especifica)",
       r.obstaculo || "(no menciona)",
       r.detalle || "(no especifica)"
