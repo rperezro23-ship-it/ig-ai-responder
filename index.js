@@ -4037,20 +4037,22 @@ ${estilosBase()}
   }
   .dash-side-stat-label{ font-size:12.5px; color:var(--muted); margin-bottom:5px; }
   .dash-side-stat-value{ font-family:var(--display); font-size:22px; font-weight:700; }
-  .dash-funnel{ display:flex; flex-direction:column; align-items:stretch; gap:3px; margin-bottom:22px; }
+  .dash-funnel{
+    display:grid; grid-template-columns:1fr 1fr; grid-template-rows:repeat(3, auto);
+    grid-auto-flow:column; gap:10px; margin-bottom:22px;
+  }
   .dash-step{
-    background:var(--surface); border:1px solid var(--border); border-radius:11px;
-    padding:12px 18px; display:flex; align-items:center; justify-content:space-between;
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    padding:16px 20px; display:flex; align-items:center; justify-content:space-between;
     transition:border-color .15s;
   }
-  .dash-step-left{ display:flex; align-items:center; gap:11px; }
-  .dash-step-icon{ font-size:19px; flex-shrink:0; }
-  .dash-step-label{ font-family:var(--display); font-size:13.5px; font-weight:600; }
-  .dash-step-sub{ font-size:11px; color:var(--muted); margin-top:1px; }
-  .dash-step-right{ display:flex; flex-direction:column; align-items:flex-end; gap:1px; flex-shrink:0; }
-  .dash-step-value{ font-family:var(--display); font-size:22px; font-weight:700; line-height:1.1; }
-  .dash-step-pct{ font-size:11px; font-weight:700; color:var(--muted); font-family:var(--mono); }
-  .dash-connector{ width:1px; height:8px; background:var(--border); margin:0 0 0 27px; }
+  .dash-step-left{ display:flex; align-items:center; gap:13px; }
+  .dash-step-icon{ font-size:22px; flex-shrink:0; }
+  .dash-step-label{ font-family:var(--display); font-size:15px; font-weight:600; }
+  .dash-step-sub{ font-size:12px; color:var(--muted); margin-top:2px; }
+  .dash-step-right{ display:flex; flex-direction:column; align-items:flex-end; gap:2px; flex-shrink:0; }
+  .dash-step-value{ font-family:var(--display); font-size:26px; font-weight:700; line-height:1.1; }
+  .dash-step-pct{ font-size:12px; font-weight:700; color:var(--muted); font-family:var(--mono); }
   .dash-step.step-total{ border-color:rgba(255,255,255,.15); }
   .dash-step.step-califica{ border-color:rgba(49,217,124,.35); }
   .dash-step.step-califica .dash-step-value{ color:var(--green); }
@@ -4062,6 +4064,9 @@ ${estilosBase()}
   .dash-step.step-asistio .dash-step-value{ color:#C99BFF; }
   .dash-step.step-compro{ border-color:rgba(255,197,66,.4); }
   .dash-step.step-compro .dash-step-value{ color:#FFC542; }
+  @media (max-width: 720px){
+    .dash-funnel{ grid-template-columns:1fr; grid-auto-flow:row; }
+  }
   .dash-config-card{
     background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg);
     padding:22px 26px; margin-top:8px;
@@ -4095,14 +4100,6 @@ ${estilosBase()}
 
     <div id="dashSinEtiquetas" class="dash-warning" style="display:none;"></div>
 
-    <div class="dash-cash-card">
-      <div>
-        <div class="dash-cash-label">💰 Cash Collected</div>
-        <div class="dash-side-stat-label" style="margin-top:4px;">Suma de todo lo que has registrado como pagado, desde /chats</div>
-      </div>
-      <div class="dash-cash-value" id="dashCash">$0</div>
-    </div>
-
     <div class="dash-side-stats">
       <div class="dash-side-stat">
         <div class="dash-side-stat-label">🚫 No Califica</div>
@@ -4121,8 +4118,6 @@ ${estilosBase()}
         </div>
       </div>
 
-      <div class="dash-connector"></div>
-
       <div class="dash-step step-califica">
         <div class="dash-step-left">
           <span class="dash-step-icon">✅</span>
@@ -4134,12 +4129,10 @@ ${estilosBase()}
         </div>
       </div>
 
-      <div class="dash-connector"></div>
-
       <div class="dash-step step-enlace">
         <div class="dash-step-left">
           <span class="dash-step-icon">🔗</span>
-          <div><div class="dash-step-label">Enlace enviado</div><div class="dash-step-sub">de los que califican</div></div>
+          <div><div class="dash-step-label">Enlaces enviados</div><div class="dash-step-sub">de los que califican</div></div>
         </div>
         <div class="dash-step-right">
           <div class="dash-step-value" id="dashEnlace">–</div>
@@ -4147,20 +4140,16 @@ ${estilosBase()}
         </div>
       </div>
 
-      <div class="dash-connector"></div>
-
       <div class="dash-step step-agendo">
         <div class="dash-step-left">
           <span class="dash-step-icon">📅</span>
-          <div><div class="dash-step-label">Agendaron (confirmado)</div><div class="dash-step-sub">de los que recibieron el enlace</div></div>
+          <div><div class="dash-step-label">Agendaron</div><div class="dash-step-sub">de los que recibieron el enlace</div></div>
         </div>
         <div class="dash-step-right">
           <div class="dash-step-value" id="dashAgendo">–</div>
           <div class="dash-step-pct" id="pctAgendo">–</div>
         </div>
       </div>
-
-      <div class="dash-connector"></div>
 
       <div class="dash-step step-asistio">
         <div class="dash-step-left">
@@ -4173,18 +4162,24 @@ ${estilosBase()}
         </div>
       </div>
 
-      <div class="dash-connector"></div>
-
       <div class="dash-step step-compro">
         <div class="dash-step-left">
           <span class="dash-step-icon">🎉</span>
-          <div><div class="dash-step-label">Compraron / se cerraron</div><div class="dash-step-sub" id="subCompro">de los que asistieron</div></div>
+          <div><div class="dash-step-label">Compraron</div><div class="dash-step-sub" id="subCompro">de los que asistieron</div></div>
         </div>
         <div class="dash-step-right">
           <div class="dash-step-value" id="dashCompro">–</div>
           <div class="dash-step-pct" id="pctCompro">–</div>
         </div>
       </div>
+    </div>
+
+    <div class="dash-cash-card">
+      <div>
+        <div class="dash-cash-label">💰 Cash Collected</div>
+        <div class="dash-side-stat-label" style="margin-top:4px;">Suma de todo lo que has registrado como pagado, desde /chats</div>
+      </div>
+      <div class="dash-cash-value" id="dashCash">$0</div>
     </div>
 
     <div class="dash-config-card">
