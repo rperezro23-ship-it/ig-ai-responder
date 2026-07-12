@@ -2121,7 +2121,10 @@ app.post("/webhook", async (req, res) => {
 
     for (const event of eventos) {
       const senderId = event.sender?.id;
-      if (!senderId) continue;
+      if (!senderId) {
+        console.log(`❓ Evento sin sender.id reconocible (se ignora). Evento completo: ${JSON.stringify(event)}`);
+        continue;
+      }
 
       // Evento de "visto" (read receipt): Instagram manda esto cuando el
       // cliente abre el chat y lee los mensajes. "watermark" es un timestamp
@@ -2173,13 +2176,13 @@ app.post("/webhook", async (req, res) => {
           mensaje = `🎤 ${textoTranscrito}`;
           console.log(`🎤 Audio de ${senderId} transcrito: "${textoTranscrito}"`);
         } else {
-          // No es audio — probablemente una foto, video, o algo compartido
-          // (un reel, un post, etc.). Se registra el evento completo para
-          // poder revisar la estructura si en algún momento se quiere
-          // soportar también.
-          if (event.message?.attachments?.length > 0) {
-            console.log(`📎 Mensaje SIN TEXTO recibido de ${senderId} (foto/video/compartido, no audio). Evento completo: ${JSON.stringify(event)}`);
-          }
+          // No es texto, ni audio, ni un adjunto reconocido — podría ser una
+          // foto/video/reel compartido, o podría ser un evento de "visto"
+          // que llegó en una forma distinta a la esperada (event.read.watermark)
+          // y por eso no se detectó arriba. Se registra el evento COMPLETO
+          // siempre (no solo cuando hay adjuntos), para poder diagnosticar
+          // qué es exactamente lo que Instagram está mandando en estos casos.
+          console.log(`❓ Evento sin texto/audio reconocido de ${senderId}. Evento completo: ${JSON.stringify(event)}`);
           continue;
         }
       } else {
