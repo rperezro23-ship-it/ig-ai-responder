@@ -2541,13 +2541,18 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
 // o pagó).
 app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
   try {
-    // "desde"/"hasta" (fechas tipo YYYY-MM-DD) filtran por PRIMER MENSAJE
-    // del lead (cuándo empezó la conversación) — no por su última actividad,
-    // para que el periodo refleje "leads que llegaron en este rango",
-    // aunque hayan seguido conversando después de esa fecha.
+    // "desde"/"hasta" ahora llegan como instantes ISO COMPLETOS (con hora y
+    // zona horaria ya resueltos por el navegador de quien los pidió — ver
+    // inicioDelDiaISO/finDelDiaISO en el cliente), no como fechas "en
+    // blanco" — así el servidor no tiene que adivinar en qué zona horaria
+    // interpretarlas, evitando que "hoy" se corra un día por la diferencia
+    // horaria entre México y UTC. Filtran por PRIMER MENSAJE del lead
+    // (cuándo empezó la conversación), no por su última actividad, para que
+    // el periodo refleje "leads que llegaron en este rango", aunque hayan
+    // seguido conversando después.
     const { desde, hasta } = req.query;
-    const desdeMs = desde ? new Date(desde + "T00:00:00").getTime() : null;
-    const hastaMs = hasta ? new Date(hasta + "T23:59:59.999").getTime() : null;
+    const desdeMs = desde ? new Date(desde).getTime() : null;
+    const hastaMs = hasta ? new Date(hasta).getTime() : null;
 
     const dentroDelPeriodo = (fechaIso) => {
       if (!desdeMs && !hastaMs) return true; // sin filtro, todo cuenta
@@ -4392,6 +4397,24 @@ ${estilosBase()}
     return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
   }
 
+  // Convierte una fecha "YYYY-MM-DD" (un día del calendario, tal como lo
+  // ve el usuario) al instante exacto de inicio/fin de ESE día en la zona
+  // horaria del NAVEGADOR — no en UTC. Esto es clave: si se mandara solo
+  // "2026-07-11" al servidor y este asumiera UTC, alguien que escribe de
+  // noche en México (varias horas detrás de UTC) podría quedar registrado
+  // con la fecha del día siguiente en UTC, y "hoy" no lo encontraría.
+  // Al construir el Date con año/mes/día por separado (sin pasar por un
+  // string ISO), JavaScript lo interpreta en la hora LOCAL del navegador,
+  // y toISOString() ya lo convierte correctamente a UTC para mandarlo.
+  function inicioDelDiaISO(fechaStr){
+    const [y, m, d] = fechaStr.split("-").map(Number);
+    return new Date(y, m - 1, d, 0, 0, 0, 0).toISOString();
+  }
+  function finDelDiaISO(fechaStr){
+    const [y, m, d] = fechaStr.split("-").map(Number);
+    return new Date(y, m - 1, d, 23, 59, 59, 999).toISOString();
+  }
+
   function calcularPeriodoPreset(preset){
     const hoy = new Date();
     if(preset === "hoy"){
@@ -4434,8 +4457,11 @@ ${estilosBase()}
     let data;
     try {
       const params = new URLSearchParams();
-      if(periodoActual.desde) params.set("desde", periodoActual.desde);
-      if(periodoActual.hasta) params.set("hasta", periodoActual.hasta);
+      // Se mandan como instantes completos (con hora y zona horaria ya
+      // resueltos en el navegador), no como fechas "en blanco" — así el
+      // servidor no tiene que adivinar en qué zona horaria interpretarlas.
+      if(periodoActual.desde) params.set("desde", inicioDelDiaISO(periodoActual.desde));
+      if(periodoActual.hasta) params.set("hasta", finDelDiaISO(periodoActual.hasta));
       const url = "/dashboard/datos" + (params.toString() ? "?" + params.toString() : "");
 
       const res = await fetch(url);
