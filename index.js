@@ -6215,29 +6215,39 @@ ${estilosBase()}
     document.getElementById("countAgendo").textContent = totalAgendo;
     document.getElementById("countEnlace").textContent = totalEnlace;
     document.getElementById("countSeguimiento").textContent = totalSeguimiento;
-    actualizarBotonExportar({ totalHandoff, totalCalifica, totalEnlace });
+    actualizarBotonExportar({
+      todas: conversaciones.length, handoff: totalHandoff, califica: totalCalifica,
+      nocalifica: totalNoCalifica, agendo: totalAgendo, enlace: totalEnlace, seguimiento: totalSeguimiento
+    });
   }
 
-  function actualizarBotonExportar({ totalHandoff, totalCalifica, totalEnlace }){
+  // El botón de exportar aparece SIEMPRE, sin importar qué pestaña tengas
+  // abierta — un solo endpoint flexible en el servidor sirve cualquiera de
+  // las 7 categorías, tú decides si lo descargas o no.
+  function actualizarBotonExportar(totales){
     const wrap = document.getElementById("chatExportWrap");
     const btn = document.getElementById("btnExportar");
 
-    const config = {
-      handoff:  { href: "/exportar/handoff.csv",     titulo: "Exportar handoff",           total: totalHandoff,  estilo: "" },
-      califica: { href: "/exportar/calificados.csv", titulo: "Exportar calificados",        total: totalCalifica, estilo: "border-color:rgba(49,217,124,.3); color:var(--green);" },
-      enlace:   { href: "/exportar/enlace.csv",       titulo: "Exportar enlaces enviados",  total: totalEnlace,   estilo: "border-color:rgba(63,199,232,.35); color:#3FC7E8;" }
+    const estilos = {
+      todas: "", handoff: "",
+      califica: "border-color:rgba(49,217,124,.3); color:var(--green);",
+      nocalifica: "border-color:rgba(255,93,93,.35); color:var(--red);",
+      agendo: "border-color:rgba(49,217,124,.3); color:var(--green);",
+      enlace: "border-color:rgba(63,199,232,.35); color:#3FC7E8;",
+      seguimiento: "border-color:rgba(255,197,66,.4); color:#FFC542;"
+    };
+    const titulos = {
+      todas: "Exportar todos los leads", handoff: "Exportar handoff", califica: "Exportar calificados",
+      nocalifica: "Exportar no califican", agendo: "Exportar agendaron", enlace: "Exportar enlace enviado",
+      seguimiento: "Exportar seguimiento pendiente"
     };
 
-    const cfg = config[filtroActual];
-    if(!cfg){
-      wrap.style.display = "none";
-      return;
-    }
+    const total = totales[filtroActual] ?? 0;
     wrap.style.display = "inline-block";
-    btn.setAttribute("href", cfg.href);
-    btn.setAttribute("style", cfg.estilo);
-    btn.setAttribute("title", cfg.titulo);
-    btn.textContent = "⬇ CSV (" + cfg.total + ")";
+    btn.setAttribute("href", "/exportar/leads.csv?filtro=" + encodeURIComponent(filtroActual));
+    btn.setAttribute("style", estilos[filtroActual] || "");
+    btn.setAttribute("title", titulos[filtroActual] || "Exportar");
+    btn.textContent = "⬇ CSV (" + total + ")";
   }
 
   function conversacionesFiltradas(){
@@ -7190,6 +7200,94 @@ app.get("/exportar/enlace.csv", requireAdminKey, async (req, res) => {
 // se haya dicho al principio de una conversación larga.
 const LIMITE_CONVERSACIONES_REPORTE = 300;
 const TAMANO_LOTE_REPORTE = 8;
+
+// Exporta a CSV cualquier grupo de leads (según la pestaña activa en
+// /chats: todas, califica, nocalifica, agendo, enlace, handoff, o
+// seguimiento) — un solo endpoint flexible en vez de uno distinto por
+// categoría, así el botón de descarga puede aparecer siempre, sin importar
+// qué pestaña tengas abierta.
+app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
+  try {
+    const filtro = req.query.filtro || "todas";
+
+    const { data, error } = await supabase
+      .from("conversaciones")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, etapa, etiquetas, monto_pagado")
+      .order("actualizado_en", { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    let filtradas = (data || []).map(c => {
+      const enVentana24h = c.ultimo_mensaje_usuario
+        ? (Date.now() - new Date(c.ultimo_mensaje_usuario).getTime()) < VENTANA_24H_MS
+        : false;
+      return { ...c, en_ventana_24h: enVentana24h };
+    });
+
+    if (filtro === "califica") filtradas = filtradas.filter(c => c.califica);
+    else if (filtro === "nocalifica") filtradas = filtradas.filter(c => c.no_califica);
+    else if (filtro === "agendo") filtradas = filtradas.filter(c => c.agendo);
+    else if (filtro === "enlace") filtradas = filtradas.filter(c => c.enlace_enviado);
+    else if (filtro === "handoff") filtradas = filtradas.filter(c => !c.en_ventana_24h);
+    else if (filtro === "seguimiento") filtradas = filtradas.filter(c => !c.en_ventana_24h && !c.no_califica && !c.agendo);
+    // "todas" (o cualquier otro valor): sin filtro adicional.
+
+    const filas = await Promise.all(filtradas.map(async (c) => {
+      const perfil = await obtenerPerfilInstagram(c.sender_id);
+      const historial = Array.isArray(c.historial) ? c.historial : [];
+      const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
+
+      return {
+        username: perfil?.username || "",
+        sender_id: c.sender_id,
+        etapa: c.etapa || "",
+        califica: c.califica ? "sí" : "no",
+        razon_calificacion: c.razon_calificacion || "",
+        no_califica: c.no_califica ? "sí" : "no",
+        razon_no_califica: c.razon_no_califica || "",
+        agendo: c.agendo ? "sí" : "no",
+        agendo_en: c.agendo_en || "",
+        enlace_enviado: c.enlace_enviado ? "sí" : "no",
+        enlace_enviado_en: c.enlace_enviado_en || "",
+        en_ventana_24h: c.en_ventana_24h ? "sí" : "no (handoff)",
+        etiquetas: Array.isArray(c.etiquetas) ? c.etiquetas.join(" | ") : "",
+        monto_pagado: c.monto_pagado || 0,
+        ultimo_mensaje_usuario: c.ultimo_mensaje_usuario || "",
+        ultimo_mensaje: ultimo ? ultimo.content : ""
+      };
+    }));
+
+    const encabezados = [
+      "username", "sender_id", "etapa", "califica", "razon_calificacion",
+      "no_califica", "razon_no_califica", "agendo", "agendo_en",
+      "enlace_enviado", "enlace_enviado_en", "en_ventana_24h", "etiquetas",
+      "monto_pagado", "ultimo_mensaje_usuario", "ultimo_mensaje"
+    ];
+    const escaparCSV = (valor) => {
+      const txt = String(valor ?? "");
+      return /[",\n]/.test(txt) ? '"' + txt.replace(/"/g, '""') + '"' : txt;
+    };
+
+    const lineas = [
+      encabezados.join(","),
+      ...filas.map((f) => encabezados.map((h) => escaparCSV(f[h])).join(","))
+    ];
+
+    const csv = "\uFEFF" + lineas.join("\r\n");
+    const fechaArchivo = new Date().toISOString().slice(0, 10);
+    const nombresArchivo = {
+      todas: "todos_los_leads", califica: "califican", nocalifica: "no_califican",
+      agendo: "agendaron", enlace: "enlace_enviado", handoff: "handoff", seguimiento: "seguimiento_pendiente"
+    };
+    const nombreArchivo = nombresArchivo[filtro] || "leads";
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}_${fechaArchivo}.csv"`);
+    res.send(csv);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) => {
   try {
