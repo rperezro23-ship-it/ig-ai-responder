@@ -4108,13 +4108,6 @@ ${estilosBase()}
 
     <div id="dashSinEtiquetas" class="dash-warning" style="display:none;"></div>
 
-    <div class="dash-side-stats">
-      <div class="dash-side-stat">
-        <div class="dash-side-stat-label">🚫 No Califica</div>
-        <div class="dash-side-stat-value" id="dashNoCalifica">–</div>
-      </div>
-    </div>
-
     <div class="dash-funnel">
       <div class="dash-step step-total">
         <div class="dash-step-left">
@@ -4242,7 +4235,6 @@ ${estilosBase()}
     if(!data.porcentajes) console.warn("La respuesta de /dashboard/datos no trajo \\"porcentajes\\":", data);
 
     document.getElementById("dashCash").textContent = formatearMoneda(data.cashCollected);
-    document.getElementById("dashNoCalifica").textContent = data.totalNoCalifica ?? 0;
     document.getElementById("dashTotal").textContent = data.total ?? 0;
     document.getElementById("dashCalifica").textContent = data.totalCalifica ?? 0;
     document.getElementById("dashEnlace").textContent = data.totalEnlace ?? 0;
@@ -5858,8 +5850,8 @@ ${estilosBase()}
   .chat-tab.tab-califica.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.4); }
   .chat-tab.tab-nocalifica.active{ background:var(--red-soft); color:var(--red); border-color:rgba(255,93,93,.4); }
   .chat-tab.tab-agendo.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.4); }
-  .chat-tab.tab-agendo.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.4); }
   .chat-tab.tab-enlace.active{ background:rgba(63,199,232,.14); color:#3FC7E8; border-color:rgba(63,199,232,.4); }
+  .chat-tab.tab-seguimiento.active{ background:rgba(255,197,66,.14); color:#FFC542; border-color:rgba(255,197,66,.4); }
   .chat-tab .count{ font-family:var(--mono); font-size:10.5px; opacity:.85; margin-left:2px; }
   .califica-badge{
     font-size:11px; margin-left:7px; flex-shrink:0;
@@ -6088,6 +6080,7 @@ ${estilosBase()}
           <div class="chat-tab tab-agendo" id="tabAgendo" data-filtro="agendo" title="Agendó">📅 <span class="count" id="countAgendo"></span></div>
           <div class="chat-tab tab-enlace" id="tabEnlace" data-filtro="enlace" title="Enlace enviado">🔗 <span class="count" id="countEnlace"></span></div>
           <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff" title="Handoff (+24h)">⏰ <span class="count" id="countHandoff"></span></div>
+          <div class="chat-tab tab-seguimiento" id="tabSeguimiento" data-filtro="seguimiento" title="Seguimiento pendiente (handoff, sin contar los que ya agendaron o no califican)">🔁 <span class="count" id="countSeguimiento"></span></div>
         </div>
         <div class="chat-toolbar">
           <select id="segmentoReporteDolores" class="select-mini" title="Segmento a analizar en el resumen de dolores/obstáculos">
@@ -6214,12 +6207,14 @@ ${estilosBase()}
     const totalNoCalifica = conversaciones.filter(c => c.no_califica).length;
     const totalAgendo = conversaciones.filter(c => c.agendo).length;
     const totalEnlace = conversaciones.filter(c => c.enlace_enviado).length;
+    const totalSeguimiento = conversaciones.filter(c => !c.en_ventana_24h && !c.no_califica && !c.agendo).length;
     document.getElementById("countTodas").textContent = conversaciones.length;
     document.getElementById("countHandoff").textContent = totalHandoff;
     document.getElementById("countCalifica").textContent = totalCalifica;
     document.getElementById("countNoCalifica").textContent = totalNoCalifica;
     document.getElementById("countAgendo").textContent = totalAgendo;
     document.getElementById("countEnlace").textContent = totalEnlace;
+    document.getElementById("countSeguimiento").textContent = totalSeguimiento;
     actualizarBotonExportar({ totalHandoff, totalCalifica, totalEnlace });
   }
 
@@ -6251,6 +6246,10 @@ ${estilosBase()}
     if(filtroActual === "nocalifica") return conversaciones.filter(c => c.no_califica);
     if(filtroActual === "agendo") return conversaciones.filter(c => c.agendo);
     if(filtroActual === "enlace") return conversaciones.filter(c => c.enlace_enviado);
+    // "Seguimiento pendiente": todos los que salieron de la ventana de 24h
+    // (handoff), EXCLUYENDO a los que ya no califican (no vale la pena
+    // insistirles) y a los que ya agendaron (ya lograron lo que se buscaba).
+    if(filtroActual === "seguimiento") return conversaciones.filter(c => !c.en_ventana_24h && !c.no_califica && !c.agendo);
     return conversaciones;
   }
 
@@ -6788,6 +6787,12 @@ ${estilosBase()}
     filtroActual = "handoff";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabHandoff").classList.add("active");
+    renderLista();
+  });
+  document.getElementById("tabSeguimiento").addEventListener("click", () => {
+    filtroActual = "seguimiento";
+    document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
+    document.getElementById("tabSeguimiento").classList.add("active");
     renderLista();
   });
   document.getElementById("tabCalifica").addEventListener("click", () => {
