@@ -2549,8 +2549,28 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
     const etiquetaAsistio = configActual.dashboard_etiqueta_asistio?.trim();
     const etiquetaCompro = configActual.dashboard_etiqueta_compro?.trim();
 
-    const totalAsistio = etiquetaAsistio ? await contar(q => q.contains("etiquetas", [etiquetaAsistio]), "asistio") : 0;
-    const totalCompro = etiquetaCompro ? await contar(q => q.contains("etiquetas", [etiquetaCompro]), "compro") : 0;
+    // Se cuenta comparando en JS (no con el operador de Postgres) porque la
+    // comparación exacta de la base de datos es sensible a mayúsculas y a
+    // cómo el navegador guardó los acentos — esto normaliza igual que el
+    // resto del sistema (sin mayúsculas, sin acentos), para que "Asistió",
+    // "asistio" y "ASISTIÓ" cuenten como la misma etiqueta.
+    async function contarPorEtiqueta(nombreEtiqueta, etiquetaError) {
+      if (!nombreEtiqueta) return 0;
+      try {
+        const objetivo = normalizarParaComparar(nombreEtiqueta);
+        const { data, error } = await supabase.from("conversaciones").select("etiquetas");
+        if (error) throw error;
+        return (data || []).filter(c =>
+          Array.isArray(c.etiquetas) && c.etiquetas.some(e => normalizarParaComparar(e) === objetivo)
+        ).length;
+      } catch (err) {
+        console.error(`❌ Error contando la etiqueta "${etiquetaError}" en el dashboard:`, err.message);
+        return 0;
+      }
+    }
+
+    const totalAsistio = await contarPorEtiqueta(etiquetaAsistio, "asistio");
+    const totalCompro = await contarPorEtiqueta(etiquetaCompro, "compro");
 
     // Cash collected: suma de todos los montos pagados registrados a mano.
     // Igual que arriba, si la columna todavía no existe, se queda en 0 en
@@ -4017,26 +4037,20 @@ ${estilosBase()}
   }
   .dash-side-stat-label{ font-size:12.5px; color:var(--muted); margin-bottom:5px; }
   .dash-side-stat-value{ font-family:var(--display); font-size:22px; font-weight:700; }
-  .dash-funnel{ display:flex; flex-direction:column; align-items:stretch; gap:0; margin-bottom:26px; }
+  .dash-funnel{ display:flex; flex-direction:column; align-items:stretch; gap:3px; margin-bottom:22px; }
   .dash-step{
-    background:var(--surface); border:1px solid var(--border); border-radius:14px;
-    padding:20px 26px; display:flex; align-items:center; justify-content:space-between;
+    background:var(--surface); border:1px solid var(--border); border-radius:11px;
+    padding:12px 18px; display:flex; align-items:center; justify-content:space-between;
     transition:border-color .15s;
   }
-  .dash-step-left{ display:flex; align-items:center; gap:14px; }
-  .dash-step-icon{ font-size:26px; flex-shrink:0; }
-  .dash-step-label{ font-family:var(--display); font-size:16px; font-weight:600; }
-  .dash-step-sub{ font-size:12.5px; color:var(--muted); margin-top:2px; }
-  .dash-step-value{ font-family:var(--display); font-size:30px; font-weight:700; flex-shrink:0; }
-  .dash-arrow-row{
-    display:flex; align-items:center; justify-content:center; gap:10px;
-    padding:8px 0; color:var(--muted); font-size:13px; font-family:var(--mono);
-  }
-  .dash-arrow-row .arrow-line{ flex:1; max-width:60px; height:1px; background:var(--border); }
-  .dash-arrow-pct{
-    font-weight:700; font-size:14px; padding:3px 10px; border-radius:20px;
-    background:var(--surface-3); color:var(--text);
-  }
+  .dash-step-left{ display:flex; align-items:center; gap:11px; }
+  .dash-step-icon{ font-size:19px; flex-shrink:0; }
+  .dash-step-label{ font-family:var(--display); font-size:13.5px; font-weight:600; }
+  .dash-step-sub{ font-size:11px; color:var(--muted); margin-top:1px; }
+  .dash-step-right{ display:flex; flex-direction:column; align-items:flex-end; gap:1px; flex-shrink:0; }
+  .dash-step-value{ font-family:var(--display); font-size:22px; font-weight:700; line-height:1.1; }
+  .dash-step-pct{ font-size:11px; font-weight:700; color:var(--muted); font-family:var(--mono); }
+  .dash-connector{ width:1px; height:8px; background:var(--border); margin:0 0 0 27px; }
   .dash-step.step-total{ border-color:rgba(255,255,255,.15); }
   .dash-step.step-califica{ border-color:rgba(49,217,124,.35); }
   .dash-step.step-califica .dash-step-value{ color:var(--green); }
@@ -4102,57 +4116,74 @@ ${estilosBase()}
           <span class="dash-step-icon">💬</span>
           <div><div class="dash-step-label">Conversaciones totales</div><div class="dash-step-sub">Todos los leads que le han escrito al bot</div></div>
         </div>
-        <div class="dash-step-value" id="dashTotal">–</div>
+        <div class="dash-step-right">
+          <div class="dash-step-value" id="dashTotal">–</div>
+        </div>
       </div>
 
-      <div class="dash-arrow-row"><span class="arrow-line"></span><span class="dash-arrow-pct" id="pctCalifica">–</span><span class="arrow-line"></span></div>
+      <div class="dash-connector"></div>
 
       <div class="dash-step step-califica">
         <div class="dash-step-left">
           <span class="dash-step-icon">✅</span>
-          <div><div class="dash-step-label">Califican</div><div class="dash-step-sub">% del total de conversaciones</div></div>
+          <div><div class="dash-step-label">Califican</div><div class="dash-step-sub">del total de conversaciones</div></div>
         </div>
-        <div class="dash-step-value" id="dashCalifica">–</div>
+        <div class="dash-step-right">
+          <div class="dash-step-value" id="dashCalifica">–</div>
+          <div class="dash-step-pct" id="pctCalifica">–</div>
+        </div>
       </div>
 
-      <div class="dash-arrow-row"><span class="arrow-line"></span><span class="dash-arrow-pct" id="pctEnlace">–</span><span class="arrow-line"></span></div>
+      <div class="dash-connector"></div>
 
       <div class="dash-step step-enlace">
         <div class="dash-step-left">
           <span class="dash-step-icon">🔗</span>
-          <div><div class="dash-step-label">Enlace enviado</div><div class="dash-step-sub">% de los que califican</div></div>
+          <div><div class="dash-step-label">Enlace enviado</div><div class="dash-step-sub">de los que califican</div></div>
         </div>
-        <div class="dash-step-value" id="dashEnlace">–</div>
+        <div class="dash-step-right">
+          <div class="dash-step-value" id="dashEnlace">–</div>
+          <div class="dash-step-pct" id="pctEnlace">–</div>
+        </div>
       </div>
 
-      <div class="dash-arrow-row"><span class="arrow-line"></span><span class="dash-arrow-pct" id="pctAgendo">–</span><span class="arrow-line"></span></div>
+      <div class="dash-connector"></div>
 
       <div class="dash-step step-agendo">
         <div class="dash-step-left">
           <span class="dash-step-icon">📅</span>
-          <div><div class="dash-step-label">Agendaron (confirmado)</div><div class="dash-step-sub">% de los que recibieron el enlace</div></div>
+          <div><div class="dash-step-label">Agendaron (confirmado)</div><div class="dash-step-sub">de los que recibieron el enlace</div></div>
         </div>
-        <div class="dash-step-value" id="dashAgendo">–</div>
+        <div class="dash-step-right">
+          <div class="dash-step-value" id="dashAgendo">–</div>
+          <div class="dash-step-pct" id="pctAgendo">–</div>
+        </div>
       </div>
 
-      <div class="dash-arrow-row"><span class="arrow-line"></span><span class="dash-arrow-pct" id="pctAsistio">–</span><span class="arrow-line"></span></div>
+      <div class="dash-connector"></div>
 
       <div class="dash-step step-asistio">
         <div class="dash-step-left">
           <span class="dash-step-icon">🙋</span>
-          <div><div class="dash-step-label">Asistieron</div><div class="dash-step-sub" id="subAsistio">% de los que agendaron</div></div>
+          <div><div class="dash-step-label">Asistieron</div><div class="dash-step-sub" id="subAsistio">de los que agendaron</div></div>
         </div>
-        <div class="dash-step-value" id="dashAsistio">–</div>
+        <div class="dash-step-right">
+          <div class="dash-step-value" id="dashAsistio">–</div>
+          <div class="dash-step-pct" id="pctAsistio">–</div>
+        </div>
       </div>
 
-      <div class="dash-arrow-row"><span class="arrow-line"></span><span class="dash-arrow-pct" id="pctCompro">–</span><span class="arrow-line"></span></div>
+      <div class="dash-connector"></div>
 
       <div class="dash-step step-compro">
         <div class="dash-step-left">
           <span class="dash-step-icon">🎉</span>
-          <div><div class="dash-step-label">Compraron / se cerraron</div><div class="dash-step-sub" id="subCompro">% de los que asistieron</div></div>
+          <div><div class="dash-step-label">Compraron / se cerraron</div><div class="dash-step-sub" id="subCompro">de los que asistieron</div></div>
         </div>
-        <div class="dash-step-value" id="dashCompro">–</div>
+        <div class="dash-step-right">
+          <div class="dash-step-value" id="dashCompro">–</div>
+          <div class="dash-step-pct" id="pctCompro">–</div>
+        </div>
       </div>
     </div>
 
@@ -4233,8 +4264,8 @@ ${estilosBase()}
       avisoBox.style.display = "none";
     }
 
-    document.getElementById("subAsistio").textContent = data.etiquetaAsistio ? 'Etiqueta: "' + data.etiquetaAsistio + '"' : "% de los que agendaron (sin configurar)";
-    document.getElementById("subCompro").textContent = data.etiquetaCompro ? 'Etiqueta: "' + data.etiquetaCompro + '"' : "% de los que asistieron (sin configurar)";
+    document.getElementById("subAsistio").textContent = data.etiquetaAsistio ? 'Etiqueta: "' + data.etiquetaAsistio + '"' : "de los que agendaron (sin configurar)";
+    document.getElementById("subCompro").textContent = data.etiquetaCompro ? 'Etiqueta: "' + data.etiquetaCompro + '"' : "de los que asistieron (sin configurar)";
 
     if(document.getElementById("selectEtiquetaAsistio").value === "" && data.etiquetaAsistio){
       document.getElementById("selectEtiquetaAsistio").value = data.etiquetaAsistio;
