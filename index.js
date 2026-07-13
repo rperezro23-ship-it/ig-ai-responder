@@ -2127,16 +2127,23 @@ app.post("/webhook", async (req, res) => {
       }
 
       // Evento de "visto" (read receipt): Instagram manda esto cuando el
-      // cliente abre el chat y lee los mensajes. "watermark" es un timestamp
-      // (ms desde epoch) que indica "leyó todo hasta este momento". Se guarda
-      // para que los seguimientos con "solo si está visto" (ver
+      // cliente abre el chat y lee los mensajes. A diferencia de Messenger
+      // (que manda un "watermark" — un timestamp de hasta dónde se leyó),
+      // Instagram manda "read.mid" (el ID del mensaje leído), SIN watermark
+      // — confirmado revisando el payload real que Instagram manda. En vez
+      // de rastrear IDs exactos de cada mensaje que mandamos (mucho más
+      // complejo), se usa el timestamp del propio evento como el momento
+      // en que "ya vio todo hasta aquí" — es una buena aproximación: cuando
+      // alguien abre el chat y lo lee, normalmente ve todos los mensajes
+      // recientes, no solo uno en particular. Se guarda para que los
+      // seguimientos con "solo si está visto" (ver
       // procesarSeguimientosPendientesDB) puedan comparar si el cliente ya
       // vio el último mensaje que le mandó el bot antes de mandarle el
       // siguiente seguimiento.
-      if (event.read?.watermark) {
-        const vistoHasta = new Date(Number(event.read.watermark)).toISOString();
+      if (event.read) {
+        const vistoHasta = new Date(Number(event.timestamp)).toISOString();
         await guardarConversacion(senderId, { visto_hasta: vistoHasta });
-        console.log(`👁️ ${senderId} vio los mensajes hasta ${vistoHasta}`);
+        console.log(`👁️ ${senderId} vio los mensajes hasta ${vistoHasta} (read.mid: ${event.read.mid || "sin mid"})`);
         continue;
       }
 
