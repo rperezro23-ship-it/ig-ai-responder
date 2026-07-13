@@ -2247,6 +2247,16 @@ app.post("/webhook", async (req, res) => {
           const midEcho = event.message?.mid;
           if (esMidDelBot(midEcho)) continue; // es el propio bot — ya se guardó al mandarlo
 
+          // IMPORTANTE: en los eventos de "echo" (mensajes SALIENTES),
+          // Instagram invierte sender/recipient respecto a un mensaje
+          // normal entrante — "sender" es la propia cuenta de negocio (tu
+          // cuenta), y "recipient" es el cliente al que se le mandó. Usar
+          // "senderId" (que arriba se toma de event.sender.id) aquí sería
+          // guardar el mensaje bajo TU PROPIO ID en vez del ID del lead
+          // real — hay que usar recipient.id en este caso específico.
+          const clienteDestino = event.recipient?.id;
+          if (!clienteDestino) continue;
+
           // No es un mid que el bot haya mandado — es un mensaje que se
           // escribió A MANO directo desde la app de Instagram (o el sitio
           // web), sin pasar por el bot ni por el envío manual de /chats.
@@ -2256,12 +2266,12 @@ app.post("/webhook", async (req, res) => {
           if (midEcho && yaRespondidos.has(midEcho)) continue;
           if (midEcho) yaRespondidos.add(midEcho);
 
-          console.log(`📱 Mensaje manual detectado (mandado directo desde Instagram, no por el bot) a ${senderId}: "${mensajeTexto}"`);
-          await agregarAlHistorialDB(senderId, "assistant", mensajeTexto);
+          console.log(`📱 Mensaje manual detectado (mandado directo desde Instagram, no por el bot) a ${clienteDestino}: "${mensajeTexto}"`);
+          await agregarAlHistorialDB(clienteDestino, "assistant", mensajeTexto);
           // Ya hubo respuesta humana (mandada directo desde la app) — se
           // cancelan los seguimientos automáticos pendientes, igual que
           // cuando se responde manualmente desde /chats.
-          await cancelarSeguimientosPendientesDB(senderId);
+          await cancelarSeguimientosPendientesDB(clienteDestino);
           continue;
         }
         const msgId = event.message?.mid;
