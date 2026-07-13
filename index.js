@@ -1991,6 +1991,19 @@ async function procesarBuffer(senderId) {
       promptSistema += `\n\nNOTA IMPORTANTE PARA ESTE MENSAJE: el cliente acaba de decir que ya agendó su llamada, pero nuestro sistema NO encuentra ninguna reserva confirmada a su nombre en el calendario en este momento. NO le digas que no encuentras nada ni que "el sistema no lo detecta" (suena robótico y desconfiado) — en vez de eso, de forma cálida y natural, pídele que te confirme qué día y hora eligió, como si quisieras anotarlo tú mismo para tenerlo presente. Si te da el día y la hora, no hace falta que sigas insistiendo en este mensaje.`;
     }
 
+    // Si Calendly SÍ confirmó la reserva, se le pasa a la IA el día y la
+    // hora reales del evento (no solo "ya se agendó algo") — así puede
+    // mencionarlo de forma natural en su respuesta de felicitación (ej.
+    // "¡nos vemos el jueves a las 3pm!"), en vez de dar una confirmación
+    // genérica sin ese detalle que sí importa para el cliente.
+    if (eventoCalendlyConfirmado?.start_time) {
+      const fechaEvento = new Date(eventoCalendlyConfirmado.start_time).toLocaleString("es-MX", {
+        weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", hour12: true,
+        timeZone: "America/Mexico_City"
+      });
+      promptSistema += `\n\nNOTA IMPORTANTE PARA ESTE MENSAJE: Calendly confirmó que la llamada del cliente quedó agendada para: ${fechaEvento}. Puedes mencionar este día y hora de forma natural en tu respuesta (ej. para confirmarle o recordárselo), no hace falta que se lo repitas palabra por palabra, solo que quede claro que sabes cuándo es.`;
+    }
+
     if (etapaConfig) {
       console.log(`🧭 ${senderId} está en la etapa "${etapaConfig.clave}" — se usa su prompt propio.`);
     }
