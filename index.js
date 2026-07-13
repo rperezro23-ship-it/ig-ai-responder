@@ -595,7 +595,11 @@ async function verificarReservaEnCalendly(username) {
         const respuestaUsername = (encontrada?.answer || "").trim().replace(/^@/, "").toLowerCase();
 
         if (respuestaUsername && respuestaUsername === limpio) {
-          return { encontrado: true, event: evento };
+          // Calendly detecta y guarda la zona horaria del propio invitado
+          // al momento de reservar (ej. "America/New_York") — se usa para
+          // poder decirle la hora de su llamada en SU hora, no en la de
+          // Roberto, sin tener que preguntársela ni adivinarla.
+          return { encontrado: true, event: evento, timezoneInvitado: invitado.timezone || null };
         }
       }
     }
@@ -1854,12 +1858,14 @@ async function procesarBuffer(senderId) {
     // transición (se sigue en la misma etapa) y se le pide al modelo, más
     // abajo, que pida confirmación del día y la hora en vez de asumir nada.
     let eventoCalendlyConfirmado = null;
+    let timezoneInvitadoCalendly = null;
     let pedirConfirmacionCalendly = false;
     if (transicion?.verificar_calendly) {
       const resultado = await verificarReservaEnCalendly(conv.username);
       if (resultado.encontrado) {
         console.log(`✅ Calendly confirma la reserva de ${senderId} (@${conv.username}).`);
         eventoCalendlyConfirmado = resultado.event;
+        timezoneInvitadoCalendly = resultado.timezoneInvitado;
       } else {
         console.log(`❌ No se encontró ninguna reserva en Calendly para ${senderId} (@${conv.username || "sin username"}): ${resultado.motivo}`);
         transicion = null; // no se aplica el cambio de etapa todavía
@@ -1992,16 +1998,29 @@ async function procesarBuffer(senderId) {
     }
 
     // Si Calendly SÍ confirmó la reserva, se le pasa a la IA el día y la
-    // hora reales del evento (no solo "ya se agendó algo") — así puede
-    // mencionarlo de forma natural en su respuesta de felicitación (ej.
-    // "¡nos vemos el jueves a las 3pm!"), en vez de dar una confirmación
-    // genérica sin ese detalle que sí importa para el cliente.
+    // hora reales del evento — EN LA ZONA HORARIA DEL PROPIO LEAD (la que
+    // Calendly detectó cuando reservó), no en la de Roberto, para que la
+    // hora que mencione el bot sea la misma que el lead ya vio confirmada
+    // en su correo/calendario. Si por lo que sea Calendly no trae esa zona
+    // horaria, se usa la de México como respaldo razonable.
     if (eventoCalendlyConfirmado?.start_time) {
-      const fechaEvento = new Date(eventoCalendlyConfirmado.start_time).toLocaleString("es-MX", {
-        weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", hour12: true,
-        timeZone: "America/Mexico_City"
-      });
-      promptSistema += `\n\nNOTA IMPORTANTE PARA ESTE MENSAJE: Calendly confirmó que la llamada del cliente quedó agendada para: ${fechaEvento}. Puedes mencionar este día y hora de forma natural en tu respuesta (ej. para confirmarle o recordárselo), no hace falta que se lo repitas palabra por palabra, solo que quede claro que sabes cuándo es.`;
+      const zonaHoraria = timezoneInvitadoCalendly || "America/Mexico_City";
+      let fechaEvento;
+      try {
+        fechaEvento = new Date(eventoCalendlyConfirmado.start_time).toLocaleString("es-MX", {
+          weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", hour12: true,
+          timeZone: zonaHoraria
+        });
+      } catch (err) {
+        // Por si Calendly mandara alguna vez una zona horaria con un
+        // nombre no reconocido por Node — se cae a México en vez de tronar.
+        console.error(`⚠️ Zona horaria de Calendly no reconocida ("${zonaHoraria}"), se usa México como respaldo:`, err.message);
+        fechaEvento = new Date(eventoCalendlyConfirmado.start_time).toLocaleString("es-MX", {
+          weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", hour12: true,
+          timeZone: "America/Mexico_City"
+        });
+      }
+      promptSistema += `\n\nNOTA IMPORTANTE PARA ESTE MENSAJE: Calendly confirmó que la llamada del cliente quedó agendada para: ${fechaEvento} (hora del propio cliente). Puedes mencionar este día y hora de forma natural en tu respuesta (ej. para confirmarle o recordárselo), no hace falta que se lo repitas palabra por palabra, solo que quede claro que sabes cuándo es.`;
     }
 
     if (etapaConfig) {
