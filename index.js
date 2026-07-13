@@ -181,11 +181,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0, primer_mensaje_en: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0, primer_mensaje_en: null, bot_pausado: false, resumen_lead: null, resumen_lead_generado_en: null };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0, primer_mensaje_en: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0, primer_mensaje_en: null, bot_pausado: false, resumen_lead: null, resumen_lead_generado_en: null };
   }
 
   return data;
@@ -907,11 +907,39 @@ function segundosAleatorios(min, max) {
   return Math.floor(Math.random() * (max - min + 1) + min) * 1000;
 }
 
+// Registro temporal de los IDs de mensaje (mid) que el propio bot mandó —
+// Instagram manda un "echo" por CADA mensaje saliente de la cuenta, sin
+// importar si lo mandó el bot por la API o un humano escribiendo a mano
+// directo en la app de Instagram. Esto permite distinguir ambos casos: si
+// el mid del echo está aquí, ya lo guardamos nosotros mismos al mandarlo
+// (se ignora el echo para no duplicarlo); si NO está, es un mensaje que
+// alguien mandó manualmente desde la app, y sí hay que registrarlo.
+const midsBotEnviados = new Map(); // mid -> timestamp de cuando se mandó
+
+function registrarMidBot(mid) {
+  if (!mid) return;
+  midsBotEnviados.set(mid, Date.now());
+}
+
+function esMidDelBot(mid) {
+  return Boolean(mid && midsBotEnviados.has(mid));
+}
+
+// Limpieza periódica: los echoes llegan casi de inmediato después de
+// mandar un mensaje, no hace falta guardar los mids por mucho tiempo — se
+// purgan los que ya tienen más de 10 minutos para no acumular memoria.
+setInterval(() => {
+  const ahora = Date.now();
+  for (const [mid, ts] of midsBotEnviados) {
+    if (ahora - ts > 10 * 60 * 1000) midsBotEnviados.delete(mid);
+  }
+}, 5 * 60 * 1000);
+
 async function enviarMensajeInstagram(senderId, texto) {
   const cuenta = await obtenerCuentaActiva();
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
-  await axios.post(
+  const resp = await axios.post(
     `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
     {
       recipient: { id: senderId },
@@ -921,6 +949,7 @@ async function enviarMensajeInstagram(senderId, texto) {
       headers: { "Authorization": `Bearer ${cuenta.access_token}` }
     }
   );
+  registrarMidBot(resp.data?.message_id);
 }
 
 // Manda un audio pregrabado como adjunto ("attachment" tipo audio). Instagram
@@ -931,7 +960,7 @@ async function enviarAudioInstagram(senderId, urlAudio) {
   const cuenta = await obtenerCuentaActiva();
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
-  await axios.post(
+  const resp = await axios.post(
     `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
     {
       recipient: { id: senderId },
@@ -946,6 +975,7 @@ async function enviarAudioInstagram(senderId, urlAudio) {
       headers: { "Authorization": `Bearer ${cuenta.access_token}` }
     }
   );
+  registrarMidBot(resp.data?.message_id);
 }
 
 // Manda una imagen como adjunto ("attachment" tipo image). Se usa tanto para
@@ -955,7 +985,7 @@ async function enviarImagenInstagram(senderId, urlImagen) {
   const cuenta = await obtenerCuentaActiva();
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
-  await axios.post(
+  const resp = await axios.post(
     `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
     {
       recipient: { id: senderId },
@@ -970,6 +1000,7 @@ async function enviarImagenInstagram(senderId, urlImagen) {
       headers: { "Authorization": `Bearer ${cuenta.access_token}` }
     }
   );
+  registrarMidBot(resp.data?.message_id);
 }
 
 // Pequeña espera asíncrona, usada por el envío secuencial de mensajes para
@@ -1748,6 +1779,25 @@ async function procesarBuffer(senderId) {
     const conv = await obtenerConversacion(senderId);
     const historial = conv.historial || [];
 
+    // Bot pausado PARA ESTE LEAD en particular (distinto del apagado
+    // general): el admin decidió tomar esta conversación a mano desde
+    // /chats. Se guarda igual el mensaje del cliente en el historial (para
+    // no perder el registro ni el contexto si se reactiva más adelante),
+    // pero no se genera ninguna respuesta automática ni se evalúan
+    // transiciones — el admin responde manualmente.
+    if (conv.bot_pausado) {
+      console.log(`⏸️ Bot pausado para ${senderId}: se guarda el mensaje pero no se genera respuesta.`);
+      await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
+      buffer.enProceso = false;
+      if (buffer.mensajes.length > 0) {
+        const delay = segundosAleatorios(configActual.min_delay, configActual.max_delay);
+        buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
+      } else {
+        buffers.delete(senderId);
+      }
+      return;
+    }
+
     // Etapa activa de esta conversación (si tiene alguna asignada). Mientras
     // el lead esté en una etapa, se usa el prompt propio de esa etapa en vez
     // del prompt general — así la IA solo "ve" el contexto de sí/no que le
@@ -2193,7 +2243,27 @@ app.post("/webhook", async (req, res) => {
           continue;
         }
       } else {
-        if (event.message?.is_echo) continue;
+        if (event.message?.is_echo) {
+          const midEcho = event.message?.mid;
+          if (esMidDelBot(midEcho)) continue; // es el propio bot — ya se guardó al mandarlo
+
+          // No es un mid que el bot haya mandado — es un mensaje que se
+          // escribió A MANO directo desde la app de Instagram (o el sitio
+          // web), sin pasar por el bot ni por el envío manual de /chats.
+          // Se registra igual, para que la conversación en /chats quede
+          // completa con todo lo que se le mandó al lead, sin importar
+          // desde dónde se haya mandado.
+          if (midEcho && yaRespondidos.has(midEcho)) continue;
+          if (midEcho) yaRespondidos.add(midEcho);
+
+          console.log(`📱 Mensaje manual detectado (mandado directo desde Instagram, no por el bot) a ${senderId}: "${mensajeTexto}"`);
+          await agregarAlHistorialDB(senderId, "assistant", mensajeTexto);
+          // Ya hubo respuesta humana (mandada directo desde la app) — se
+          // cancelan los seguimientos automáticos pendientes, igual que
+          // cuando se responde manualmente desde /chats.
+          await cancelarSeguimientosPendientesDB(senderId);
+          continue;
+        }
         const msgId = event.message?.mid;
         if (msgId && yaRespondidos.has(msgId)) continue;
         if (msgId) yaRespondidos.add(msgId);
@@ -2486,7 +2556,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado, bot_pausado")
       .order("actualizado_en", { ascending: false })
       .limit(200);
 
@@ -2530,7 +2600,8 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         etapa: c.etapa || null,
         etapa_nombre: etapaConfig ? (etapaConfig.nombre || etapaConfig.clave) : null,
         etiquetas: Array.isArray(c.etiquetas) ? c.etiquetas : [],
-        monto_pagado: Number(c.monto_pagado) || 0
+        monto_pagado: Number(c.monto_pagado) || 0,
+        bot_pausado: Boolean(c.bot_pausado)
       };
     }));
 
@@ -2781,9 +2852,24 @@ app.post("/chats/monto-pagado", requireAdminKey, async (req, res) => {
 // de salud/estética) de UNA conversación en particular — se pide bajo
 // demanda desde el desplegable en /chats, no automáticamente, para no
 // gastar en IA en conversaciones que nadie está revisando en ese momento.
+// Genera un resumen (edad, cuánto peso quiere perder, obstáculo, y dolores
+// de salud/estética) de UNA conversación en particular — se pide bajo
+// demanda desde el desplegable en /chats. Se GUARDA en Supabase (no solo en
+// la sesión del navegador) para que no se pierda al cambiar de pestaña o
+// recargar la página — solo se vuelve a gastar en IA si el admin le da al
+// botón de refrescar explícitamente (?forzar=true), o si nunca se había
+// generado antes.
 app.get("/chats/resumen/:senderId", requireAdminKey, async (req, res) => {
   try {
     const senderId = req.params.senderId;
+    const forzar = req.query.forzar === "true";
+
+    if (!forzar) {
+      const conv = await obtenerConversacion(senderId);
+      if (conv.resumen_lead) {
+        return res.json({ vacio: false, ...conv.resumen_lead, generado_en: conv.resumen_lead_generado_en, desde_cache: true });
+      }
+    }
 
     const { data: mensajes, error } = await supabase
       .from("mensajes_chat")
@@ -2805,7 +2891,29 @@ app.get("/chats/resumen/:senderId", requireAdminKey, async (req, res) => {
     if (!transcripcion.trim()) return res.json({ vacio: true });
 
     const resumen = await analizarDoloresYObstaculos(transcripcion);
-    res.json({ vacio: false, ...resumen });
+    const generadoEn = new Date().toISOString();
+    await guardarConversacion(senderId, { resumen_lead: resumen, resumen_lead_generado_en: generadoEn });
+
+    res.json({ vacio: false, ...resumen, generado_en: generadoEn, desde_cache: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Pausa o reanuda el bot para UN LEAD EN PARTICULAR — distinto del
+// interruptor general (botActivo), que apaga TODO el bot para todos. Se usa
+// cuando el admin quiere tomar una conversación específica a mano (ej. un
+// caso delicado, o alguien ya a punto de comprar) sin desactivar el bot
+// para el resto de los leads. Mientras está pausado, el bot sigue
+// guardando lo que el cliente escriba (no se pierde el registro), pero no
+// genera ninguna respuesta automática ni evalúa transiciones.
+app.post("/chats/pausar", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId, pausado } = req.body || {};
+    if (!senderId) return res.status(400).json({ error: "Falta senderId." });
+
+    await guardarConversacion(senderId, { bot_pausado: Boolean(pausado) });
+    res.json({ ok: true, bot_pausado: Boolean(pausado) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -6171,6 +6279,17 @@ ${estilosBase()}
     border-bottom:1px solid rgba(255,93,93,.25); display:none; align-items:center; gap:8px;
   }
   .handoff-banner.visible{ display:flex; }
+  .pausado-banner{
+    background:rgba(255,197,66,.1); color:#FFC542; font-size:13px; padding:11px 20px;
+    border-bottom:1px solid rgba(255,197,66,.3); display:none; align-items:center; gap:8px; font-weight:600;
+  }
+  .pausado-banner.visible{ display:flex; }
+  .btn-pausar-bot{
+    background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:20px; padding:5px 12px; font-size:11.5px; font-weight:600; cursor:pointer;
+  }
+  .btn-pausar-bot:hover{ border-color:#FFC542; color:#FFC542; }
+  .btn-pausar-bot.activo{ background:rgba(255,197,66,.16); border-color:rgba(255,197,66,.45); color:#FFC542; }
   .chat-status-bar{
     background:var(--surface); padding:8px 14px; border-bottom:1px solid var(--border);
     display:flex; align-items:center; gap:7px; flex-wrap:wrap;
@@ -6196,6 +6315,7 @@ ${estilosBase()}
   .resumen-lead-detalle{
     margin-top:10px; font-size:13px; color:var(--muted); line-height:1.5; font-style:italic;
   }
+  .resumen-lead-fecha{ margin-top:8px; font-size:11px; color:var(--muted-dim); }
   .status-sep{ color:var(--muted-dim); font-size:12px; flex-shrink:0; }
   .status-chip{
     display:inline-flex; align-items:center; font-size:11.5px; font-weight:600;
@@ -6418,6 +6538,9 @@ ${estilosBase()}
         <div class="handoff-banner" id="handoffBanner">
           ⏰ Esta conversación salió de la ventana de 24 horas de Instagram — el bot ya no puede mandar mensajes normales aquí, se requiere atención manual (o una plantilla aprobada).
         </div>
+        <div class="pausado-banner" id="pausadoBanner">
+          ⏸️ El bot está PAUSADO para esta conversación — no va a responder automáticamente hasta que le des a "▶️ Reanudar bot".
+        </div>
         <div class="chat-status-bar" id="chatStatusBar" style="display:none;">
           <span class="status-chip status-chip-califica" id="chipCalifica" style="display:none;">✅ Califica</span>
           <span class="status-chip status-chip-nocalifica" id="chipNoCalifica" style="display:none;">🚫 No Califica</span>
@@ -6443,6 +6566,8 @@ ${estilosBase()}
               <button type="button" id="btnConfirmarMonto">Guardar</button>
             </div>
           </div>
+          <span class="status-sep">·</span>
+          <button type="button" class="btn-pausar-bot" id="btnPausarBot" title="Pausar el bot para esta conversación — tú respondes manualmente">⏸️ Pausar bot</button>
         </div>
         <details class="resumen-lead" id="resumenLeadDetails" style="display:none;">
           <summary>📋 Resumen del lead <span id="resumenLeadRefrescar" title="Volver a generar" style="display:none;">🔄</span></summary>
@@ -6618,6 +6743,7 @@ ${estilosBase()}
         <div class="chat-list-item-text">
           <div class="uname-row">
             <span class="uname">\${escapar(nombreMostrar(c))}</span>
+            \${c.bot_pausado ? '<span class="califica-badge" title="Bot pausado — respondes tú manualmente">⏸️</span>' : ''}
             \${c.califica ? '<span class="califica-badge" title="Califica">✅</span>' : ''}
             \${c.no_califica ? '<span class="califica-badge" title="No Califica' + (c.razon_no_califica ? ": " + escapar(c.razon_no_califica) : "") + '">🚫</span>' : ''}
             \${c.agendo ? '<span class="califica-badge" title="Agendó">📅</span>' : ''}
@@ -6706,16 +6832,19 @@ ${estilosBase()}
   function renderHead(){
     const head = document.getElementById("chatHead");
     const banner = document.getElementById("handoffBanner");
+    const bannerPausado = document.getElementById("pausadoBanner");
     const statusBar = document.getElementById("chatStatusBar");
     const chipCalifica = document.getElementById("chipCalifica");
     const chipNoCalifica = document.getElementById("chipNoCalifica");
     const chipAgendo = document.getElementById("chipAgendo");
     const chipEnlace = document.getElementById("chipEnlace");
     const chipMonto = document.getElementById("chipMonto");
+    const btnPausarBot = document.getElementById("btnPausarBot");
     const resumenDetails = document.getElementById("resumenLeadDetails");
     if(!senderSeleccionado){
       head.innerHTML = '<span style="color:var(--muted); font-size:14px;">Selecciona una conversación</span>';
       banner.classList.remove("visible");
+      bannerPausado.classList.remove("visible");
       statusBar.style.display = "none";
       resumenDetails.style.display = "none";
       return;
@@ -6739,12 +6868,23 @@ ${estilosBase()}
     head.innerHTML = \`
       \${avatarHTML(conv)}
       <div class="chat-window-head-text">
-        <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}\${conv.califica ? ' <span title="Califica">✅</span>' : ''}\${conv.no_califica ? ' <span title="No Califica">🚫</span>' : ''}\${conv.agendo ? ' <span title="Agendó">📅</span>' : ''}\${conv.enlace_enviado ? ' <span title="Enlace enviado">🔗</span>' : ''}</div>
+        <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}\${conv.califica ? ' <span title="Califica">✅</span>' : ''}\${conv.no_califica ? ' <span title="No Califica">🚫</span>' : ''}\${conv.agendo ? ' <span title="Agendó">📅</span>' : ''}\${conv.enlace_enviado ? ' <span title="Enlace enviado">🔗</span>' : ''}\${conv.bot_pausado ? ' <span title="Bot pausado">⏸️</span>' : ''}</div>
         <div class="chat-window-head-id">\${conv.sender_id}</div>
       </div>
     \`;
     banner.classList.toggle("visible", conv.en_ventana_24h === false);
+    bannerPausado.classList.toggle("visible", Boolean(conv.bot_pausado));
     statusBar.style.display = "flex";
+
+    if(conv.bot_pausado){
+      btnPausarBot.textContent = "▶️ Reanudar bot";
+      btnPausarBot.classList.add("activo");
+      btnPausarBot.title = "Reanudar el bot para esta conversación";
+    } else {
+      btnPausarBot.textContent = "⏸️ Pausar bot";
+      btnPausarBot.classList.remove("activo");
+      btnPausarBot.title = "Pausar el bot para esta conversación — tú respondes manualmente";
+    }
 
     // Cada chip es pequeño y solo muestra el detalle (razón/fecha) al pasar
     // el mouse por encima (title) — así la barra queda compacta aunque
@@ -6905,6 +7045,30 @@ ${estilosBase()}
     }
   });
 
+  document.getElementById("btnPausarBot").addEventListener("click", async () => {
+    if(!senderSeleccionado) return;
+    const c = conversaciones.find(c => c.sender_id === senderSeleccionado);
+    const nuevoEstado = !(c?.bot_pausado);
+    const btn = document.getElementById("btnPausarBot");
+    btn.disabled = true;
+    try {
+      const res = await fetch("/chats/pausar", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ senderId: senderSeleccionado, pausado: nuevoEstado })
+      });
+      if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+      const data = await res.json();
+      if(data.ok){
+        if(c) c.bot_pausado = data.bot_pausado;
+        renderHead();
+      }
+    } catch (err) {
+      alert("No se pudo cambiar el estado del bot: " + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   // --- Resumen del lead (edad, peso a perder, obstáculo, dolores) ---
   function renderResumenLead(datos){
     const cont = document.getElementById("resumenLeadContenido");
@@ -6929,18 +7093,25 @@ ${estilosBase()}
         \${item("✨ Motivo estético", datos.dolor_estetico)}
       </div>
       \${datos.detalle ? '<div class="resumen-lead-detalle">"' + escapar(datos.detalle) + '"</div>' : ''}
+      \${datos.generado_en ? '<div class="resumen-lead-fecha">Generado el ' + formatearFecha(datos.generado_en) + '</div>' : ''}
     \`;
   }
 
   async function generarResumenLead(senderId, forzar){
     const cont = document.getElementById("resumenLeadContenido");
+    // Si ya está en la caché de esta sesión del navegador y no se pidió
+    // forzar, se usa directo sin llamar al servidor — pero aunque no esté
+    // en esta caché (ej. recién cambiaste de pestaña), el servidor YA tiene
+    // el resumen guardado de antes y lo devuelve sin volver a gastar en IA;
+    // solo se regenera si "forzar" es true (el botón 🔄).
     if(!forzar && resumenesCache[senderId]){
       renderResumenLead(resumenesCache[senderId]);
       return;
     }
-    cont.innerHTML = '<p class="hint" style="margin:0;">⏳ Analizando la conversación…</p>';
+    cont.innerHTML = '<p class="hint" style="margin:0;">⏳ ' + (forzar ? "Analizando de nuevo…" : "Buscando el resumen…") + '</p>';
     try {
-      const res = await fetch("/chats/resumen/" + encodeURIComponent(senderId));
+      const url = "/chats/resumen/" + encodeURIComponent(senderId) + (forzar ? "?forzar=true" : "");
+      const res = await fetch(url);
       if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
       const data = await res.json();
       if(!res.ok || data.error){
