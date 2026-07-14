@@ -2076,7 +2076,49 @@ async function procesarBuffer(senderId) {
       temperature: 0.7
     });
 
-    const respuestaCruda = completion.choices[0]?.message?.content?.trim();
+    let respuestaCruda = completion.choices[0]?.message?.content?.trim();
+
+    // Red de seguridad a nivel de código: si la etapa está marcada como
+    // "requiere pregunta final" (ver casilla en el panel) y la respuesta NO
+    // trae ningún signo de interrogación, se le pide a la IA que la
+    // reescriba UNA vez incluyendo la pregunta obligatoria — esto es porque
+    // en la práctica, solo con instrucciones de prompt (por más reforzadas
+    // que estén) el modelo a veces sigue omitiendo la pregunta final,
+    // especialmente cuando la explicación previa ya "se siente completa".
+    // No se hace si la respuesta es [[silencio]] (ahí no hace falta ninguna
+    // pregunta, esa etapa decidió no responder nada).
+    if (
+      etapaConfig?.requiere_pregunta_final &&
+      respuestaCruda &&
+      respuestaCruda.trim() !== "[[silencio]]" &&
+      !respuestaCruda.includes("?")
+    ) {
+      console.warn(`⚠️ ${senderId}: la etapa "${etapaConfig.clave}" requiere pregunta final pero la respuesta no la incluyó. Reintentando una vez con un recordatorio...`);
+      try {
+        const reintento = await openaiClient.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "system", content: promptSistema },
+            ...sanitizarHistorialParaIA(historial),
+            { role: "user", content: mensajeCompleto },
+            { role: "assistant", content: respuestaCruda },
+            { role: "user", content: "IMPORTANTE: tu respuesta anterior no incluyó la pregunta final obligatoria que esta etapa requiere. Vuelve a escribir la respuesta completa desde cero (no solo agregues la pregunta al final de lo anterior), asegurándote de terminar SIEMPRE con esa pregunta, en su propia burbuja separada con [[pausa:N]] antes, y usando únicamente el signo de interrogación de cierre (\"?\")." }
+          ],
+          max_tokens: 300,
+          temperature: 0.7
+        });
+        const respuestaReintentada = reintento.choices[0]?.message?.content?.trim();
+        if (respuestaReintentada) {
+          console.log(`🔁 ${senderId}: respuesta corregida con la pregunta final incluida: "${respuestaReintentada}"`);
+          respuestaCruda = respuestaReintentada;
+        }
+      } catch (err) {
+        console.error(`❌ Error en el reintento de pregunta final para ${senderId}:`, err.response?.data || err.message);
+        // Si el reintento falla, se sigue con la respuesta original — es
+        // mejor mandar algo (aunque le falte la pregunta) que no responder.
+      }
+    }
+
     let partesRespuestaIA = [];
     if (respuestaCruda) {
       console.log(`🤖 Respuesta IA (cruda): "${respuestaCruda}"`);
@@ -3858,6 +3900,7 @@ function normalizarEtapas(etapas) {
         mensajes_fijos: mensajesFijos,
         entrada: Boolean(e.entrada),
         elegir_mejor_condicion: Boolean(e.elegir_mejor_condicion),
+        requiere_pregunta_final: Boolean(e.requiere_pregunta_final),
         disparadores: normalizarDisparadores(e.disparadores),
         transiciones: normalizarTransiciones(e.transiciones)
       };
@@ -5875,6 +5918,10 @@ ${estilosBase()}
             <input type="checkbox" class="etapa-elegir-mejor" data-i="\${i}"\${et.elegir_mejor_condicion ? " checked" : ""}>
             <span>🎯 Si hay varias transiciones tipo "condición" en esta etapa, que la IA elija cuál es la MEJOR (en vez de la primera que diga que sí) — útil cuando tienes varias condiciones que podrían solaparse entre sí</span>
           </label>
+          <label class="etapa-entrada-check" style="margin-bottom:14px;">
+            <input type="checkbox" class="etapa-requiere-pregunta" data-i="\${i}"\${et.requiere_pregunta_final ? " checked" : ""}>
+            <span>❓ Esta etapa SIEMPRE debe terminar con una pregunta — si la IA se le olvida (pasa a veces, sobre todo al resolver dudas), el sistema le pide automáticamente que la vuelva a escribir incluyéndola, antes de mandarla</span>
+          </label>
           <div class="etapa-transiciones" data-i="\${i}"></div>
           <button type="button" class="add-paso etapa-add-transicion" data-i="\${i}">+ Agregar transición de esta etapa</button>
         </div>
@@ -5982,6 +6029,7 @@ ${estilosBase()}
     document.querySelectorAll(".etapa-mensaje-fijo").forEach((ta, i) => { if(etapas[i]) etapas[i].mensajes_fijos = ta.value.split("\\n").map(m => m.trim()).filter(Boolean); });
     document.querySelectorAll(".etapa-entrada").forEach((chk, i) => { if(etapas[i]) etapas[i].entrada = chk.checked; });
     document.querySelectorAll(".etapa-elegir-mejor").forEach((chk, i) => { if(etapas[i]) etapas[i].elegir_mejor_condicion = chk.checked; });
+    document.querySelectorAll(".etapa-requiere-pregunta").forEach((chk, i) => { if(etapas[i]) etapas[i].requiere_pregunta_final = chk.checked; });
     document.querySelectorAll(".etapa-disparadores").forEach(subcont => {
       const i = +subcont.dataset.i;
       if(!etapas[i]) return;
@@ -5996,7 +6044,7 @@ ${estilosBase()}
 
   document.getElementById("addEtapa").addEventListener("click", () => {
     leerEtapasDelDOM();
-    etapas.push({ clave: "", nombre: "", prompt: "", mensajes_fijos: [], entrada: false, elegir_mejor_condicion: false, disparadores: [], transiciones: [] });
+    etapas.push({ clave: "", nombre: "", prompt: "", mensajes_fijos: [], entrada: false, elegir_mejor_condicion: false, requiere_pregunta_final: false, disparadores: [], transiciones: [] });
     renderEtapas();
   });
 
