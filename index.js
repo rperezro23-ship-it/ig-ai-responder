@@ -5278,6 +5278,15 @@ ${estilosBase()}
             </span>
           </label>
 
+          <div style="padding:12px 14px; border-radius:10px; background:rgba(63,199,232,.08); border:1px solid rgba(63,199,232,.3); margin:0 0 18px;">
+            <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer;">
+              <input type="checkbox" id="franjaHorariaActivaEnlace" style="width:18px; height:18px; accent-color:#3FC7E8; cursor:pointer; margin-top:1px; flex-shrink:0;">
+              <span style="color:var(--text); font-size:14px; font-weight:500; line-height:1.55;">
+                🌙 Solo mandar dentro de esta franja horaria (hora de México) — es la misma opción que en "Seguimientos automáticos", aplica a ambos tipos por igual.
+              </span>
+            </label>
+          </div>
+
           <div id="pasosEnlace"></div>
           <button class="add-paso" id="addPasoEnlace" type="button">+ Agregar paso de seguimiento al enlace</button>
         </div>
@@ -5309,7 +5318,7 @@ ${estilosBase()}
             <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer;">
               <input type="checkbox" id="franjaHorariaActiva" style="width:18px; height:18px; accent-color:#3FC7E8; cursor:pointer; margin-top:1px; flex-shrink:0;">
               <span style="color:var(--text); font-size:14px; font-weight:500; line-height:1.55;">
-                🌙 Solo mandar seguimientos dentro de esta franja horaria (hora de México) — si a un seguimiento le toca fuera de este rango (ej. de madrugada), se espera y se manda en cuanto se entre a la franja, sin perderse.
+                🌙 Solo mandar seguimientos dentro de esta franja horaria (hora de México) — aplica tanto a estos seguimientos normales como a los especiales del enlace. Si a un seguimiento le toca fuera de este rango (ej. de madrugada), se espera y se manda en cuanto se entre a la franja, sin perderse.
               </span>
             </label>
             <div style="display:flex; align-items:center; gap:12px; margin-top:12px; margin-left:28px;">
@@ -5534,6 +5543,16 @@ ${estilosBase()}
   });
   document.getElementById("pararSeguimientosSiAgendoEnlace").addEventListener("change", (e) => {
     document.getElementById("pararSeguimientosSiAgendo").checked = e.target.checked;
+  });
+
+  // Mismo patrón para la franja horaria: es una sola opción global que
+  // aplica a ambos tipos de seguimiento por igual, con dos casillas
+  // (una en cada tarjeta) sincronizadas entre sí.
+  document.getElementById("franjaHorariaActiva").addEventListener("change", (e) => {
+    document.getElementById("franjaHorariaActivaEnlace").checked = e.target.checked;
+  });
+  document.getElementById("franjaHorariaActivaEnlace").addEventListener("change", (e) => {
+    document.getElementById("franjaHorariaActiva").checked = e.target.checked;
   });
 
   function leerPasosEnlaceDelDOM(){
@@ -6139,6 +6158,7 @@ ${estilosBase()}
     document.getElementById("pararSeguimientosSiAgendo").checked = Boolean(cfg.parar_seguimientos_si_agendo);
     document.getElementById("pararSeguimientosSiAgendoEnlace").checked = Boolean(cfg.parar_seguimientos_si_agendo);
     document.getElementById("franjaHorariaActiva").checked = Boolean(cfg.franja_horaria_activa);
+    document.getElementById("franjaHorariaActivaEnlace").checked = Boolean(cfg.franja_horaria_activa);
     document.getElementById("franjaHorariaDesde").value = cfg.franja_horaria_desde || "08:00";
     document.getElementById("franjaHorariaHasta").value = cfg.franja_horaria_hasta || "23:00";
     document.getElementById("mensajesErrorAudio").value = Array.isArray(cfg.mensajes_error_audio) ? cfg.mensajes_error_audio.join("\\n") : "";
