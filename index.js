@@ -1019,6 +1019,14 @@ function sleep(ms) {
 // seguridad debajo del límite real para no rozarlo.
 const LIMITE_CARACTERES_INSTAGRAM = 950;
 
+// Además del límite duro de Instagram de arriba, se usa uno mucho más chico
+// para dividir cualquier texto que sea largo (más de ~4 líneas visuales en
+// una pantalla de celular) en varias burbujas más cortas — aunque el texto
+// esté muy por debajo del límite real de Instagram, un bloque de texto
+// grande se siente pesado de leer en un chat, así que se corta igual que si
+// el propio prompt hubiera usado [[pausa:N]] entre cada parte.
+const LIMITE_CARACTERES_BURBUJA_NATURAL = 180;
+
 // Divide un texto largo en varios mensajes que respeten el límite de
 // caracteres de Instagram. Es una red de seguridad: si el prompt no dejó
 // suficientemente claro que la IA debe ser breve y de todos modos genera una
@@ -1035,7 +1043,13 @@ function dividirTextoLargo(texto, limite = LIMITE_CARACTERES_INSTAGRAM) {
   while (restante.length > limite) {
     let corte = restante.lastIndexOf("\n\n", limite);
     if (corte < limite * 0.4) corte = restante.lastIndexOf("\n", limite);
-    if (corte < limite * 0.4) corte = restante.lastIndexOf(". ", limite);
+    if (corte < limite * 0.4) {
+      // Al cortar por ". " hay que quedarse CON el punto en la parte actual
+      // (+1) — si no, el punto queda colgando al inicio de la siguiente
+      // burbuja (ej. ". La buena noticia es que...", con el punto suelto).
+      const cortePorPunto = restante.lastIndexOf(". ", limite);
+      if (cortePorPunto >= limite * 0.4) corte = Math.min(cortePorPunto + 1, limite);
+    }
     if (corte < limite * 0.4) corte = restante.lastIndexOf(" ", limite);
     if (corte < limite * 0.4) corte = limite; // no se encontró un buen punto de corte, se corta a la fuerza
 
@@ -1090,14 +1104,14 @@ const MARCADOR_MULTIMEDIA_REGEX = /\[\[\s*(audio|foto|pausa|etapa)\s*:\s*([a-zA-
 // el string original: { tipo:"texto", valor }, { tipo:"audio"|"foto", clave },
 // { tipo:"pausa", segundos } o { tipo:"etapa", clave }.
 function parsearPartes(contenidoCrudo) {
-  const partes = [];
+  const partesCrudas = [];
   let ultimoIndice = 0;
   const regex = new RegExp(MARCADOR_MULTIMEDIA_REGEX.source, "gi");
   let match;
 
   while ((match = regex.exec(contenidoCrudo)) !== null) {
     const textoPrevio = contenidoCrudo.slice(ultimoIndice, match.index).trim();
-    if (textoPrevio) partes.push({ tipo: "texto", valor: textoPrevio });
+    if (textoPrevio) partesCrudas.push({ tipo: "texto", valor: textoPrevio });
 
     const tipoMarcador = match[1].toLowerCase();
     const valorMarcador = match[2];
@@ -1105,19 +1119,43 @@ function parsearPartes(contenidoCrudo) {
     if (tipoMarcador === "pausa") {
       const segundos = parseFloat(valorMarcador);
       if (Number.isFinite(segundos) && segundos > 0) {
-        partes.push({ tipo: "pausa", segundos });
+        partesCrudas.push({ tipo: "pausa", segundos });
       }
     } else if (tipoMarcador === "etapa") {
-      partes.push({ tipo: "etapa", clave: valorMarcador.toLowerCase() });
+      partesCrudas.push({ tipo: "etapa", clave: valorMarcador.toLowerCase() });
     } else {
-      partes.push({ tipo: tipoMarcador, clave: valorMarcador.toLowerCase() });
+      partesCrudas.push({ tipo: tipoMarcador, clave: valorMarcador.toLowerCase() });
     }
 
     ultimoIndice = match.index + match[0].length;
   }
 
   const textoFinal = contenidoCrudo.slice(ultimoIndice).trim();
-  if (textoFinal) partes.push({ tipo: "texto", valor: textoFinal });
+  if (textoFinal) partesCrudas.push({ tipo: "texto", valor: textoFinal });
+
+  // Cualquier parte de texto que sea larga (más de ~4 líneas visuales) se
+  // divide automáticamente en varias burbujas más cortas, con una pausa
+  // natural entre cada una — igual que si el propio prompt hubiera usado
+  // [[pausa:N]] a propósito. Esto es una red de seguridad a nivel de código:
+  // no depende de que la IA se acuerde de partir sus respuestas largas por
+  // su cuenta (ya vimos que las instrucciones de solo-prompt a veces no se
+  // siguen de forma consistente), así que siempre queda parejo.
+  const partes = [];
+  for (const parte of partesCrudas) {
+    if (parte.tipo === "texto" && parte.valor.length > LIMITE_CARACTERES_BURBUJA_NATURAL) {
+      const bloques = dividirTextoLargo(parte.valor, LIMITE_CARACTERES_BURBUJA_NATURAL);
+      bloques.forEach((bloque, i) => {
+        partes.push({ tipo: "texto", valor: bloque });
+        if (i < bloques.length - 1) {
+          // Pausa corta y natural entre cada burbuja (4 a 6 segundos),
+          // simulando que se está escribiendo en el momento.
+          partes.push({ tipo: "pausa", segundos: Math.round((4 + Math.random() * 2) * 10) / 10 });
+        }
+      });
+    } else {
+      partes.push(parte);
+    }
+  }
 
   return partes;
 }
