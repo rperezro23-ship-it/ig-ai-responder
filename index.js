@@ -181,11 +181,11 @@ async function obtenerConversacion(senderId) {
 
   if (error) {
     console.error("❌ Error leyendo conversación de Supabase:", error.message);
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0, primer_mensaje_en: null, bot_pausado: false, resumen_lead: null, resumen_lead_generado_en: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0, primer_mensaje_en: null, bot_pausado: false, resumen_lead: null, resumen_lead_generado_en: null, primer_mensaje_texto: null };
   }
 
   if (!data) {
-    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0, primer_mensaje_en: null, bot_pausado: false, resumen_lead: null, resumen_lead_generado_en: null };
+    return { sender_id: senderId, historial: [], rotacion: {}, ultimo_mensaje_usuario: null, califica: false, calificado_en: null, razon_calificacion: null, no_califica: false, no_califica_en: null, razon_no_califica: null, agendo: false, agendo_en: null, enlace_enviado: false, enlace_enviado_en: null, enlace_pasos_enviados: 0, etapa: null, visto_hasta: null, ultimo_mensaje_bot_en: null, etiquetas: [], monto_pagado: 0, primer_mensaje_en: null, bot_pausado: false, resumen_lead: null, resumen_lead_generado_en: null, primer_mensaje_texto: null };
   }
 
   return data;
@@ -234,15 +234,21 @@ async function guardarMensajeChatCompleto(senderId, role, content) {
   if (error) console.error("❌ Error guardando mensaje en mensajes_chat:", error.message);
 }
 
-async function registrarMensajeUsuario(senderId) {
+async function registrarMensajeUsuario(senderId, textoMensaje) {
   const campos = { ultimo_mensaje_usuario: new Date().toISOString() };
 
-  // "primer_mensaje_en" se guarda UNA SOLA VEZ — la primera vez que este
-  // sender_id le escribe al bot. Sirve para poder filtrar el dashboard por
-  // periodo/mes de forma correcta (cuándo empezó la conversación), en vez
-  // de por "última actividad" (que cambia cada vez que responde algo).
+  // "primer_mensaje_en" y "primer_mensaje_texto" se guardan UNA SOLA VEZ —
+  // la primera vez que este sender_id le escribe al bot. La fecha sirve
+  // para poder filtrar el dashboard por periodo/mes de forma correcta. El
+  // TEXTO sirve para que cualquier etapa (ej. "no califica", que necesita
+  // saber qué lead magnet pidió al inicio) pueda referirse a él de forma
+  // confiable, sin depender de que ese mensaje siga estando en el
+  // historial reciente — en una conversación larga que pasó por varias
+  // etapas, el primer mensaje casi seguro ya se recortó del historial que
+  // ve la IA en ese momento (por el límite de mensajes que se mantienen).
   const conv = await obtenerConversacion(senderId);
   if (!conv.primer_mensaje_en) campos.primer_mensaje_en = campos.ultimo_mensaje_usuario;
+  if (!conv.primer_mensaje_texto && textoMensaje) campos.primer_mensaje_texto = textoMensaje;
 
   await guardarConversacion(senderId, campos);
 }
@@ -2061,6 +2067,16 @@ async function procesarBuffer(senderId) {
       promptSistema += `\n\nNOTA IMPORTANTE PARA ESTE MENSAJE: Calendly confirmó que la llamada del cliente quedó agendada para: ${fechaEvento} (hora del propio cliente). Puedes mencionar este día y hora de forma natural en tu respuesta (ej. para confirmarle o recordárselo), no hace falta que se lo repitas palabra por palabra, solo que quede claro que sabes cuándo es.`;
     }
 
+    // El PRIMER mensaje real de este lead se guarda aparte (no depende del
+    // historial reciente, que se recorta con el tiempo) — se le pasa a la
+    // IA como referencia siempre disponible, para etapas que necesiten
+    // saber cómo empezó la conversación (ej. "no califica", que necesita
+    // identificar qué lead magnet pidió al inicio) sin arriesgarse a que
+    // ese mensaje ya no esté visible en el historial reciente.
+    if (conv.primer_mensaje_texto) {
+      promptSistema += `\n\nCONTEXTO: el PRIMER mensaje que este lead mandó, el que inició toda esta conversación, fue textualmente: "${conv.primer_mensaje_texto}". Úsalo como referencia cuando necesites saber cómo empezó todo esto (ej. qué recurso pidió), aunque ya no aparezca en los mensajes recientes de abajo.`;
+    }
+
     if (etapaConfig) {
       console.log(`🧭 ${senderId} está en la etapa "${etapaConfig.clave}" — se usa su prompt propio.`);
     }
@@ -2405,7 +2421,7 @@ app.post("/webhook", async (req, res) => {
 
       console.log(`📨 Mensaje recibido de ${senderId}: "${mensaje}" (esperando a ver si manda más líneas...)`);
 
-      await registrarMensajeUsuario(senderId);
+      await registrarMensajeUsuario(senderId, mensaje);
       await cancelarSeguimientosPendientesDB(senderId);
       // Nota: si el lead ya tiene el seguimiento especial del enlace en
       // curso, NO se apaga aquí por responder — programarSeguimientosDB lo
