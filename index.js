@@ -399,6 +399,36 @@ async function procesarSeguimientosPendientesDB() {
       }
     }
 
+    // Franja horaria permitida: si un seguimiento le tocaría a las 3am (ej.
+    // porque el cliente escribió de madrugada y el paso está programado a
+    // pocas horas después), no tiene sentido mandarlo mientras está
+    // dormido — se espera a que la hora actual (en la zona horaria de
+    // México) caiga dentro del rango configurado. NO se marca como
+    // enviado — se queda pendiente para que el próximo cron lo revise de
+    // nuevo, y se manda en cuanto se entra a la franja permitida (no
+    // espera a que llegue exactamente la MISMA hora al día siguiente).
+    if (configActual.franja_horaria_activa) {
+      const horaActualMexico = new Date().toLocaleTimeString("en-GB", {
+        timeZone: "America/Mexico_City", hour: "2-digit", minute: "2-digit", hour12: false
+      }); // "HH:MM"
+      const [horaDesde, minDesde] = (configActual.franja_horaria_desde || "08:00").split(":").map(Number);
+      const [horaHasta, minHasta] = (configActual.franja_horaria_hasta || "23:00").split(":").map(Number);
+      const [horaActual, minActual] = horaActualMexico.split(":").map(Number);
+
+      const minutosDesde = horaDesde * 60 + minDesde;
+      const minutosHasta = horaHasta * 60 + minHasta;
+      const minutosActual = horaActual * 60 + minActual;
+
+      const dentroDeFranja = minutosDesde <= minutosHasta
+        ? (minutosActual >= minutosDesde && minutosActual <= minutosHasta) // franja normal, ej. 08:00-23:00
+        : (minutosActual >= minutosDesde || minutosActual <= minutosHasta); // franja que cruza medianoche, ej. 22:00-06:00
+
+      if (!dentroDeFranja) {
+        console.log(`🌙 Seguimiento (${tipo}, paso ${pasoIndex}) para ${senderId} en espera: son las ${horaActualMexico} en México, fuera de la franja permitida (${configActual.franja_horaria_desde}-${configActual.franja_horaria_hasta}).`);
+        continue;
+      }
+    }
+
     // Se namespacea la clave de rotación por tipo, para que el paso 0 normal
     // y el paso 0 del enlace no compartan el mismo contador de rotación.
     const claveRotacion = `${tipo}_${pasoIndex}`;
@@ -3468,7 +3498,10 @@ let configActual = {
   calendly_webhook_uri: "",
   calendly_conectado_en: null,
   dashboard_etiqueta_asistio: "", // nombre exacto de la etiqueta manual que representa "asistió a la llamada"
-  dashboard_etiqueta_compro: ""   // nombre exacto de la etiqueta manual que representa "compró / se cerró"
+  dashboard_etiqueta_compro: "",  // nombre exacto de la etiqueta manual que representa "compró / se cerró"
+  franja_horaria_activa: false,
+  franja_horaria_desde: "08:00",
+  franja_horaria_hasta: "23:00"
 };
 
 // Cliente de OpenAI: se reconstruye cada vez que cambia configActual.openai_api_key
@@ -3950,7 +3983,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
     const { ai_prompt, contexto_base, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
             calificacion_activa, calificar_automatico_con_enlace, no_seguir_si_no_califica, parar_seguimientos_si_agendo, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
             transiciones_generales_elegir_mejor, mensajes_error_audio, calendly_token, calendly_pregunta_instagram,
-            dashboard_etiqueta_asistio, dashboard_etiqueta_compro } = req.body || {};
+            dashboard_etiqueta_asistio, dashboard_etiqueta_compro, franja_horaria_activa, franja_horaria_desde, franja_horaria_hasta } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -3967,6 +4000,9 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof calendly_pregunta_instagram === "string") nuevaConfig.calendly_pregunta_instagram = calendly_pregunta_instagram.trim();
     if (typeof dashboard_etiqueta_asistio === "string") nuevaConfig.dashboard_etiqueta_asistio = dashboard_etiqueta_asistio.trim();
     if (typeof dashboard_etiqueta_compro === "string") nuevaConfig.dashboard_etiqueta_compro = dashboard_etiqueta_compro.trim();
+    if (typeof franja_horaria_activa === "boolean") nuevaConfig.franja_horaria_activa = franja_horaria_activa;
+    if (typeof franja_horaria_desde === "string" && /^\d{2}:\d{2}$/.test(franja_horaria_desde)) nuevaConfig.franja_horaria_desde = franja_horaria_desde;
+    if (typeof franja_horaria_hasta === "string" && /^\d{2}:\d{2}$/.test(franja_horaria_hasta)) nuevaConfig.franja_horaria_hasta = franja_horaria_hasta;
     if (typeof calificacion_activa === "boolean") nuevaConfig.calificacion_activa = calificacion_activa;
     if (typeof calificar_automatico_con_enlace === "boolean") nuevaConfig.calificar_automatico_con_enlace = calificar_automatico_con_enlace;
     if (typeof no_seguir_si_no_califica === "boolean") nuevaConfig.no_seguir_si_no_califica = no_seguir_si_no_califica;
@@ -5269,6 +5305,25 @@ ${estilosBase()}
             </span>
           </label>
 
+          <div style="padding:12px 14px; border-radius:10px; background:rgba(63,199,232,.08); border:1px solid rgba(63,199,232,.3); margin:0 0 18px;">
+            <label style="display:flex; align-items:flex-start; gap:10px; cursor:pointer;">
+              <input type="checkbox" id="franjaHorariaActiva" style="width:18px; height:18px; accent-color:#3FC7E8; cursor:pointer; margin-top:1px; flex-shrink:0;">
+              <span style="color:var(--text); font-size:14px; font-weight:500; line-height:1.55;">
+                🌙 Solo mandar seguimientos dentro de esta franja horaria (hora de México) — si a un seguimiento le toca fuera de este rango (ej. de madrugada), se espera y se manda en cuanto se entre a la franja, sin perderse.
+              </span>
+            </label>
+            <div style="display:flex; align-items:center; gap:12px; margin-top:12px; margin-left:28px;">
+              <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:var(--muted);">
+                Desde
+                <input type="time" id="franjaHorariaDesde" style="background:var(--surface-3); border:1px solid var(--border); color:var(--text); border-radius:7px; padding:6px 8px; font-size:13px; font-family:var(--body);">
+              </label>
+              <label style="display:flex; align-items:center; gap:6px; font-size:13px; color:var(--muted);">
+                Hasta
+                <input type="time" id="franjaHorariaHasta" style="background:var(--surface-3); border:1px solid var(--border); color:var(--text); border-radius:7px; padding:6px 8px; font-size:13px; font-family:var(--body);">
+              </label>
+            </div>
+          </div>
+
           <div id="pasos"></div>
           <button class="add-paso" id="addPaso" type="button">+ Agregar paso de seguimiento</button>
         </div>
@@ -6083,6 +6138,9 @@ ${estilosBase()}
     document.getElementById("noSeguirSiNoCalifica").checked = Boolean(cfg.no_seguir_si_no_califica);
     document.getElementById("pararSeguimientosSiAgendo").checked = Boolean(cfg.parar_seguimientos_si_agendo);
     document.getElementById("pararSeguimientosSiAgendoEnlace").checked = Boolean(cfg.parar_seguimientos_si_agendo);
+    document.getElementById("franjaHorariaActiva").checked = Boolean(cfg.franja_horaria_activa);
+    document.getElementById("franjaHorariaDesde").value = cfg.franja_horaria_desde || "08:00";
+    document.getElementById("franjaHorariaHasta").value = cfg.franja_horaria_hasta || "23:00";
     document.getElementById("mensajesErrorAudio").value = Array.isArray(cfg.mensajes_error_audio) ? cfg.mensajes_error_audio.join("\\n") : "";
     document.getElementById("criteriosCalificacion").value = cfg.criterios_calificacion || "";
     document.getElementById("enlaceCalificacion").value = cfg.enlace_calificacion || "";
@@ -6327,6 +6385,9 @@ ${estilosBase()}
       calificar_automatico_con_enlace: document.getElementById("calificarAutomaticoConEnlace").checked,
       no_seguir_si_no_califica: document.getElementById("noSeguirSiNoCalifica").checked,
       parar_seguimientos_si_agendo: document.getElementById("pararSeguimientosSiAgendo").checked,
+      franja_horaria_activa: document.getElementById("franjaHorariaActiva").checked,
+      franja_horaria_desde: document.getElementById("franjaHorariaDesde").value || "08:00",
+      franja_horaria_hasta: document.getElementById("franjaHorariaHasta").value || "23:00",
       mensajes_error_audio: document.getElementById("mensajesErrorAudio").value.split("\\n").map(m => m.trim()).filter(Boolean),
       criterios_calificacion: document.getElementById("criteriosCalificacion").value,
       enlace_calificacion: document.getElementById("enlaceCalificacion").value,
