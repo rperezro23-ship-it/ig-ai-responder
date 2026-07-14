@@ -2045,6 +2045,17 @@ async function procesarBuffer(senderId) {
 
       await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
 
+      // Si el modelo decide que la conversación ya llegó a un cierre natural
+      // (ej. "gracias" -> "de nada" -> "vale gracias" ...) puede responder
+      // ÚNICAMENTE con [[silencio]] — esto le indica al sistema que NO hay
+      // que mandar ningún mensaje esta vez, igual que haría una persona
+      // real, que no sigue respondiendo indefinidamente a un intercambio de
+      // cortesías ya cerrado (evita el bucle de "gracias"/"de nada" sin fin).
+      // El mensaje del cliente igual queda guardado en el historial arriba,
+      // solo se omite la respuesta del bot.
+      if (respuestaCruda.trim() === "[[silencio]]") {
+        console.log(`🤫 ${senderId}: la IA decidió no responder (conversación ya cerrada con cortesías, evitando un bucle sin fin).`);
+      } else {
       partesRespuestaIA = parsearPartes(respuestaCruda);
 
       // Si el prompt decide mandar la respuesta en varias burbujas (con
@@ -2092,6 +2103,7 @@ async function procesarBuffer(senderId) {
 
         await guardarConversacion(senderId, camposEnlace);
       }
+      } // fin del "else" de [[silencio]]
     }
 
     // Se mandan todos los disparadores activados (ya calculados arriba). Si
