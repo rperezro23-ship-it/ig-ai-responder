@@ -1343,10 +1343,23 @@ function grupoDePalabrasCoincide(mensajeNormalizado, lineaConComas) {
   return palabras.every(p => mensajeNormalizado.includes(p));
 }
 
-function buscarDisparadoresActivados(mensajeUsuario, disparadores) {
+function buscarDisparadoresActivados(mensajeUsuario, disparadores, etiquetasConv) {
   const mensajeNormalizado = normalizarParaComparar(mensajeUsuario);
+  const etiquetasNormalizadas = (etiquetasConv || []).map(normalizarParaComparar);
+
   return (disparadores || []).filter((d) => {
     if (!Array.isArray(d.frases) || d.frases.length === 0) return false;
+
+    // Modo "etiqueta": en vez de comparar contra el texto del mensaje, se
+    // revisa si la conversación YA TIENE alguna de las etiquetas listadas
+    // (cada "frase" aquí es en realidad el nombre de una etiqueta a
+    // buscar) — 100% determinista, no depende de que el mensaje actual
+    // mencione nada en particular. Útil para, por ejemplo, disparar el
+    // envío de un recurso en la etapa "no califica" según qué etiqueta se
+    // le puso al lead desde el principio de la conversación.
+    if (d.coincidencia === "etiqueta") {
+      return d.frases.some((etq) => etiquetasNormalizadas.includes(normalizarParaComparar(etq)));
+    }
 
     if (d.coincidencia === "combinaciones") {
       return d.frases.some((linea) => grupoDePalabrasCoincide(mensajeNormalizado, linea));
@@ -1370,6 +1383,29 @@ function partesIncluyenMedia(partes, tipo, clave) {
 // IA) como en el camino "exclusivo" (el disparador reemplaza por completo la
 // respuesta de ese turno).
 async function enviarDisparador(senderId, disparador, origenLog) {
+  // Si este disparador tiene configurada una etiqueta para agregar, se
+  // aplica SIEMPRE que se active — sin importar el tipo (audio/foto/mensaje
+  // pueden ADEMÁS etiquetar; el tipo "etiqueta" es solo para esto). Se hace
+  // de una vez, antes de la espera/envío, para no perderla si algo más
+  // abajo falla.
+  if (disparador.etiqueta_a_agregar) {
+    try {
+      const conv = await obtenerConversacion(senderId);
+      const etiquetasActuales = Array.isArray(conv.etiquetas) ? conv.etiquetas : [];
+      if (!etiquetasActuales.includes(disparador.etiqueta_a_agregar)) {
+        console.log(`🏷️ Disparador automático (${origenLog}): agregando la etiqueta "${disparador.etiqueta_a_agregar}" a ${senderId}.`);
+        await guardarConversacion(senderId, { etiquetas: [...etiquetasActuales, disparador.etiqueta_a_agregar] });
+        await registrarEtiquetaCreada(disparador.etiqueta_a_agregar);
+      }
+    } catch (err) {
+      console.error(`❌ Error agregando la etiqueta automática a ${senderId}:`, err.message);
+    }
+  }
+
+  // El tipo "etiqueta" no manda ningún contenido — su único propósito es
+  // marcar la conversación (ya se hizo arriba), así que termina aquí.
+  if (disparador.tipo === "etiqueta") return;
+
   const esperaSegundos = Number.isFinite(disparador.pausa_segundos) ? disparador.pausa_segundos : 2;
   if (esperaSegundos > 0) await sleep(esperaSegundos * 1000);
 
@@ -1440,14 +1476,21 @@ function obtenerEtapaConfig(claveEtapa) {
 // Las transiciones con coincidencia === "condicion" NO se evalúan aquí (son
 // más costosas, requieren IA) — se revisan aparte en evaluarTransicionesPorCondicion,
 // y solo como fallback si ninguna transición por palabra clave coincidió.
-function buscarTransicionActivada(mensajeUsuario, transiciones) {
+function buscarTransicionActivada(mensajeUsuario, transiciones, etiquetasConv) {
   const mensajeNormalizado = normalizarParaComparar(mensajeUsuario);
+  const etiquetasNormalizadas = (etiquetasConv || []).map(normalizarParaComparar);
+
   for (const t of (transiciones || [])) {
     if (typeof t.etapa_destino !== "string") continue;
     if (t.coincidencia === "condicion") continue;
     if (!Array.isArray(t.frases)) continue;
 
-    const coincide = t.coincidencia === "combinaciones"
+    // Igual que en disparadores: modo "etiqueta" revisa si la conversación
+    // ya tiene alguna de las etiquetas listadas, en vez de comparar contra
+    // el texto del mensaje actual.
+    const coincide = t.coincidencia === "etiqueta"
+      ? t.frases.some((etq) => etiquetasNormalizadas.includes(normalizarParaComparar(etq)))
+      : t.coincidencia === "combinaciones"
       ? t.frases.some((linea) => grupoDePalabrasCoincide(mensajeNormalizado, linea))
       : t.frases.some((frase) => coincideFrase(mensajeNormalizado, normalizarParaComparar(frase), t.coincidencia));
 
@@ -1908,7 +1951,7 @@ async function procesarBuffer(senderId) {
     // — así la respuesta ya sale con el prompt de la nueva etapa, sin
     // depender de que la IA decida poner el marcador [[etapa:...]].
     const listaTransiciones = etapaConfig ? (etapaConfig.transiciones || []) : (configActual.transiciones_generales || []);
-    let transicion = buscarTransicionActivada(mensajeCompleto, listaTransiciones);
+    let transicion = buscarTransicionActivada(mensajeCompleto, listaTransiciones, conv.etiquetas);
 
     // Si ninguna transición por palabra clave coincidió, se revisan las de
     // tipo "condición" (más costosas, requieren una llamada a la IA) — así
@@ -2031,11 +2074,11 @@ async function procesarBuffer(senderId) {
     // de /panel. Se calculan ANTES de llamar a la IA para poder detectar si
     // alguno es "exclusivo" (ver más abajo).
     const disparadoresDeEtapa = etapaConfig ? (etapaConfig.disparadores || []) : [];
-    let disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, disparadoresDeEtapa);
+    let disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, disparadoresDeEtapa, conv.etiquetas);
     let disparadoresSonDeEtapa = disparadoresActivados.length > 0;
 
     if (!disparadoresSonDeEtapa) {
-      disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, configActual.disparadores || []);
+      disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, configActual.disparadores || [], conv.etiquetas);
     }
 
     const origenLog = disparadoresSonDeEtapa ? `etapa "${etapaConfig?.clave}"` : "general";
@@ -3869,10 +3912,10 @@ app.get("/config", requireAdminKey, (req, res) => {
 function normalizarDisparadores(disparadores) {
   if (!Array.isArray(disparadores)) return [];
   return disparadores
-    .filter(d => d && (d.tipo === "audio" || d.tipo === "foto" || d.tipo === "mensaje"))
+    .filter(d => d && (d.tipo === "audio" || d.tipo === "foto" || d.tipo === "mensaje" || d.tipo === "etiqueta"))
     .map(d => {
       let frases = Array.isArray(d.frases) ? d.frases.map(f => String(f).trim()).filter(Boolean) : [];
-      let coincidencia = (d.coincidencia === "exacta" || d.coincidencia === "combinaciones") ? d.coincidencia : "contiene";
+      let coincidencia = (d.coincidencia === "exacta" || d.coincidencia === "combinaciones" || d.coincidencia === "etiqueta") ? d.coincidencia : "contiene";
 
       // Compatibilidad con guardados anteriores al modo "combinaciones": el
       // modo "todas" (una sola combinación, una palabra por línea) se migra
@@ -3890,11 +3933,20 @@ function normalizarDisparadores(disparadores) {
         frases,
         pausa_segundos: Number.isFinite(d.pausa_segundos) && d.pausa_segundos >= 0 ? d.pausa_segundos : 2,
         coincidencia,
-        exclusivo: Boolean(d.exclusivo)
+        exclusivo: Boolean(d.exclusivo),
+        // Etiqueta que se agrega a la conversación cuando este disparador se
+        // activa — funciona con CUALQUIER tipo (audio/foto/mensaje pueden
+        // ADEMÁS etiquetar; el tipo "etiqueta" es exclusivamente para esto,
+        // sin mandar ningún contenido).
+        etiqueta_a_agregar: typeof d.etiqueta_a_agregar === "string" ? d.etiqueta_a_agregar.trim() : ""
       };
     })
     .filter(d => d.frases.length > 0)
-    .filter(d => d.tipo === "mensaje" ? Boolean(d.contenido) : Boolean(d.clave));
+    .filter(d => {
+      if (d.tipo === "mensaje") return Boolean(d.contenido);
+      if (d.tipo === "etiqueta") return Boolean(d.etiqueta_a_agregar);
+      return Boolean(d.clave);
+    });
 }
 
 // Valida y normaliza un array de transiciones de etapa por palabra clave
@@ -5587,9 +5639,12 @@ ${estilosBase()}
       const div = document.createElement("div");
       div.className = "paso";
       const esMensaje = d.tipo === "mensaje";
+      const esSoloEtiqueta = d.tipo === "etiqueta";
       const campoContenido = esMensaje ? \`
         <label>Contenido del mensaje (acepta <code style="background:var(--surface-3); padding:1px 5px; border-radius:4px; font-family:var(--mono); font-size:12px;">[[audio:clave]]</code>, <code style="background:var(--surface-3); padding:1px 5px; border-radius:4px; font-family:var(--mono); font-size:12px;">[[foto:clave]]</code>, <code style="background:var(--surface-3); padding:1px 5px; border-radius:4px; font-family:var(--mono); font-size:12px;">[[pausa:N]]</code> — se manda TAL CUAL, sin pasar por la IA)</label>
         <textarea class="\${prefijoClase}-contenido" data-i="\${i}" rows="3" placeholder="Ej: Te dejo un audio con más detalles[[pausa:3]][[audio:precio]]¿Qué te parece?">\${(d.contenido || "").replace(/</g,"&lt;")}</textarea>
+      \` : esSoloEtiqueta ? \`
+        <p class="hint" style="margin:0;">Este tipo no manda ningún contenido — solo pone la etiqueta que escribas abajo. Útil para, por ejemplo, marcar desde el principio con qué recurso llegó un lead (ej. "Dieta"), y usarla después en otra etapa con coincidencia "por etiqueta" para saber qué mandarle.</p>
       \` : \`
         <label>Cuál mandar</label>
         <select class="\${prefijoClase}-clave" data-i="\${i}">\${opcionesClaveHTML(d.tipo, d.clave)}</select>
@@ -5602,14 +5657,15 @@ ${estilosBase()}
           </div>
           <button type="button" class="\${prefijoClase}-quitar" data-i="\${i}">quitar</button>
         </div>
-        <label>Palabras o frases que lo activan (una por línea)</label>
-        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: precio&#10;cuanto cuesta&#10;inversion" style="margin-bottom:6px;">\${(d.frases || []).join("\\n")}</textarea>
-        <p class="hint" style="margin:0 0 10px; font-size:12.5px;">Con "CUALQUIERA" o "EXACTAMENTE", cada línea es una alternativa distinta. Con "COMBINACIONES", cada línea es un grupo de palabras separadas por coma que TIENEN que estar TODAS presentes (ej. una línea "cansancio, estetico" activa solo si el mensaje trae las dos); puedes poner varias líneas-combinación distintas (ej. otra línea "hipertension, estetico") y con que se cumpla CUALQUIERA de ellas, activa.</p>
+        <label>\${d.coincidencia === "etiqueta" ? "Etiqueta(s) que lo activan (una por línea) — si el lead YA tiene alguna de estas etiquetas puestas" : "Palabras o frases que lo activan (una por línea)"}</label>
+        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="\${d.coincidencia === "etiqueta" ? "ej: Dieta" : "ej: precio\\ncuanto cuesta\\ninversion"}" style="margin-bottom:6px;">\${(d.frases || []).join("\\n")}</textarea>
+        <p class="hint" style="margin:0 0 10px; font-size:12.5px;">Con "CUALQUIERA" o "EXACTAMENTE", cada línea es una alternativa distinta. Con "COMBINACIONES", cada línea es un grupo de palabras separadas por coma que TIENEN que estar TODAS presentes (ej. una línea "cansancio, estetico" activa solo si el mensaje trae las dos); puedes poner varias líneas-combinación distintas (ej. otra línea "hipertension, estetico") y con que se cumpla CUALQUIERA de ellas, activa. Con "POR ETIQUETA", en vez de revisar el mensaje, revisa si el lead YA TIENE alguna de las etiquetas escritas arriba puestas — 100% determinista, no depende del mensaje actual.</p>
         <label>¿Cómo debe coincidir?</label>
         <select class="\${prefijoClase}-coincidencia" data-i="\${i}" style="margin-bottom:10px;">
-          <option value="contiene"\${d.coincidencia !== "exacta" && d.coincidencia !== "combinaciones" ? " selected" : ""}>Contiene CUALQUIERA de las frases (una por una)</option>
+          <option value="contiene"\${d.coincidencia !== "exacta" && d.coincidencia !== "combinaciones" && d.coincidencia !== "etiqueta" ? " selected" : ""}>Contiene CUALQUIERA de las frases (una por una)</option>
           <option value="exacta"\${d.coincidencia === "exacta" ? " selected" : ""}>El mensaje es EXACTAMENTE una de esas frases</option>
           <option value="combinaciones"\${d.coincidencia === "combinaciones" ? " selected" : ""}>Combinaciones (grupos de palabras con coma, ej. "cansancio, estetico")</option>
+          <option value="etiqueta"\${d.coincidencia === "etiqueta" ? " selected" : ""}>🏷️ Por etiqueta (si el lead ya tiene alguna de estas etiquetas puestas)</option>
         </select>
         <div class="row2" style="margin-bottom:10px;">
           <div>
@@ -5618,6 +5674,7 @@ ${estilosBase()}
               <option value="audio"\${d.tipo === "audio" ? " selected" : ""}>🎤 Audio</option>
               <option value="foto"\${d.tipo === "foto" ? " selected" : ""}>🖼️ Foto</option>
               <option value="mensaje"\${esMensaje ? " selected" : ""}>📝 Mensaje (texto + fotos + audios + pausas combinados)</option>
+              <option value="etiqueta"\${esSoloEtiqueta ? " selected" : ""}>🏷️ Solo agregar etiqueta (no manda nada)</option>
             </select>
           </div>
           <div>
@@ -5626,6 +5683,8 @@ ${estilosBase()}
           </div>
         </div>
         \${campoContenido}
+        <label style="margin-top:10px;">🏷️ Etiqueta a agregar al activarse (opcional\${esSoloEtiqueta ? ", obligatoria para este tipo" : ", además de mandar el contenido de arriba"})</label>
+        <input type="text" class="\${prefijoClase}-etiqueta-agregar" data-i="\${i}" placeholder="Ej: Dieta" value="\${(d.etiqueta_a_agregar || "").replace(/"/g,"&quot;")}" style="margin-bottom:10px;">
         <label style="display:flex; align-items:flex-start; gap:9px; cursor:pointer; margin-top:10px;">
           <input type="checkbox" class="\${prefijoClase}-exclusivo" data-i="\${i}"\${d.exclusivo ? " checked" : ""} style="width:16px; height:16px; accent-color:var(--green); cursor:pointer; margin-top:1px; flex-shrink:0;">
           <span style="color:var(--text); font-size:13.5px; font-weight:500; line-height:1.45;">🚫 Exclusivo — al activarse, el prompt NO responde nada este turno (solo se manda este disparador)</span>
@@ -5639,6 +5698,10 @@ ${estilosBase()}
       renderDisparadoresEnContenedor(cont, lista, prefijoClase, alCambiar);
     }));
     cont.querySelectorAll(\`.\${prefijoClase}-tipo\`).forEach(sel => sel.addEventListener("change", () => {
+      alCambiar();
+      renderDisparadoresEnContenedor(cont, lista, prefijoClase, alCambiar);
+    }));
+    cont.querySelectorAll(\`.\${prefijoClase}-coincidencia\`).forEach(sel => sel.addEventListener("change", () => {
       alCambiar();
       renderDisparadoresEnContenedor(cont, lista, prefijoClase, alCambiar);
     }));
@@ -5685,6 +5748,11 @@ ${estilosBase()}
       if(!lista[i]) return;
       lista[i].exclusivo = chk.checked;
     });
+    document.querySelectorAll(\`.\${prefijoClase}-etiqueta-agregar\`).forEach((input) => {
+      const i = +input.dataset.i;
+      if(!lista[i]) return;
+      lista[i].etiqueta_a_agregar = input.value.trim();
+    });
   }
 
   function renderDisparadores(){
@@ -5722,9 +5790,10 @@ ${estilosBase()}
         <label>Condición a evaluar (en lenguaje natural — la revisa la IA en cada mensaje)</label>
         <textarea class="\${prefijoClase}-condicion" data-i="\${i}" rows="2" placeholder='Ej: "El cliente mencionó tener 40 años de edad o más"' style="margin-bottom:10px;">\${(t.condicion || "").replace(/</g,"&lt;")}</textarea>
       \` : \`
-        <label>Palabras o frases que la activan (una por línea)</label>
-        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="ej: si&#10;sí quiero&#10;me interesa&#10;(o, si eliges Combinaciones: cansancio, estetico)" style="margin-bottom:6px;">\${(t.frases || []).join("\\n")}</textarea>
+        <label>\${t.coincidencia === "etiqueta" ? "Etiqueta(s) que la activan (una por línea) — si el lead YA tiene alguna de estas puestas" : "Palabras o frases que la activan (una por línea)"}</label>
+        <textarea class="\${prefijoClase}-frases" data-i="\${i}" rows="3" placeholder="\${t.coincidencia === "etiqueta" ? "ej: Dieta" : "ej: si\\nsí quiero\\nme interesa\\n(o, si eliges Combinaciones: cansancio, estetico)"}" style="margin-bottom:6px;">\${(t.frases || []).join("\\n")}</textarea>
         \${t.coincidencia === "combinaciones" ? '<p class="hint" style="margin:0 0 10px; font-size:12.5px;">Cada línea es un grupo de palabras separadas por coma que TIENEN que estar TODAS presentes (ej. "cansancio, estetico"). Puedes poner varias líneas-combinación distintas; con que se cumpla CUALQUIERA, se activa.</p>' : ''}
+        \${t.coincidencia === "etiqueta" ? '<p class="hint" style="margin:0 0 10px; font-size:12.5px;">En vez de revisar el mensaje, revisa si el lead YA TIENE alguna de estas etiquetas puestas (100% determinista, no depende de lo que escriba en ese momento) — útil, por ejemplo, para saber en la etapa "no califica" qué recurso pidió al inicio, usando una etiqueta que le pusiste desde la etapa de entrada.</p>' : ''}
       \`;
       div.innerHTML = \`
         <div class="paso-head">
@@ -5736,9 +5805,10 @@ ${estilosBase()}
         </div>
         <label>¿Cómo debe activarse?</label>
         <select class="\${prefijoClase}-coincidencia" data-i="\${i}" style="margin-bottom:10px;">
-          <option value="contiene"\${t.coincidencia !== "exacta" && t.coincidencia !== "condicion" && t.coincidencia !== "combinaciones" ? " selected" : ""}>Contiene la frase en cualquier parte del mensaje</option>
+          <option value="contiene"\${t.coincidencia !== "exacta" && t.coincidencia !== "condicion" && t.coincidencia !== "combinaciones" && t.coincidencia !== "etiqueta" ? " selected" : ""}>Contiene la frase en cualquier parte del mensaje</option>
           <option value="exacta"\${t.coincidencia === "exacta" ? " selected" : ""}>El mensaje es EXACTAMENTE esa palabra/frase</option>
           <option value="combinaciones"\${t.coincidencia === "combinaciones" ? " selected" : ""}>Combinaciones (grupos de palabras con coma, ej. "cansancio, estetico")</option>
+          <option value="etiqueta"\${t.coincidencia === "etiqueta" ? " selected" : ""}>🏷️ Por etiqueta (si el lead ya tiene alguna de estas etiquetas puestas)</option>
           <option value="condicion"\${esCondicion ? " selected" : ""}>Según una condición (la evalúa la IA)</option>
         </select>
         \${campoActivador}
@@ -5856,7 +5926,7 @@ ${estilosBase()}
 
   document.getElementById("addDisparador").addEventListener("click", () => {
     leerDisparadoresDelDOM();
-    disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false });
+    disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false, etiqueta_a_agregar: "" });
     renderDisparadores();
   });
 
@@ -6092,7 +6162,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].disparadores) etapas[i].disparadores = [];
-      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false });
+      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false, etiqueta_a_agregar: "" });
       renderEtapas();
     }));
 
