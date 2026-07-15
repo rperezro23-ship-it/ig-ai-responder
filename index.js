@@ -2081,6 +2081,15 @@ async function procesarBuffer(senderId) {
       disparadoresActivados = buscarDisparadoresActivados(mensajeCompleto, configActual.disparadores || [], conv.etiquetas);
     }
 
+    // Un disparador marcado "solo al entrar a la etapa" NUNCA se activa en
+    // mensajes posteriores dentro de la MISMA etapa — esto es clave para los
+    // que usan coincidencia "por etiqueta": como la etiqueta es permanente
+    // (nunca se quita sola), sin este filtro se dispararía en CADA mensaje
+    // que el lead mande mientras esté en esa etapa (ej. mandando el mismo
+    // recurso una y otra vez cada vez que dijera "gracias"). Con esto, solo
+    // se activa en el turno exacto en el que se entró a la etapa.
+    disparadoresActivados = disparadoresActivados.filter(d => !d.solo_al_entrar_a_etapa || transicionAplicada);
+
     const origenLog = disparadoresSonDeEtapa ? `etapa "${etapaConfig?.clave}"` : "general";
     const disparadorExclusivo = disparadoresActivados.find(d => d.exclusivo);
 
@@ -3938,7 +3947,13 @@ function normalizarDisparadores(disparadores) {
         // activa — funciona con CUALQUIER tipo (audio/foto/mensaje pueden
         // ADEMÁS etiquetar; el tipo "etiqueta" es exclusivamente para esto,
         // sin mandar ningún contenido).
-        etiqueta_a_agregar: typeof d.etiqueta_a_agregar === "string" ? d.etiqueta_a_agregar.trim() : ""
+        etiqueta_a_agregar: typeof d.etiqueta_a_agregar === "string" ? d.etiqueta_a_agregar.trim() : "",
+        // Si está activado, este disparador SOLO se evalúa en el turno
+        // exacto en que se entra a la etapa (por transición) — nunca en
+        // mensajes posteriores dentro de la misma etapa. Imprescindible
+        // para los que usan coincidencia "por etiqueta" (que de otra forma
+        // se dispararían en cada mensaje, ya que la etiqueta es permanente).
+        solo_al_entrar_a_etapa: Boolean(d.solo_al_entrar_a_etapa)
       };
     })
     .filter(d => d.frases.length > 0)
@@ -5689,6 +5704,10 @@ ${estilosBase()}
           <input type="checkbox" class="\${prefijoClase}-exclusivo" data-i="\${i}"\${d.exclusivo ? " checked" : ""} style="width:16px; height:16px; accent-color:var(--green); cursor:pointer; margin-top:1px; flex-shrink:0;">
           <span style="color:var(--text); font-size:13.5px; font-weight:500; line-height:1.45;">🚫 Exclusivo — al activarse, el prompt NO responde nada este turno (solo se manda este disparador)</span>
         </label>
+        <label style="display:flex; align-items:flex-start; gap:9px; cursor:pointer; margin-top:10px;">
+          <input type="checkbox" class="\${prefijoClase}-solo-entrar" data-i="\${i}"\${d.solo_al_entrar_a_etapa ? " checked" : ""} style="width:16px; height:16px; accent-color:#FFC542; cursor:pointer; margin-top:1px; flex-shrink:0;">
+          <span style="color:var(--text); font-size:13.5px; font-weight:500; line-height:1.45;">🚪 Solo al ENTRAR a esta etapa — nunca se dispara en mensajes posteriores dentro de la misma etapa. Imprescindible si usas coincidencia "por etiqueta" (si no, se repetiría en cada mensaje, ya que la etiqueta es permanente).</span>
+        </label>
       \`;
       cont.appendChild(div);
     });
@@ -5752,6 +5771,11 @@ ${estilosBase()}
       const i = +input.dataset.i;
       if(!lista[i]) return;
       lista[i].etiqueta_a_agregar = input.value.trim();
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-solo-entrar\`).forEach((chk) => {
+      const i = +chk.dataset.i;
+      if(!lista[i]) return;
+      lista[i].solo_al_entrar_a_etapa = chk.checked;
     });
   }
 
@@ -5926,7 +5950,7 @@ ${estilosBase()}
 
   document.getElementById("addDisparador").addEventListener("click", () => {
     leerDisparadoresDelDOM();
-    disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false, etiqueta_a_agregar: "" });
+    disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false, etiqueta_a_agregar: "", solo_al_entrar_a_etapa: false });
     renderDisparadores();
   });
 
@@ -6162,7 +6186,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].disparadores) etapas[i].disparadores = [];
-      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false, etiqueta_a_agregar: "" });
+      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false, etiqueta_a_agregar: "", solo_al_entrar_a_etapa: false });
       renderEtapas();
     }));
 
