@@ -1229,20 +1229,38 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
     }
 
     if (parte.tipo === "texto") {
+      let valorFinal = parte.valor;
+
+      // Si el texto trae un enlace de Calendly y hay una posición configurada
+      // para la pregunta del usuario de Instagram, se le agrega el parámetro
+      // de pre-llenado con el username real del lead — así no tiene que
+      // escribirlo a mano al agendar (evitando errores de tipeo o que lo
+      // deje en blanco). Se busca el username de forma perezosa (solo si
+      // hace falta) para no gastar una consulta extra en cada mensaje.
+      if (configActual.calendly_pregunta_instagram_posicion && valorFinal.includes("calendly.com")) {
+        const conv = await obtenerConversacion(senderId);
+        if (conv.username) {
+          valorFinal = agregarUsernameAEnlacesCalendly(valorFinal, conv.username, configActual.calendly_pregunta_instagram_posicion);
+          console.log(`🔗 Enlace de Calendly a ${senderId} pre-llenado con el usuario @${conv.username}.`);
+        } else {
+          console.warn(`⚠️ No se pudo pre-llenar el enlace de Calendly para ${senderId} — todavía no se tiene su username de Instagram.`);
+        }
+      }
+
       // Si queda algo parecido a un marcador sin cerrar/mal escrito (ej. la
       // IA olvidó un corchete o puso mal la clave), lo avisamos en consola
       // con el texto exacto — así se puede ver en los logs de Render qué
       // generó el modelo cuando el marcador "no se toma".
-      if (/\[\[/.test(parte.valor) || /\]\]/.test(parte.valor)) {
-        console.warn(`⚠️ Posible marcador mal formado en la respuesta a ${senderId} (se mandó como texto normal): "${parte.valor}"`);
+      if (/\[\[/.test(valorFinal) || /\]\]/.test(valorFinal)) {
+        console.warn(`⚠️ Posible marcador mal formado en la respuesta a ${senderId} (se mandó como texto normal): "${valorFinal}"`);
       }
 
       // Red de seguridad: Instagram rechaza de golpe cualquier mensaje de
       // más de 1000 caracteres (se pierde la respuesta completa). Si la IA
       // generó algo más largo de lo esperado, se manda en varias burbujas.
-      const fragmentos = dividirTextoLargo(parte.valor);
+      const fragmentos = dividirTextoLargo(valorFinal);
       if (fragmentos.length > 1) {
-        console.warn(`⚠️ La respuesta a ${senderId} tiene ${parte.valor.length} caracteres (arriba del límite de Instagram) — se divide en ${fragmentos.length} mensajes.`);
+        console.warn(`⚠️ La respuesta a ${senderId} tiene ${valorFinal.length} caracteres (arriba del límite de Instagram) — se divide en ${fragmentos.length} mensajes.`);
       }
 
       for (let idx = 0; idx < fragmentos.length; idx++) {
@@ -1303,6 +1321,25 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
 // distintas según en qué etapa esté el lead, y solo si la etapa no tiene
 // nada configurado para esa palabra se usa el comportamiento general.
 // ---------------------------------------------------------------
+
+// Calendly permite pre-llenar preguntas personalizadas del formulario de
+// reserva a través de la URL, usando parámetros "a1", "a2", "a3"... según el
+// ORDEN en que aparecen las preguntas personalizadas en el evento (de arriba
+// a abajo) — ver "calendly_pregunta_instagram_posicion" en /panel para
+// indicar cuál posición le corresponde a la pregunta del usuario de
+// Instagram. Esto evita que el lead tenga que escribir su usuario a mano al
+// agendar (y se equivoque o lo deje en blanco) — como ya viene resuelto en
+// la URL, solo tiene que confirmarlo. NOTA: Calendly permite que el
+// invitado edite el campo aunque venga pre-llenado, así que esto reduce el
+// riesgo de errores pero no lo elimina del todo.
+function agregarUsernameAEnlacesCalendly(texto, username, posicion) {
+  if (!texto || !username || !Number.isFinite(posicion) || posicion < 1) return texto;
+
+  return texto.replace(/https:\/\/calendly\.com\/\S+/g, (url) => {
+    const separador = url.includes("?") ? "&" : "?";
+    return `${url}${separador}a${posicion}=${encodeURIComponent(username)}`;
+  });
+}
 
 function normalizarParaComparar(texto) {
   return (texto || "")
@@ -3560,6 +3597,7 @@ let configActual = {
   calendly_organization_uri: "",
   calendly_webhook_uri: "",
   calendly_conectado_en: null,
+  calendly_pregunta_instagram_posicion: null, // en qué posición (a1, a2, a3...) está la pregunta del usuario de Instagram entre las preguntas personalizadas del evento
   dashboard_etiqueta_asistio: "", // nombre exacto de la etiqueta manual que representa "asistió a la llamada"
   dashboard_etiqueta_compro: "",  // nombre exacto de la etiqueta manual que representa "compró / se cerró"
   franja_horaria_activa: false,
@@ -4060,7 +4098,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
   try {
     const { ai_prompt, contexto_base, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
             calificacion_activa, calificar_automatico_con_enlace, no_seguir_si_no_califica, parar_seguimientos_si_agendo, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
-            transiciones_generales_elegir_mejor, mensajes_error_audio, calendly_token, calendly_pregunta_instagram,
+            transiciones_generales_elegir_mejor, mensajes_error_audio, calendly_token, calendly_pregunta_instagram, calendly_pregunta_instagram_posicion,
             dashboard_etiqueta_asistio, dashboard_etiqueta_compro, franja_horaria_activa, franja_horaria_desde, franja_horaria_hasta } = req.body || {};
 
     const nuevaConfig = {};
@@ -4076,6 +4114,13 @@ app.post("/config", requireAdminKey, async (req, res) => {
     // Mismo criterio para el token de Calendly — no se pisa con vacío.
     if (typeof calendly_token === "string" && calendly_token.trim()) nuevaConfig.calendly_token = calendly_token.trim();
     if (typeof calendly_pregunta_instagram === "string") nuevaConfig.calendly_pregunta_instagram = calendly_pregunta_instagram.trim();
+    // 0 o vacío significa "no configurado" (no se pre-llena nada) — solo se
+    // acepta un número entero de 1 en adelante.
+    if (calendly_pregunta_instagram_posicion === "" || calendly_pregunta_instagram_posicion === null) {
+      nuevaConfig.calendly_pregunta_instagram_posicion = null;
+    } else if (Number.isFinite(Number(calendly_pregunta_instagram_posicion)) && Number(calendly_pregunta_instagram_posicion) >= 1) {
+      nuevaConfig.calendly_pregunta_instagram_posicion = Math.floor(Number(calendly_pregunta_instagram_posicion));
+    }
     if (typeof dashboard_etiqueta_asistio === "string") nuevaConfig.dashboard_etiqueta_asistio = dashboard_etiqueta_asistio.trim();
     if (typeof dashboard_etiqueta_compro === "string") nuevaConfig.dashboard_etiqueta_compro = dashboard_etiqueta_compro.trim();
     if (typeof franja_horaria_activa === "boolean") nuevaConfig.franja_horaria_activa = franja_horaria_activa;
@@ -5169,6 +5214,9 @@ ${estilosBase()}
           <p class="key-actual" id="calendlyKeyActual">Cargando estado…</p>
           <label for="calendlyPregunta" style="margin-top:14px;">Texto EXACTO de la pregunta de Instagram en tu evento de Calendly</label>
           <input type="text" id="calendlyPregunta" placeholder="Ej: ¿Cuál es tu usuario de Instagram?">
+          <label for="calendlyPosicionPregunta" style="margin-top:14px;">📝 En qué posición está esa pregunta (opcional, pero recomendado)</label>
+          <input type="number" id="calendlyPosicionPregunta" min="1" step="1" placeholder="Ej: 1 (si es la primera pregunta personalizada)" style="max-width:340px;">
+          <p class="hint" style="margin-top:6px;">Con esto, cuando el bot le mande el enlace del calendario al lead, se lo manda YA CON su usuario de Instagram pre-llenado en ese campo — así no tiene que escribirlo a mano al agendar (y no se equivoca, ni lo deja en blanco). Cuenta las preguntas personalizadas de tu evento de arriba a abajo: si la de Instagram es la primera, pon 1; si es la segunda, pon 2; y así. Déjalo vacío si prefieres que el lead siempre la escriba a mano.</p>
         </div>
 
         <div class="card card-destacada">
@@ -6270,6 +6318,7 @@ ${estilosBase()}
     document.getElementById("criteriosCalificacion").value = cfg.criterios_calificacion || "";
     document.getElementById("enlaceCalificacion").value = cfg.enlace_calificacion || "";
     document.getElementById("calendlyPregunta").value = cfg.calendly_pregunta_instagram || "";
+    document.getElementById("calendlyPosicionPregunta").value = cfg.calendly_pregunta_instagram_posicion || "";
     pintarEstadoClave(cfg);
     pintarEstadoCalendly(cfg);
     pasos = Array.isArray(cfg.seguimientos) ? JSON.parse(JSON.stringify(cfg.seguimientos)) : [];
@@ -6520,7 +6569,8 @@ ${estilosBase()}
       etapas: etapas,
       transiciones_generales: transicionesGenerales,
       transiciones_generales_elegir_mejor: document.getElementById("transGeneralesElegirMejor").checked,
-      calendly_pregunta_instagram: document.getElementById("calendlyPregunta").value
+      calendly_pregunta_instagram: document.getElementById("calendlyPregunta").value,
+      calendly_pregunta_instagram_posicion: document.getElementById("calendlyPosicionPregunta").value
     };
     const nuevaClave = document.getElementById("openaiKey").value.trim();
     if(nuevaClave) body.openai_api_key = nuevaClave;
