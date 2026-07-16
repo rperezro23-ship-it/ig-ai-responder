@@ -592,10 +592,10 @@ let calendlyOrgUriCache = null;
 // reserva activa agendada. Se usa en el momento exacto en que un lead dice
 // "ya agendé" — no antes (no hay por qué gastar llamadas revisando a nadie
 // que no lo haya dicho) ni con webhooks (que costarían el plan Standard).
-async function verificarReservaEnCalendly(username) {
+async function verificarReservaEnCalendly(username, mensajeFecha) {
   const limpio = (username || "").trim().replace(/^@/, "").toLowerCase();
-  if (!limpio || !configActual.calendly_token?.trim() || !configActual.calendly_pregunta_instagram?.trim()) {
-    return { encontrado: false, motivo: "Calendly no está configurado (falta token, pregunta, o el lead no tiene username)." };
+  if (!configActual.calendly_token?.trim() || !configActual.calendly_pregunta_instagram?.trim()) {
+    return { encontrado: false, motivo: "Calendly no está configurado (falta token o la pregunta)." };
   }
 
   try {
@@ -621,26 +621,95 @@ async function verificarReservaEnCalendly(username) {
 
     const eventos = respEventos.data?.collection || [];
 
-    for (const evento of eventos) {
-      const respInvitados = await axios.get(`${evento.uri}/invitees`, { headers: calendlyHeaders() });
-      const invitados = respInvitados.data?.collection || [];
+    if (limpio) {
+      for (const evento of eventos) {
+        const respInvitados = await axios.get(`${evento.uri}/invitees`, { headers: calendlyHeaders() });
+        const invitados = respInvitados.data?.collection || [];
 
-      for (const invitado of invitados) {
-        const preguntasYRespuestas = invitado.questions_and_answers || [];
-        const encontrada = preguntasYRespuestas.find(qa => qa.question?.trim() === configActual.calendly_pregunta_instagram.trim());
-        const respuestaUsername = (encontrada?.answer || "").trim().replace(/^@/, "").toLowerCase();
+        for (const invitado of invitados) {
+          const preguntasYRespuestas = invitado.questions_and_answers || [];
+          const encontrada = preguntasYRespuestas.find(qa => qa.question?.trim() === configActual.calendly_pregunta_instagram.trim());
+          const respuestaUsername = (encontrada?.answer || "").trim().replace(/^@/, "").toLowerCase();
 
-        if (respuestaUsername && respuestaUsername === limpio) {
-          // Calendly detecta y guarda la zona horaria del propio invitado
-          // al momento de reservar (ej. "America/New_York") — se usa para
-          // poder decirle la hora de su llamada en SU hora, no en la de
-          // Roberto, sin tener que preguntársela ni adivinarla.
-          return { encontrado: true, event: evento, timezoneInvitado: invitado.timezone || null };
+          if (respuestaUsername && respuestaUsername === limpio) {
+            // Calendly detecta y guarda la zona horaria del propio invitado
+            // al momento de reservar (ej. "America/New_York") — se usa para
+            // poder decirle la hora de su llamada en SU hora, no en la de
+            // Roberto, sin tener que preguntársela ni adivinarla.
+            return { encontrado: true, event: evento, timezoneInvitado: invitado.timezone || null };
+          }
         }
       }
     }
 
-    return { encontrado: false, motivo: "No se encontró ninguna reserva activa con ese usuario de Instagram." };
+    // RESPALDO POR FECHA/HORA: si no se encontró por username (puede que el
+    // lead haya escrito mal su usuario de Instagram en el formulario, o ni
+    // siquiera lo supiera), y el lead mencionó CUÁNDO agendó (ej. "el jueves
+    // a las 3pm"), se compara ese texto contra la lista de horarios
+    // realmente agendados en Calendly — si coincide con uno solo de forma
+    // razonable, se toma como confirmación válida (es muy poco probable que
+    // dos personas distintas hayan agendado justo en el mismo horario en
+    // estos días). Esto evita que un simple error de tipeo en el username
+    // bloquee para siempre la confirmación de una reserva real.
+    if (mensajeFecha?.trim() && eventos.length > 0) {
+      try {
+        const listaHorarios = eventos.map((ev, i) => {
+          const fechaLegible = new Date(ev.start_time).toLocaleString("es-MX", {
+            timeZone: "America/Mexico_City", weekday: "long", day: "numeric", month: "long",
+            hour: "numeric", minute: "2-digit", hour12: true
+          });
+          return `${i}. ${fechaLegible}`;
+        }).join("\n");
+
+        const respMatch = await openaiClient.chat.completions.create({
+          model: "gpt-4o-mini",
+          temperature: 0,
+          max_tokens: 60,
+          response_format: { type: "json_object" },
+          messages: [
+            {
+              role: "system",
+              content:
+                "Tienes una lista de horarios de llamadas YA agendadas (en hora de México), y un mensaje de un " +
+                "cliente describiendo cuándo dice que agendó la suya (puede ser vago, como 'el jueves a las 3', " +
+                "'mañana en la tarde', etc.). Decide si el mensaje del cliente coincide razonablemente con ALGUNO " +
+                "de los horarios de la lista. Si coincide con más de uno de forma ambigua, o no coincide con " +
+                "ninguno con suficiente confianza, responde null. Responde ÚNICAMENTE un JSON con este formato " +
+                'exacto, sin texto adicional: {"indice": <número del horario que coincide, o null>}.\n\n' +
+                "Horarios agendados:\n" + listaHorarios
+            },
+            { role: "user", content: `Lo que dijo el cliente sobre cuándo agendó: "${mensajeFecha}"` }
+          ]
+        });
+
+        const textoMatch = respMatch.choices[0]?.message?.content?.trim();
+        const parsedMatch = JSON.parse(textoMatch);
+        const indice = parsedMatch.indice;
+
+        if (Number.isInteger(indice) && indice >= 0 && indice < eventos.length) {
+          const eventoCoincidente = eventos[indice];
+          console.log(`🗓️ Reserva de ${username || "(sin username)"} confirmada por FECHA/HORA (no por username) — coincide con el horario agendado #${indice}.`);
+
+          // Se busca la zona horaria del invitado de ESE evento específico,
+          // igual que en la verificación normal por username.
+          let timezoneInvitado = null;
+          try {
+            const respInvitadosMatch = await axios.get(`${eventoCoincidente.uri}/invitees`, { headers: calendlyHeaders() });
+            timezoneInvitado = respInvitadosMatch.data?.collection?.[0]?.timezone || null;
+          } catch (errInvitado) {
+            console.error("⚠️ No se pudo obtener la zona horaria del invitado tras confirmar por fecha:", errInvitado.message);
+          }
+
+          return { encontrado: true, event: eventoCoincidente, timezoneInvitado, viaFecha: true };
+        }
+      } catch (errFecha) {
+        console.error("⚠️ Error en el respaldo de verificación por fecha:", errFecha.response?.data || errFecha.message);
+        // Si el respaldo por fecha falla, simplemente se sigue sin
+        // confirmación — no se rompe el flujo normal.
+      }
+    }
+
+    return { encontrado: false, motivo: "No se encontró ninguna reserva activa con ese usuario de Instagram, ni coincidiendo por fecha/hora." };
   } catch (err) {
     console.error("❌ Error verificando reserva en Calendly:", err.response?.data || err.message);
     return { encontrado: false, motivo: "Error consultando Calendly: " + (err.response?.data?.message || err.message) };
@@ -2079,9 +2148,9 @@ async function procesarBuffer(senderId) {
     let timezoneInvitadoCalendly = null;
     let pedirConfirmacionCalendly = false;
     if (transicion?.verificar_calendly) {
-      const resultado = await verificarReservaEnCalendly(conv.username);
+      const resultado = await verificarReservaEnCalendly(conv.username, mensajeCompleto);
       if (resultado.encontrado) {
-        console.log(`✅ Calendly confirma la reserva de ${senderId} (@${conv.username}).`);
+        console.log(`✅ Calendly confirma la reserva de ${senderId} (@${conv.username})${resultado.viaFecha ? " — confirmado por fecha/hora, no por username" : ""}.`);
         eventoCalendlyConfirmado = resultado.event;
         timezoneInvitadoCalendly = resultado.timezoneInvitado;
       } else {
