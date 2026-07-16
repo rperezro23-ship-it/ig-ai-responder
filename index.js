@@ -2176,6 +2176,25 @@ async function procesarBuffer(senderId) {
 
     let respuestaCruda = completion.choices[0]?.message?.content?.trim();
 
+    // Detección robusta de [[silencio]]: en teoría el prompt dice que debe
+    // ser la ÚNICA cosa en la respuesta, pero en la práctica a veces el
+    // modelo lo pega DESPUÉS de un texto real (ej. "Está bien, aquí estoy
+    // cuando decidas.[[silencio]]") — si solo comparáramos con igualdad
+    // estricta, ese caso se "colaría" y el marcador se mandaría tal cual
+    // como texto visible al cliente (se ve roto/técnico). Por eso primero
+    // se QUITA el marcador de cualquier parte del texto, y luego se decide:
+    // si no queda nada de texto real, se trata como silencio total (no se
+    // manda nada); si queda texto real, se manda SOLO ese texto, sin el
+    // marcador, y se registra una advertencia porque no debería pasar así.
+    const contieneMarcadorSilencio = respuestaCruda && /\[\[silencio\]\]/i.test(respuestaCruda);
+    if (contieneMarcadorSilencio) {
+      const textoSinMarcador = respuestaCruda.replace(/\[\[silencio\]\]/gi, "").trim();
+      if (textoSinMarcador) {
+        console.warn(`⚠️ ${senderId}: la IA mezcló [[silencio]] con texto real ("${respuestaCruda}") — se manda solo el texto, sin el marcador, para no filtrarlo como texto visible.`);
+      }
+      respuestaCruda = textoSinMarcador; // "" si era silencio puro, o el texto real sin el marcador
+    }
+
     // Red de seguridad a nivel de código: si la etapa está marcada como
     // "requiere pregunta final" (ver casilla en el panel) y la respuesta NO
     // trae ningún signo de interrogación, se le pide a la IA que la
@@ -2183,12 +2202,11 @@ async function procesarBuffer(senderId) {
     // en la práctica, solo con instrucciones de prompt (por más reforzadas
     // que estén) el modelo a veces sigue omitiendo la pregunta final,
     // especialmente cuando la explicación previa ya "se siente completa".
-    // No se hace si la respuesta es [[silencio]] (ahí no hace falta ninguna
-    // pregunta, esa etapa decidió no responder nada).
+    // No se hace si la respuesta quedó vacía (era un silencio puro, ahí no
+    // hace falta ninguna pregunta, esa etapa decidió no responder nada).
     if (
       etapaConfig?.requiere_pregunta_final &&
       respuestaCruda &&
-      respuestaCruda.trim() !== "[[silencio]]" &&
       !respuestaCruda.includes("?")
     ) {
       console.warn(`⚠️ ${senderId}: la etapa "${etapaConfig.clave}" requiere pregunta final pero la respuesta no la incluyó. Reintentando una vez con un recordatorio...`);
@@ -2218,22 +2236,16 @@ async function procesarBuffer(senderId) {
     }
 
     let partesRespuestaIA = [];
+
+    // El mensaje del cliente SIEMPRE se guarda en el historial en este punto,
+    // sin importar si la respuesta del bot terminó vacía (silencio total) o
+    // no — así nunca se pierde el contexto de lo que dijo, ni siquiera en
+    // los turnos donde el bot decide no responder nada.
+    await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
+
     if (respuestaCruda) {
       console.log(`🤖 Respuesta IA (cruda): "${respuestaCruda}"`);
 
-      await agregarAlHistorialDB(senderId, "user", mensajeCompleto);
-
-      // Si el modelo decide que la conversación ya llegó a un cierre natural
-      // (ej. "gracias" -> "de nada" -> "vale gracias" ...) puede responder
-      // ÚNICAMENTE con [[silencio]] — esto le indica al sistema que NO hay
-      // que mandar ningún mensaje esta vez, igual que haría una persona
-      // real, que no sigue respondiendo indefinidamente a un intercambio de
-      // cortesías ya cerrado (evita el bucle de "gracias"/"de nada" sin fin).
-      // El mensaje del cliente igual queda guardado en el historial arriba,
-      // solo se omite la respuesta del bot.
-      if (respuestaCruda.trim() === "[[silencio]]") {
-        console.log(`🤫 ${senderId}: la IA decidió no responder (conversación ya cerrada con cortesías, evitando un bucle sin fin).`);
-      } else {
       partesRespuestaIA = parsearPartes(respuestaCruda);
 
       // Si el prompt decide mandar la respuesta en varias burbujas (con
@@ -2281,7 +2293,6 @@ async function procesarBuffer(senderId) {
 
         await guardarConversacion(senderId, camposEnlace);
       }
-      } // fin del "else" de [[silencio]]
     }
 
     // Se mandan todos los disparadores activados (ya calculados arriba). Si
