@@ -1637,11 +1637,75 @@ async function evaluarTransicionesPorCondicion(mensajeUsuario, historial, transi
       console.log(`🔍 Condición #${i} ("${t.condicion}") -> ¿cumplida?: ${resultados[i] === true ? "SÍ" : "no"}`);
     });
 
+    // Cuántas condiciones se marcaron como cumplidas — lo normal es 0 o 1,
+    // ya que las condiciones de una misma etapa suelen diseñarse para ser
+    // mutuamente excluyentes. Pero como cada una se evalúa de forma
+    // independiente, a veces el modelo se equivoca y marca DOS a la vez
+    // (ej. "la constancia" marcado como "sí" también en la condición de
+    // dieta, por error) — si eso pasa, quedarse con la PRIMERA de la lista
+    // sin más criterio sería arbitrario y poco confiable. En ese caso
+    // específico (y SOLO en ese caso) se hace una consulta adicional,
+    // comparando ÚNICAMENTE las condiciones empatadas entre sí, para que
+    // el modelo elija cuál aplica mejor sin la distracción de las demás
+    // condiciones no relacionadas.
+    const indicesCumplidos = [];
     for (let i = 0; i < transicionesCondicion.length; i++) {
-      if (resultados[i] === true) return transicionesCondicion[i];
+      if (resultados[i] === true) indicesCumplidos.push(i);
     }
-    console.log(`🔍 Ninguna condición se cumplió — se sigue en la misma etapa, responde el prompt normal.`);
-    return null;
+
+    if (indicesCumplidos.length === 0) {
+      console.log(`🔍 Ninguna condición se cumplió — se sigue en la misma etapa, responde el prompt normal.`);
+      return null;
+    }
+
+    if (indicesCumplidos.length === 1) {
+      return transicionesCondicion[indicesCumplidos[0]];
+    }
+
+    console.warn(`⚠️ ${indicesCumplidos.length} condiciones se marcaron como cumplidas a la vez (índices: ${indicesCumplidos.join(", ")}) — se hace un desempate entre solo esas, para no quedarnos arbitrariamente con la primera de la lista.`);
+
+    try {
+      const candidatas = indicesCumplidos.map(i => transicionesCondicion[i]);
+      const listaCandidatas = candidatas.map((t, idx) => `${idx}. ${t.condicion.trim()}`).join("\n");
+
+      const respDesempate = await openaiClient.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        max_tokens: 80,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "Las siguientes condiciones YA se evaluaron por separado y TODAS se consideraron cumplidas por el " +
+              "último mensaje del cliente — pero se tratan como categorías que se EXCLUYEN entre sí (el cliente " +
+              "normalmente encaja en una sola, no en varias a la vez), así que hace falta elegir cuál de ellas " +
+              "describe MEJOR y de forma MÁS ESPECÍFICA lo que el cliente quiso decir, considerando también el " +
+              'contexto reciente. Responde ÚNICAMENTE un JSON con este formato exacto, sin texto adicional: ' +
+              '{"mejor_indice": <número de la condición que mejor aplica>}.\n\n' +
+              "Condiciones:\n" + listaCandidatas
+          },
+          { role: "user", content: mensajeUsuarioContenido }
+        ]
+      });
+
+      const textoDesempate = respDesempate.choices[0]?.message?.content?.trim();
+      const parsedDesempate = JSON.parse(textoDesempate);
+      const indiceElegido = parsedDesempate.mejor_indice;
+
+      if (Number.isInteger(indiceElegido) && indiceElegido >= 0 && indiceElegido < candidatas.length) {
+        console.log(`🔍 Desempate resuelto -> se elige la condición #${indicesCumplidos[indiceElegido]} (de las ${indicesCumplidos.length} empatadas).`);
+        return candidatas[indiceElegido];
+      }
+    } catch (err) {
+      console.error("⚠️ Error en el desempate de condiciones:", err.response?.data || err.message);
+    }
+
+    // Si el desempate falla por cualquier motivo, se cae de vuelta a la
+    // primera de las empatadas — es mejor avanzar con la mejor suposición
+    // disponible que dejar al lead sin ninguna respuesta.
+    console.warn(`⚠️ El desempate no pudo resolverse — se usa la primera condición empatada (#${indicesCumplidos[0]}) como respaldo.`);
+    return transicionesCondicion[indicesCumplidos[0]];
   } catch (err) {
     console.error("⚠️ Error evaluando transición por condición:", err.response?.data || err.message);
     return null;
