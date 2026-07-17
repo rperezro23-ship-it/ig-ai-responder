@@ -2987,7 +2987,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado, bot_pausado")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado, bot_pausado, username")
       .order("actualizado_en", { ascending: false })
       .limit(200);
 
@@ -3009,7 +3009,14 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
 
       return {
         sender_id: c.sender_id,
-        username: perfil?.username || null,
+        // Si la consulta en vivo a Instagram falla (ej. porque el lead salió
+        // de la ventana de mensajería de 24h, o porque nunca hubo ventana —
+        // como con leads a los que se les escribió primero desde ManyChat o
+        // manualmente), se usa el username que YA teníamos guardado en
+        // Supabase de una consulta anterior exitosa — así el nombre no
+        // "desaparece" solo porque la ventana se cerró, ya que una vez que
+        // lo conseguimos una vez, no hace falta perderlo.
+        username: perfil?.username || c.username || null,
         profile_pic: perfil?.profile_pic || null,
         ultimo_mensaje_usuario: c.ultimo_mensaje_usuario,
         actualizado_en: c.actualizado_en,
@@ -8414,7 +8421,7 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
 
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, etapa, etiquetas, monto_pagado")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, etapa, etiquetas, monto_pagado, username")
       .order("actualizado_en", { ascending: false });
 
     if (error) return res.status(500).json({ error: error.message });
@@ -8447,7 +8454,7 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
       const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
 
       return {
-        username: perfil?.username || "",
+        username: perfil?.username || c.username || "",
         sender_id: c.sender_id,
         etapa: c.etapa || "",
         califica: c.califica ? "sí" : "no",
@@ -8511,7 +8518,7 @@ app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) =>
 
     let consulta = supabase
       .from("conversaciones")
-      .select("sender_id")
+      .select("sender_id, username")
       .order("actualizado_en", { ascending: false })
       .limit(LIMITE_CONVERSACIONES_REPORTE);
 
@@ -8525,6 +8532,10 @@ app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) =>
 
     if (error) return res.status(500).json({ error: error.message });
 
+    // Mapa rápido de sender_id -> username ya guardado en Supabase, para
+    // usarlo como respaldo si la consulta en vivo a Instagram falla (ej. el
+    // lead salió de la ventana de 24h, o nunca hubo ventana con él).
+    const usernamesGuardados = new Map((conversaciones || []).map(c => [c.sender_id, c.username || null]));
     const listaSenders = (conversaciones || []).map(c => c.sender_id);
     const resultados = [];
 
@@ -8557,7 +8568,7 @@ app.get("/exportar/dolores-obstaculos.csv", requireAdminKey, async (req, res) =>
         if (!analisis) return null;
 
         const perfil = await obtenerPerfilInstagram(senderId);
-        return { senderId, username: perfil?.username || senderId, ...analisis };
+        return { senderId, username: perfil?.username || usernamesGuardados.get(senderId) || senderId, ...analisis };
       }));
 
       resultados.push(...analisisLote.filter(Boolean));
