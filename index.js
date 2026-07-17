@@ -724,10 +724,26 @@ async function verificarReservaEnCalendly(username, mensajeFecha) {
 const perfilesCache = new Map(); // senderId -> { username, profile_pic, name, obtenido_en }
 const PERFIL_CACHE_MS = 60 * 60 * 1000; // 1 hora
 
+// Cuando la consulta de perfil FALLA (ej. porque ese lead le escribió a una
+// cuenta de Instagram distinta a la que está activa ahora, o cualquier otro
+// error de permisos), se recuerda el fallo por un rato — así no se vuelve a
+// intentar en cada refresco de /chats o del dashboard, desperdiciando
+// llamadas a la API de Meta para algo que va a seguir fallando de todas
+// formas. Es más corto que la caché de éxito (10 min en vez de 1 hora) para
+// poder recuperarse solo si el motivo del fallo se resuelve más adelante
+// (ej. si algún día ese lead sí le escribe a la cuenta correcta).
+const perfilesFallidosCache = new Map(); // senderId -> timestamp del último fallo
+const PERFIL_FALLO_CACHE_MS = 10 * 60 * 1000; // 10 minutos
+
 async function obtenerPerfilInstagram(senderId) {
   const cacheado = perfilesCache.get(senderId);
   if (cacheado && (Date.now() - cacheado.obtenido_en) < PERFIL_CACHE_MS) {
     return cacheado;
+  }
+
+  const ultimoFallo = perfilesFallidosCache.get(senderId);
+  if (ultimoFallo && (Date.now() - ultimoFallo) < PERFIL_FALLO_CACHE_MS) {
+    return cacheado || null; // ya sabemos que está fallando, no se reintenta todavía
   }
 
   try {
@@ -746,6 +762,7 @@ async function obtenerPerfilInstagram(senderId) {
       obtenido_en: Date.now()
     };
     perfilesCache.set(senderId, perfil);
+    perfilesFallidosCache.delete(senderId); // si venía fallando antes, ya se recuperó
 
     // Se guarda también en Supabase (no solo en la caché en memoria, que se
     // pierde si el servidor reinicia) — sirve para poder buscar una
@@ -759,6 +776,7 @@ async function obtenerPerfilInstagram(senderId) {
     return perfil;
   } catch (err) {
     console.error(`⚠️ No se pudo obtener el perfil de ${senderId}:`, err.response?.data || err.message);
+    perfilesFallidosCache.set(senderId, Date.now());
     return cacheado || null;
   }
 }
