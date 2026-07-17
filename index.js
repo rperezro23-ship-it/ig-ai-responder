@@ -3279,10 +3279,34 @@ app.post("/chats/monto-pagado", requireAdminKey, async (req, res) => {
   }
 });
 
-// Genera un resumen (edad, cuánto peso quiere perder, obstáculo, y dolores
-// de salud/estética) de UNA conversación en particular — se pide bajo
-// demanda desde el desplegable en /chats, no automáticamente, para no
-// gastar en IA en conversaciones que nadie está revisando en ese momento.
+// Permite quitar manualmente una de las etiquetas automáticas (califica, no
+// califica, o agendó) — para corregir casos donde el bot se equivocó al
+// asignarla (ej. una condición mal evaluada), sin tener que borrar toda la
+// conversación ni esperar a que se corrija sola.
+app.post("/chats/quitar-estado", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId, campo } = req.body || {};
+    if (!senderId) return res.status(400).json({ error: "Falta senderId." });
+
+    const camposValidos = {
+      califica: { califica: false, calificado_en: null, razon_calificacion: null },
+      no_califica: { no_califica: false, no_califica_en: null, razon_no_califica: null },
+      agendo: { agendo: false, agendo_en: null }
+    };
+
+    if (!camposValidos[campo]) {
+      return res.status(400).json({ error: `Campo no reconocido: "${campo}". Debe ser califica, no_califica, o agendo.` });
+    }
+
+    await guardarConversacion(senderId, camposValidos[campo]);
+    console.log(`🧹 Se quitó manualmente la etiqueta "${campo}" de ${senderId} desde /chats.`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // Genera un resumen (edad, cuánto peso quiere perder, obstáculo, y dolores
 // de salud/estética) de UNA conversación en particular — se pide bajo
 // demanda desde el desplegable en /chats. Se GUARDA en Supabase (no solo en
@@ -6868,6 +6892,10 @@ ${estilosBase()}
   .status-chip-nocalifica{ background:var(--red-soft); color:var(--red); }
   .status-chip-agendo{ background:rgba(49,217,124,.14); color:var(--green); }
   .status-chip-enlace{ background:rgba(63,199,232,.12); color:#3FC7E8; }
+  .status-chip-quitar{
+    margin-left:6px; cursor:pointer; opacity:.55; font-weight:700;
+  }
+  .status-chip-quitar:hover{ opacity:1; }
   .status-select{
     background:var(--surface-3); border:1px solid var(--border); color:var(--text);
     border-radius:7px; padding:5px 8px; font-size:11.5px; font-family:var(--body); max-width:150px;
@@ -7085,9 +7113,9 @@ ${estilosBase()}
           ⏸️ El bot está PAUSADO para esta conversación — no va a responder automáticamente hasta que le des a "▶️ Reanudar bot".
         </div>
         <div class="chat-status-bar" id="chatStatusBar" style="display:none;">
-          <span class="status-chip status-chip-califica" id="chipCalifica" style="display:none;">✅ Califica</span>
-          <span class="status-chip status-chip-nocalifica" id="chipNoCalifica" style="display:none;">🚫 No Califica</span>
-          <span class="status-chip status-chip-agendo" id="chipAgendo" style="display:none;">📅 Agendó</span>
+          <span class="status-chip status-chip-califica" id="chipCalifica" style="display:none;">✅ Califica <span class="status-chip-quitar" id="quitarCalifica" title="Quitar esta etiqueta">✕</span></span>
+          <span class="status-chip status-chip-nocalifica" id="chipNoCalifica" style="display:none;">🚫 No Califica <span class="status-chip-quitar" id="quitarNoCalifica" title="Quitar esta etiqueta">✕</span></span>
+          <span class="status-chip status-chip-agendo" id="chipAgendo" style="display:none;">📅 Agendó <span class="status-chip-quitar" id="quitarAgendo" title="Quitar esta etiqueta">✕</span></span>
           <span class="status-chip status-chip-enlace" id="chipEnlace" style="display:none;">🔗 Enlace</span>
           <span class="status-chip status-chip-monto" id="chipMonto" style="display:none; background:rgba(255,197,66,.14); color:#FFC542;"></span>
           <span class="status-sep">·</span>
@@ -7610,6 +7638,49 @@ ${estilosBase()}
     } finally {
       btn.disabled = false;
     }
+  });
+
+  // Botón "✕" dentro de los chips de Califica / No Califica / Agendó — para
+  // corregir a mano un caso donde el bot se equivocó al ponerla (ej. una
+  // condición mal evaluada), sin tener que borrar toda la conversación.
+  async function quitarEstadoManual(campo, nombreMostrado){
+    if(!senderSeleccionado) return;
+    if(!confirm(\`Quitar la etiqueta "\${nombreMostrado}" de esta conversación?\`)) return;
+    try {
+      const res = await fetch("/chats/quitar-estado", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ senderId: senderSeleccionado, campo })
+      });
+      if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+      const data = await res.json();
+      if(data.ok){
+        const c = conversaciones.find(c => c.sender_id === senderSeleccionado);
+        if(c){
+          c[campo] = false;
+          if(campo === "califica"){ c.calificado_en = null; c.razon_calificacion = null; }
+          if(campo === "no_califica"){ c.no_califica_en = null; c.razon_no_califica = null; }
+          if(campo === "agendo"){ c.agendo_en = null; }
+        }
+        renderHead();
+      } else {
+        alert("No se pudo quitar la etiqueta: " + (data.error || "error desconocido"));
+      }
+    } catch (err) {
+      alert("No se pudo quitar la etiqueta: " + err.message);
+    }
+  }
+
+  document.getElementById("quitarCalifica").addEventListener("click", (e) => {
+    e.stopPropagation();
+    quitarEstadoManual("califica", "Califica");
+  });
+  document.getElementById("quitarNoCalifica").addEventListener("click", (e) => {
+    e.stopPropagation();
+    quitarEstadoManual("no_califica", "No Califica");
+  });
+  document.getElementById("quitarAgendo").addEventListener("click", (e) => {
+    e.stopPropagation();
+    quitarEstadoManual("agendo", "Agendó");
   });
 
   // --- Resumen del lead (edad, peso a perder, obstáculo, dolores) ---
