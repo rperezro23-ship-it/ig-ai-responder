@@ -1531,6 +1531,17 @@ function buscarDisparadoresActivados(mensajeUsuario, disparadores, etiquetasConv
   return (disparadores || []).filter((d) => {
     if (!Array.isArray(d.frases) || d.frases.length === 0) return false;
 
+    // Si el disparador tiene una "etiqueta de exclusión" configurada, y la
+    // conversación YA la tiene puesta, este disparador NUNCA se activa —
+    // sin importar que el resto de sus condiciones sí se cumplan. Sirve
+    // para que un disparador se "auto-desactive" después de la primera vez
+    // que se activó: se configura para que, al dispararse, se ponga a sí
+    // mismo esa etiqueta de exclusión (con "etiqueta_a_agregar"), y así
+    // nunca se vuelve a repetir en mensajes posteriores.
+    if (d.etiqueta_excluir && etiquetasNormalizadas.includes(normalizarParaComparar(d.etiqueta_excluir))) {
+      return false;
+    }
+
     // Modo "etiqueta": en vez de comparar contra el texto del mensaje, se
     // revisa si la conversación YA TIENE alguna de las etiquetas listadas
     // (cada "frase" aquí es en realidad el nombre de una etiqueta a
@@ -2345,6 +2356,18 @@ async function procesarBuffer(senderId) {
     // recurso una y otra vez cada vez que dijera "gracias"). Con esto, solo
     // se activa en el turno exacto en el que se entró a la etapa.
     disparadoresActivados = disparadoresActivados.filter(d => !d.solo_al_entrar_a_etapa || transicionAplicada);
+
+    // Un disparador marcado "solo si el lead NO tiene ninguna etapa
+    // asignada" (pensado para disparadores GENERALES de respaldo) nunca se
+    // activa mientras el lead esté avanzando normalmente por el embudo de
+    // etapas — solo se activa si, por la razón que sea, terminó sin ninguna
+    // etapa (usando el prompt de respaldo). Esto evita, por ejemplo, que un
+    // disparador de "manda la foto del caso de éxito si todavía no se le
+    // mandó" se dispare de más mientras el lead SÍ está avanzando bien por
+    // las etapas reales (donde esa foto ya se manda por su cuenta en el
+    // momento correcto) — solo actúa como red de respaldo cuando de verdad
+    // hace falta.
+    disparadoresActivados = disparadoresActivados.filter(d => !d.solo_si_sin_etapa || !etapaActualClave);
 
     const origenLog = disparadoresSonDeEtapa ? `etapa "${etapaConfig?.clave}"` : "general";
     const disparadorExclusivo = disparadoresActivados.find(d => d.exclusivo);
@@ -4339,7 +4362,18 @@ function normalizarDisparadores(disparadores) {
         // mensajes posteriores dentro de la misma etapa. Imprescindible
         // para los que usan coincidencia "por etiqueta" (que de otra forma
         // se dispararían en cada mensaje, ya que la etiqueta es permanente).
-        solo_al_entrar_a_etapa: Boolean(d.solo_al_entrar_a_etapa)
+        solo_al_entrar_a_etapa: Boolean(d.solo_al_entrar_a_etapa),
+        // Etiqueta que, si la conversación YA la tiene, impide que este
+        // disparador se active — sirve para que un disparador "se apague
+        // solo" después de dispararse una vez (normalmente combinado con
+        // que ese mismo disparador se ponga esa etiqueta a sí mismo, vía
+        // "etiqueta_a_agregar", justo cuando se activa).
+        etiqueta_excluir: typeof d.etiqueta_excluir === "string" ? d.etiqueta_excluir.trim() : "",
+        // Solo aplica a disparadores GENERALES (no atados a una etapa): si
+        // está activado, este disparador únicamente se evalúa cuando el
+        // lead NO tiene ninguna etapa asignada — útil como red de respaldo
+        // que solo debe actuar cuando el flujo normal de etapas falló.
+        solo_si_sin_etapa: Boolean(d.solo_si_sin_etapa)
       };
     })
     .filter(d => d.frases.length > 0)
@@ -6104,6 +6138,15 @@ ${estilosBase()}
           <input type="checkbox" class="\${prefijoClase}-solo-entrar" data-i="\${i}"\${d.solo_al_entrar_a_etapa ? " checked" : ""} style="width:16px; height:16px; accent-color:#FFC542; cursor:pointer; margin-top:1px; flex-shrink:0;">
           <span style="color:var(--text); font-size:13.5px; font-weight:500; line-height:1.45;">🚪 Solo al ENTRAR a esta etapa — nunca se dispara en mensajes posteriores dentro de la misma etapa. Imprescindible si usas coincidencia "por etiqueta" (si no, se repetiría en cada mensaje, ya que la etiqueta es permanente).</span>
         </label>
+        \${prefijoClase === "disp-gen" ? \`
+        <label style="display:flex; align-items:flex-start; gap:9px; cursor:pointer; margin-top:10px;">
+          <input type="checkbox" class="\${prefijoClase}-sin-etapa" data-i="\${i}"\${d.solo_si_sin_etapa ? " checked" : ""} style="width:16px; height:16px; accent-color:#3FC7E8; cursor:pointer; margin-top:1px; flex-shrink:0;">
+          <span style="color:var(--text); font-size:13.5px; font-weight:500; line-height:1.45;">🛟 Red de respaldo — SOLO se activa si el lead no tiene ninguna etapa asignada (nunca se dispara mientras avanza normal por las etapas reales, aunque tenga la etiqueta puesta).</span>
+        </label>
+        \` : ''}
+        <label style="margin-top:10px;">🔒 Etiqueta que lo DESACTIVA (opcional) — si el lead YA tiene esta etiqueta, este disparador nunca se activa</label>
+        <input type="text" class="\${prefijoClase}-etiqueta-excluir" data-i="\${i}" placeholder="Ej: caso_exito_enviado" value="\${(d.etiqueta_excluir || "").replace(/"/g,"&quot;")}">
+        <p class="hint" style="margin:6px 0 0; font-size:12px;">Útil para que un disparador se mande una sola vez y nunca se repita: pon aquí la MISMA etiqueta que este disparador se agrega a sí mismo arriba — así, la primera vez se dispara y se marca a sí mismo, y nunca más se repite.</p>
       \`;
       cont.appendChild(div);
     });
@@ -6172,6 +6215,16 @@ ${estilosBase()}
       const i = +chk.dataset.i;
       if(!lista[i]) return;
       lista[i].solo_al_entrar_a_etapa = chk.checked;
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-etiqueta-excluir\`).forEach((input) => {
+      const i = +input.dataset.i;
+      if(!lista[i]) return;
+      lista[i].etiqueta_excluir = input.value.trim();
+    });
+    document.querySelectorAll(\`.\${prefijoClase}-sin-etapa\`).forEach((chk) => {
+      const i = +chk.dataset.i;
+      if(!lista[i]) return;
+      lista[i].solo_si_sin_etapa = chk.checked;
     });
   }
 
@@ -6346,7 +6399,7 @@ ${estilosBase()}
 
   document.getElementById("addDisparador").addEventListener("click", () => {
     leerDisparadoresDelDOM();
-    disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false, etiqueta_a_agregar: "", solo_al_entrar_a_etapa: false });
+    disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false, etiqueta_a_agregar: "", solo_al_entrar_a_etapa: false, etiqueta_excluir: "", solo_si_sin_etapa: false });
     renderDisparadores();
   });
 
@@ -6582,7 +6635,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].disparadores) etapas[i].disparadores = [];
-      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false, etiqueta_a_agregar: "", solo_al_entrar_a_etapa: false });
+      etapas[i].disparadores.push({ frases: [], tipo: "audio", clave: "", contenido: "", pausa_segundos: 2, coincidencia: "contiene", exclusivo: false, etiqueta_a_agregar: "", solo_al_entrar_a_etapa: false, etiqueta_excluir: "" });
       renderEtapas();
     }));
 
@@ -7205,6 +7258,12 @@ ${estilosBase()}
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   }
   .chat-window-head-id{ font-family:var(--mono); font-size:11px; color:var(--muted-dim); margin-top:1px; }
+  .btn-abrir-instagram{
+    margin-left:auto; flex-shrink:0; font-size:12.5px; font-weight:600; color:var(--text);
+    background:var(--surface-3); border:1px solid var(--border); border-radius:8px;
+    padding:7px 12px; text-decoration:none; white-space:nowrap; transition:background .12s;
+  }
+  .btn-abrir-instagram:hover{ background:var(--surface-2); }
   .chat-messages{
     flex:1; overflow-y:auto; padding:16px 20px; display:flex; flex-direction:column; gap:6px;
   }
@@ -7677,6 +7736,7 @@ ${estilosBase()}
         <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}\${conv.califica ? ' <span title="Califica">✅</span>' : ''}\${conv.no_califica ? ' <span title="No Califica">🚫</span>' : ''}\${conv.agendo ? ' <span title="Agendó">📅</span>' : ''}\${conv.enlace_enviado ? ' <span title="Enlace enviado">🔗</span>' : ''}\${conv.bot_pausado ? ' <span title="Bot pausado">⏸️</span>' : ''}</div>
         <div class="chat-window-head-id">\${conv.sender_id}</div>
       </div>
+      \${conv.username ? \`<a class="btn-abrir-instagram" href="https://ig.me/m/\${encodeURIComponent(conv.username)}" target="_blank" rel="noopener noreferrer" title="Abrir esta conversación en Instagram (en una pestaña nueva)">↗️ Abrir en Instagram</a>\` : ''}
     \`;
     banner.classList.toggle("visible", conv.en_ventana_24h === false);
     bannerPausado.classList.toggle("visible", Boolean(conv.bot_pausado));
