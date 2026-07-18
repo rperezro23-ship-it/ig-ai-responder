@@ -7164,12 +7164,12 @@ ${estilosBase()}
   .bubble-row.user{ align-self:flex-start; align-items:flex-start; }
   .bubble-row.assistant{ align-self:flex-end; align-items:flex-end; }
   .bubble{
-    padding:8px 12px; border-radius:18px; font-size:13px; line-height:1.35;
+    padding:7px 12px; border-radius:13px; font-size:13px; line-height:1.35;
     white-space:pre-wrap; word-break:break-word;
   }
-  .bubble-row.user .bubble{ background:var(--surface-3); color:var(--text); border-bottom-left-radius:5px; }
-  .bubble-row.assistant .bubble{ background:var(--green); color:#04140D; border-bottom-right-radius:5px; }
-  .bubble-time{ font-size:10px; color:var(--muted-dim); margin-top:2px; font-family:var(--mono); padding:0 3px; }
+  .bubble-row.user .bubble{ background:var(--surface-3); color:var(--text); border-bottom-left-radius:4px; }
+  .bubble-row.assistant .bubble{ background:var(--green); color:#04140D; border-bottom-right-radius:4px; }
+  .bubble-time{ font-size:10px; color:var(--muted-dim); margin-top:0; font-family:var(--mono); padding:0 3px; }
   .indicador-visto{
     align-self:flex-end; font-size:10.5px; color:var(--muted-dim); margin-top:-3px; padding:0 3px;
   }
