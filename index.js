@@ -3335,6 +3335,42 @@ app.post("/chats/quitar-estado", requireAdminKey, async (req, res) => {
   }
 });
 
+// Permite marcar manualmente a un lead como "No Califica" — para los casos
+// donde el admin decide a mano que este lead no califica (por la razón que
+// sea), sin depender de que una transición automática lo detecte. Al
+// marcarlo, se cancelan de inmediato los seguimientos pendientes (si tienes
+// activada la opción de "no seguir si no califica" en /panel, ya no se le
+// va a mandar ninguno más) — el admin todavía tiene que mover manualmente
+// la conversación a la etapa "No Califica" con el selector de etapa, esto
+// solo pone la etiqueta.
+app.post("/chats/marcar-no-califica", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId, razon } = req.body || {};
+    if (!senderId) return res.status(400).json({ error: "Falta senderId." });
+
+    await guardarConversacion(senderId, {
+      no_califica: true,
+      no_califica_en: new Date().toISOString(),
+      razon_no_califica: (razon && razon.trim()) || "Marcado manualmente por el admin desde /chats.",
+      // Un lead no puede estar "califica" y "no califica" a la vez — se
+      // limpia la otra etiqueta si la tenía, para no dejar un estado
+      // contradictorio.
+      califica: false,
+      calificado_en: null,
+      razon_calificacion: null
+    });
+
+    if (configActual.no_seguir_si_no_califica) {
+      await cancelarSeguimientosPendientesDB(senderId);
+    }
+
+    console.log(`🚫 ${senderId} marcado manualmente como NO CALIFICA desde /chats.`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // Genera un resumen (edad, cuánto peso quiere perder, obstáculo, y dolores
 // de salud/estética) de UNA conversación en particular — se pide bajo
@@ -7166,6 +7202,13 @@ ${estilosBase()}
               <button type="button" id="btnConfirmarMonto">Guardar</button>
             </div>
           </div>
+          <div class="add-etiqueta-wrap">
+            <button type="button" class="btn-add-etiqueta" id="btnAddNoCalifica" style="color:var(--red); border-color:rgba(255,93,93,.35);">+ 🚫 No Califica</button>
+            <div class="etiqueta-popover" id="noCalificaPopover" style="display:none;">
+              <input type="text" id="inputRazonNoCalifica" placeholder="Motivo (opcional)" style="width:200px;">
+              <button type="button" id="btnConfirmarNoCalifica">Marcar</button>
+            </div>
+          </div>
           <span class="status-sep">·</span>
           <button type="button" class="btn-pausar-bot" id="btnPausarBot" title="Pausar el bot para esta conversación — tú respondes manualmente">⏸️ Pausar bot</button>
         </div>
@@ -7642,6 +7685,56 @@ ${estilosBase()}
   document.addEventListener("click", (e) => {
     if(popoverMonto.style.display !== "none" && !popoverMonto.contains(e.target) && e.target.id !== "btnAddMonto"){
       popoverMonto.style.display = "none";
+    }
+  });
+
+  // --- Popover para marcar manualmente a un lead como "No Califica" ---
+  const popoverNoCalifica = document.getElementById("noCalificaPopover");
+  const inputRazonNoCalifica = document.getElementById("inputRazonNoCalifica");
+
+  document.getElementById("btnAddNoCalifica").addEventListener("click", () => {
+    const abriendo = popoverNoCalifica.style.display === "none";
+    popoverNoCalifica.style.display = abriendo ? "flex" : "none";
+    if(abriendo){
+      inputRazonNoCalifica.value = "";
+      inputRazonNoCalifica.focus();
+    }
+  });
+
+  async function confirmarNoCalifica(){
+    if(!senderSeleccionado) return;
+    if(!confirm("Marcar esta conversación como No Califica? Esto detiene los seguimientos automáticos pendientes (si tienes esa opción activada en /panel).")) return;
+    const razon = inputRazonNoCalifica.value.trim();
+    const res = await fetch("/chats/marcar-no-califica", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ senderId: senderSeleccionado, razon })
+    });
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+    const data = await res.json();
+    if(data.ok){
+      const c = conversaciones.find(c => c.sender_id === senderSeleccionado);
+      if(c){
+        c.no_califica = true;
+        c.no_califica_en = new Date().toISOString();
+        c.razon_no_califica = razon || "Marcado manualmente por el admin desde /chats.";
+        c.califica = false;
+        c.calificado_en = null;
+        c.razon_calificacion = null;
+      }
+      popoverNoCalifica.style.display = "none";
+      renderHead();
+    } else {
+      alert("No se pudo marcar: " + (data.error || "error desconocido"));
+    }
+  }
+
+  document.getElementById("btnConfirmarNoCalifica").addEventListener("click", confirmarNoCalifica);
+  inputRazonNoCalifica.addEventListener("keydown", (e) => {
+    if(e.key === "Enter"){ e.preventDefault(); confirmarNoCalifica(); }
+  });
+  document.addEventListener("click", (e) => {
+    if(popoverNoCalifica.style.display !== "none" && !popoverNoCalifica.contains(e.target) && e.target.id !== "btnAddNoCalifica"){
+      popoverNoCalifica.style.display = "none";
     }
   });
 
