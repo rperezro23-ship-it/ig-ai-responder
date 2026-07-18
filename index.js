@@ -2988,6 +2988,17 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
     const { data, error } = await supabase
       .from("conversaciones")
       .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado, bot_pausado, username")
+      // Solo se muestran conversaciones donde el LEAD escribió algo alguna
+      // vez — "ultimo_mensaje_usuario" únicamente se actualiza cuando llega
+      // un mensaje DE la persona, nunca cuando se le manda algo a ella (ni
+      // el bot, ni un mensaje manual, ni la bienvenida automática de
+      // ManyChat a nuevos seguidores). Así, alguien que solo recibió esa
+      // bienvenida y nunca respondió (nunca se abrió la ventana de 24h) no
+      // aparece en ningún lado de /chats — pero si en algún momento SÍ
+      // respondió (aunque haya sido una sola vez, y ahora la ventana ya
+      // esté cerrada), sigue apareciendo normal, incluyendo en "Handoff",
+      // para poder darle seguimiento.
+      .not("ultimo_mensaje_usuario", "is", null)
       .order("actualizado_en", { ascending: false })
       .limit(200);
 
@@ -8422,6 +8433,10 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
     const { data, error } = await supabase
       .from("conversaciones")
       .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, etapa, etiquetas, monto_pagado, username")
+      // Mismo criterio que en /conversaciones: solo se exportan leads que
+      // alguna vez escribieron algo — se excluyen los que solo recibieron
+      // la bienvenida automática (ManyChat u otra) y nunca respondieron.
+      .not("ultimo_mensaje_usuario", "is", null)
       .order("actualizado_en", { ascending: false });
 
     if (error) return res.status(500).json({ error: error.message });
