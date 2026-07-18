@@ -893,7 +893,7 @@ function estilosBase() {
   /* En /chats se reduce el padding lateral y se quita el límite de ancho —
      así la lista de "Conversaciones" y el chat abierto aprovechan todo el
      espacio disponible, en vez de dejar márgenes vacíos a los lados. */
-  .content-area-chats{ padding-left:14px; padding-right:14px; justify-content:flex-start; }
+  .content-area-chats{ padding-left:14px; padding-right:14px; padding-top:0; padding-bottom:0; justify-content:flex-start; }
   .main-chats{ max-width:none; }
 
   @media (max-width:860px){
@@ -6910,7 +6910,7 @@ ${FUENTES_HTML}
 ${estilosBase()}
 <style>
   .chat-shell{
-    display:flex; gap:18px; height:calc(100vh - 110px); min-height:460px;
+    display:flex; gap:18px; height:calc(100vh - 4px); min-height:460px;
   }
 
   .chat-list-panel{
