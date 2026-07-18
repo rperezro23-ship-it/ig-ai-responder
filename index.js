@@ -6942,20 +6942,21 @@ ${estilosBase()}
     font-size:11px; margin-left:7px; flex-shrink:0;
   }
   .etapa-chip{
-    display:inline-block; font-family:var(--mono); font-size:10.5px; color:#C99BFF;
-    background:rgba(201,155,255,.12); border:1px solid rgba(201,155,255,.3); border-radius:6px;
-    padding:2px 7px; margin-left:7px; flex-shrink:0; vertical-align:middle;
+    display:inline-block; font-family:var(--mono); font-size:10px; color:#C99BFF;
+    background:rgba(201,155,255,.12); border:1px solid rgba(201,155,255,.3); border-radius:20px;
+    padding:2px 9px; flex-shrink:0; vertical-align:middle; margin-left:auto; white-space:nowrap;
   }
+  .etiquetas-fila-lista{ margin-bottom:4px; }
   .etiqueta-chip-mini{
     display:inline-block; font-size:10.5px; font-weight:600; color:#FFC542;
-    background:rgba(255,197,66,.12); border:1px solid rgba(255,197,66,.3); border-radius:6px;
-    padding:2px 7px; margin-left:7px; flex-shrink:0; vertical-align:middle;
+    background:rgba(255,197,66,.12); border:1px solid rgba(255,197,66,.3); border-radius:20px;
+    padding:2px 9px; flex-shrink:0; vertical-align:middle;
   }
   .handoff-dot{
     width:8px; height:8px; border-radius:50%; background:var(--red); flex-shrink:0;
-    display:inline-block; margin-left:7px; box-shadow:0 0 0 2px rgba(255,93,93,.18);
+    display:inline-block; box-shadow:0 0 0 2px rgba(255,93,93,.18);
   }
-  .uname-row{ display:flex; align-items:center; }
+  .uname-row{ display:flex; align-items:center; gap:6px; margin-bottom:4px; }
   .handoff-banner{
     background:var(--red-soft); color:var(--red); font-size:13px; padding:11px 20px;
     border-bottom:1px solid rgba(255,93,93,.25); display:none; align-items:center; gap:8px;
@@ -7126,7 +7127,7 @@ ${estilosBase()}
   }
   .chat-list-item .uname{
     font-family:var(--display); font-weight:600; font-size:14.5px; color:var(--text);
-    margin-bottom:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;
   }
   .chat-list-item .preview{
     font-size:13.5px; color:var(--muted); overflow:hidden; text-overflow:ellipsis;
@@ -7499,10 +7500,10 @@ ${estilosBase()}
             \${c.no_califica ? '<span class="califica-badge" title="No Califica' + (c.razon_no_califica ? ": " + escapar(c.razon_no_califica) : "") + '">🚫</span>' : ''}
             \${c.agendo ? '<span class="califica-badge" title="Agendó">📅</span>' : ''}
             \${c.enlace_enviado ? '<span class="enlace-badge" title="Enlace enviado">🔗</span>' : ''}
-            \${(c.etiquetas && c.etiquetas.length > 0) ? '<span class="etiqueta-chip-mini" title="' + escapar(c.etiquetas.join(", ")) + '">🏷️ ' + escapar(c.etiquetas[0]) + (c.etiquetas.length > 1 ? ' +' + (c.etiquetas.length - 1) : '') + '</span>' : ''}
-            \${c.etapa_nombre ? '<span class="etapa-chip" title="Etapa actual">' + escapar(c.etapa_nombre) + '</span>' : ''}
             \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
+            \${c.etapa_nombre ? '<span class="etapa-chip" title="Etapa actual">' + escapar(c.etapa_nombre) + '</span>' : ''}
           </div>
+          \${(c.etiquetas && c.etiquetas.length > 0) ? '<div class="etiquetas-fila-lista"><span class="etiqueta-chip-mini" title="' + escapar(c.etiquetas.join(", ")) + '">🏷️ ' + escapar(c.etiquetas[0]) + (c.etiquetas.length > 1 ? ' +' + (c.etiquetas.length - 1) : '') + '</span></div>' : ''}
           <div class="preview">\${c.ultimo_role === "assistant" ? "🤖 " : ""}\${escapar(c.ultimo_texto) || "(sin mensajes)"}</div>
           <div class="time">
             \${formatearTiempoRelativo(c.actualizado_en)}
