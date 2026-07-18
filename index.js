@@ -6914,7 +6914,7 @@ ${estilosBase()}
   }
 
   .chat-list-panel{
-    width:320px; flex-shrink:0; background:var(--surface); border:1px solid var(--border);
+    width:400px; flex-shrink:0; background:var(--surface); border:1px solid var(--border);
     border-radius:var(--radius-lg); display:flex; flex-direction:column; overflow:hidden;
   }
   .chat-list-head{
@@ -7501,7 +7501,6 @@ ${estilosBase()}
             \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
             \${c.etapa_nombre ? '<span class="etapa-chip" title="Etapa actual">' + escapar(c.etapa_nombre) + '</span>' : ''}
           </div>
-          \${(c.etiquetas && c.etiquetas.length > 0) ? '<div class="etiquetas-fila-lista"><span class="etiqueta-chip-mini" title="' + escapar(c.etiquetas.join(", ")) + '">🏷️ ' + escapar(c.etiquetas[0]) + (c.etiquetas.length > 1 ? ' +' + (c.etiquetas.length - 1) : '') + '</span></div>' : ''}
           <div class="preview">\${c.ultimo_role === "assistant" ? "🤖 " : ""}\${escapar(c.ultimo_texto) || "(sin mensajes)"}</div>
           <div class="time">
             \${formatearTiempoRelativo(c.actualizado_en)}
