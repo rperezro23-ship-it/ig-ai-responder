@@ -7160,11 +7160,11 @@ ${estilosBase()}
   .chat-messages{
     flex:1; overflow-y:auto; padding:16px 20px; display:flex; flex-direction:column; gap:6px;
   }
-  .bubble-row{ display:flex; flex-direction:column; max-width:60%; }
+  .bubble-row{ display:flex; flex-direction:column; max-width:280px; }
   .bubble-row.user{ align-self:flex-start; align-items:flex-start; }
   .bubble-row.assistant{ align-self:flex-end; align-items:flex-end; }
   .bubble{
-    padding:8px 13px; border-radius:18px; font-size:13.5px; line-height:1.4;
+    padding:8px 12px; border-radius:18px; font-size:13px; line-height:1.35;
     white-space:pre-wrap; word-break:break-word;
   }
   .bubble-row.user .bubble{ background:var(--surface-3); color:var(--text); border-bottom-left-radius:5px; }
