@@ -7107,7 +7107,14 @@ ${estilosBase()}
     font-size:13.5px; color:var(--muted); overflow:hidden; text-overflow:ellipsis;
     white-space:nowrap; margin-bottom:4px;
   }
-  .chat-list-item .time{ font-size:11.5px; color:var(--muted-dim); font-family:var(--mono); }
+  .chat-list-item .time{
+    font-size:11.5px; color:var(--muted-dim); font-family:var(--mono);
+    display:flex; align-items:center; gap:8px;
+  }
+  .handoff-cuenta-regresiva{
+    color:#FFC542; font-size:11px; background:rgba(255,197,66,.1);
+    padding:1px 6px; border-radius:8px;
+  }
   .vacio-lista{ color:var(--muted); font-size:14.5px; padding:20px 18px; }
 
   .chat-window{
@@ -7138,6 +7145,13 @@ ${estilosBase()}
   .bubble-row.user .bubble{ background:var(--surface-3); color:var(--text); border-bottom-left-radius:4px; }
   .bubble-row.assistant .bubble{ background:var(--green); color:#04140D; border-bottom-right-radius:4px; }
   .bubble-time{ font-size:11px; color:var(--muted-dim); margin-top:4px; font-family:var(--mono); padding:0 3px; }
+  .dia-separador{
+    display:flex; justify-content:center; margin:10px 0; align-self:stretch;
+  }
+  .dia-separador span{
+    background:var(--surface-3); color:var(--muted); font-size:12px; font-weight:600;
+    padding:5px 14px; border-radius:14px;
+  }
   .chat-empty{
     flex:1; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:15px;
   }
@@ -7294,6 +7308,40 @@ ${estilosBase()}
       d.toLocaleTimeString("es-MX", { hour:"2-digit", minute:"2-digit" });
   }
 
+  // Tiempo relativo estilo Instagram ("3 h", "5 h", "2 d", "ahora") — se usa
+  // en el listado de chats, igual que hace la propia app de Instagram debajo
+  // del nombre de cada conversación.
+  function formatearTiempoRelativo(iso){
+    if(!iso) return "";
+    const ms = Date.now() - new Date(iso).getTime();
+    if(ms < 0) return "ahora";
+    const minutos = Math.floor(ms / 60000);
+    if(minutos < 1) return "ahora";
+    if(minutos < 60) return minutos + " min";
+    const horas = Math.floor(minutos / 60);
+    if(horas < 24) return horas + " h";
+    const dias = Math.floor(horas / 24);
+    if(dias < 7) return dias + " d";
+    const semanas = Math.floor(dias / 7);
+    if(semanas < 4) return semanas + " sem";
+    const meses = Math.floor(dias / 30);
+    return meses + " mes" + (meses > 1 ? "es" : "");
+  }
+
+  // Cuenta regresiva hasta que la conversación entra en handoff (24h desde
+  // el último mensaje del LEAD, no desde el último mensaje del bot/tú) —
+  // "2h 15m", o "Vencido" si ya pasó y todavía no se marcó como handoff.
+  function formatearCuentaRegresivaHandoff(ultimoMensajeUsuarioIso){
+    if(!ultimoMensajeUsuarioIso) return null;
+    const vencePor = new Date(ultimoMensajeUsuarioIso).getTime() + (24 * 60 * 60 * 1000);
+    const restanteMs = vencePor - Date.now();
+    if(restanteMs <= 0) return null; // ya está en handoff, no hace falta contar
+    const horas = Math.floor(restanteMs / 3600000);
+    const minutos = Math.floor((restanteMs % 3600000) / 60000);
+    if(horas > 0) return horas + "h " + minutos + "m";
+    return minutos + "m";
+  }
+
   function escapar(txt){
     return (txt || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   }
@@ -7428,7 +7476,10 @@ ${estilosBase()}
             \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
           </div>
           <div class="preview">\${c.ultimo_role === "assistant" ? "🤖 " : ""}\${escapar(c.ultimo_texto) || "(sin mensajes)"}</div>
-          <div class="time">\${formatearFecha(c.actualizado_en)}</div>
+          <div class="time">
+            \${formatearTiempoRelativo(c.actualizado_en)}
+            \${c.en_ventana_24h && formatearCuentaRegresivaHandoff(c.ultimo_mensaje_usuario) ? '<span class="handoff-cuenta-regresiva" title="Tiempo restante antes de entrar en handoff (24h desde su último mensaje)">⏳ ' + formatearCuentaRegresivaHandoff(c.ultimo_mensaje_usuario) + '</span>' : ''}
+          </div>
         </div>
       </div>
     \`).join("");
@@ -8257,7 +8308,24 @@ ${estilosBase()}
     await cargarUltimaPagina();
   }
 
-  function construirBurbujaHTML(m){
+  function formatearHora(iso){
+    if(!iso) return "";
+    return new Date(iso).toLocaleTimeString("es-MX", { hour:"2-digit", minute:"2-digit" });
+  }
+
+  // Etiqueta del separador de día que aparece entre burbujas cuando cambia
+  // la fecha, igual que en WhatsApp ("Hoy", "Ayer", o la fecha completa).
+  function formatearSeparadorDia(iso){
+    const fecha = new Date(iso);
+    const hoy = new Date();
+    const ayer = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate() - 1);
+    const esMismoDia = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    if(esMismoDia(fecha, hoy)) return "Hoy";
+    if(esMismoDia(fecha, ayer)) return "Ayer";
+    return fecha.toLocaleDateString("es-MX", { day:"numeric", month:"long", year: fecha.getFullYear() !== hoy.getFullYear() ? "numeric" : undefined });
+  }
+
+  function construirBurbujaHTML(m, mostrarSeparadorDia){
     const esImagen = typeof m.content === "string" && m.content.startsWith("[[imagen]]");
     const esAudio = typeof m.content === "string" && m.content.startsWith("[[audio]]");
     let contenidoHTML;
@@ -8268,9 +8336,16 @@ ${estilosBase()}
     } else {
       contenidoHTML = escapar(m.content);
     }
+    const separadorHTML = mostrarSeparadorDia
+      ? \`<div class="dia-separador"><span>\${formatearSeparadorDia(m.creado_en)}</span></div>\`
+      : "";
     return \`
+      \${separadorHTML}
       <div class="bubble-row \${m.role === "assistant" ? "assistant" : "user"}">
-        <div class="bubble\${(esImagen || esAudio) ? " bubble-imagen" : ""}">\${contenidoHTML}</div>
+        <div class="bubble\${(esImagen || esAudio) ? " bubble-imagen" : ""}" title="\${escapar(formatearFecha(m.creado_en))}">
+          \${contenidoHTML}
+        </div>
+        <div class="bubble-time">\${formatearHora(m.creado_en)}</div>
       </div>
     \`;
   }
@@ -8282,7 +8357,17 @@ ${estilosBase()}
       return;
     }
     const estabaAbajo = cont.scrollTop + cont.clientHeight >= cont.scrollHeight - 60;
-    cont.innerHTML = mensajesMostrados.map(construirBurbujaHTML).join("");
+
+    // El separador de día se muestra en el primer mensaje, y cada vez que
+    // el día cambia respecto al mensaje anterior (igual que WhatsApp).
+    let diaAnterior = null;
+    cont.innerHTML = mensajesMostrados.map(m => {
+      const diaDeEsteMensaje = m.creado_en ? new Date(m.creado_en).toDateString() : null;
+      const mostrarSeparador = diaDeEsteMensaje !== diaAnterior;
+      diaAnterior = diaDeEsteMensaje;
+      return construirBurbujaHTML(m, mostrarSeparador);
+    }).join("");
+
     if(estabaAbajo || cont.dataset.primeraVez !== "hecho"){
       cont.scrollTop = cont.scrollHeight;
       cont.dataset.primeraVez = "hecho";
@@ -8354,7 +8439,20 @@ ${estilosBase()}
     if(cont.dataset.primeraVez !== "hecho"){
       renderMensajesCompleto();
     } else {
-      cont.insertAdjacentHTML("beforeend", nuevos.map(construirBurbujaHTML).join(""));
+      // El día "anterior" es el del último mensaje que ya estaba mostrado
+      // antes de agregar estos nuevos — así el separador solo aparece si de
+      // verdad cambia el día, no en cada mensaje nuevo que llegue.
+      const indiceUltimoViejo = mensajesMostrados.length - nuevos.length - 1;
+      let diaAnterior = indiceUltimoViejo >= 0 && mensajesMostrados[indiceUltimoViejo].creado_en
+        ? new Date(mensajesMostrados[indiceUltimoViejo].creado_en).toDateString()
+        : null;
+      const html = nuevos.map(m => {
+        const diaDeEsteMensaje = m.creado_en ? new Date(m.creado_en).toDateString() : null;
+        const mostrarSeparador = diaDeEsteMensaje !== diaAnterior;
+        diaAnterior = diaDeEsteMensaje;
+        return construirBurbujaHTML(m, mostrarSeparador);
+      }).join("");
+      cont.insertAdjacentHTML("beforeend", html);
       if(estabaAbajo) cont.scrollTop = cont.scrollHeight;
     }
   }
