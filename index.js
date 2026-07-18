@@ -221,7 +221,16 @@ async function agregarAlHistorialDB(senderId, role, content) {
     // Esto SÍ es actividad real (un mensaje, en cualquiera de los dos
     // sentidos) — por eso aquí sí se actualiza "actualizado_en" a propósito,
     // a diferencia de guardarConversacion, que ya no lo hace automáticamente.
-    actualizado_en: new Date().toISOString()
+    actualizado_en: new Date().toISOString(),
+    // Copia liviana del último mensaje (solo texto + quién lo mandó) — sirve
+    // para que /conversaciones (que se refresca cada 4 segundos mientras
+    // /chats está abierto) pueda mostrar la vista previa de cada
+    // conversación SIN tener que traer el historial COMPLETO de las 200
+    // conversaciones en cada refresco — eso disparaba muchísimo el consumo
+    // de datos de Supabase innecesariamente, ya que solo hacía falta este
+    // último mensaje, no la conversación entera.
+    ultimo_mensaje_texto: typeof content === "string" ? content.slice(0, 300) : "",
+    ultimo_mensaje_role: role
   };
   // Se registra el momento exacto en que se mandó el último mensaje DEL BOT
   // (no del cliente) — sirve para los seguimientos con "solo si está visto":
@@ -3086,7 +3095,14 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado, bot_pausado, username, visto_hasta")
+      // IMPORTANTE: aquí ya NO se pide "historial" (el arreglo completo de
+      // mensajes) — antes se traía completo para las 200 conversaciones en
+      // CADA refresco de /chats (cada 4 segundos), lo cual disparaba
+      // muchísimo el consumo de datos de Supabase sin necesidad, ya que
+      // solo hacía falta el último mensaje de cada una para la vista
+      // previa. Ahora se usan los campos livianos "ultimo_mensaje_texto" /
+      // "ultimo_mensaje_role" en su lugar (ver agregarAlHistorialDB).
+      .select("sender_id, ultimo_mensaje_texto, ultimo_mensaje_role, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado, bot_pausado, username, visto_hasta")
       // Solo se muestran conversaciones donde el LEAD escribió algo alguna
       // vez — "ultimo_mensaje_usuario" únicamente se actualiza cuando llega
       // un mensaje DE la persona, nunca cuando se le manda algo a ella (ni
@@ -3106,8 +3122,6 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
     const totalPasosEnlace = (configActual.seguimientos_enlace || []).length;
 
     const resumen = await Promise.all((data || []).map(async (c) => {
-      const historial = Array.isArray(c.historial) ? c.historial : [];
-      const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
       const perfil = await obtenerPerfilInstagram(c.sender_id);
 
       const enVentana24h = c.ultimo_mensaje_usuario
@@ -3130,8 +3144,8 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         profile_pic: perfil?.profile_pic || null,
         ultimo_mensaje_usuario: c.ultimo_mensaje_usuario,
         actualizado_en: c.actualizado_en,
-        ultimo_texto: ultimo ? ultimo.content : null,
-        ultimo_role: ultimo ? ultimo.role : null,
+        ultimo_texto: c.ultimo_mensaje_texto || null,
+        ultimo_role: c.ultimo_mensaje_role || null,
         en_ventana_24h: enVentana24h,
         califica: Boolean(c.califica),
         calificado_en: c.calificado_en || null,
@@ -4176,6 +4190,55 @@ async function respaldarPrimerMensajeExistenteUnaVez() {
 }
 
 respaldarPrimerMensajeExistenteUnaVez();
+
+// Respaldo único (se corre solo una vez, al arrancar el servidor después de
+// este despliegue): completa "ultimo_mensaje_texto" / "ultimo_mensaje_role"
+// para las conversaciones que ya existían de antes de este cambio — así no
+// se ven en blanco en /chats hasta que llegue su próximo mensaje real. Esto
+// SÍ trae el historial completo, pero es un costo único (no recurrente cada
+// 4 segundos como antes), así que no afecta el consumo de datos a futuro.
+async function respaldarUltimoMensajeLivianoUnaVez() {
+  try {
+    const { data: conversaciones, error } = await supabase
+      .from("conversaciones")
+      .select("sender_id, historial")
+      .is("ultimo_mensaje_texto", null)
+      .not("historial", "is", null);
+
+    if (error) {
+      console.error("❌ Error leyendo conversaciones para el respaldo de ultimo_mensaje_texto:", error.message);
+      return;
+    }
+    if (!conversaciones || conversaciones.length === 0) return;
+
+    let actualizadas = 0;
+    for (const conv of conversaciones) {
+      const historial = Array.isArray(conv.historial) ? conv.historial : [];
+      const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
+      if (!ultimo) continue;
+
+      const { error: errorGuardado } = await supabase
+        .from("conversaciones")
+        .update({
+          ultimo_mensaje_texto: typeof ultimo.content === "string" ? ultimo.content.slice(0, 300) : "",
+          ultimo_mensaje_role: ultimo.role || null
+        })
+        .eq("sender_id", conv.sender_id);
+
+      if (errorGuardado) {
+        console.error(`❌ Error guardando ultimo_mensaje_texto de ${conv.sender_id}:`, errorGuardado.message);
+      } else {
+        actualizadas++;
+      }
+    }
+
+    console.log(`✅ Respaldo inicial de ultimo_mensaje_texto: ${actualizadas} de ${conversaciones.length} conversación(es) actualizadas.`);
+  } catch (err) {
+    console.error("❌ Error inesperado en el respaldo de ultimo_mensaje_texto:", err.message);
+  }
+}
+
+respaldarUltimoMensajeLivianoUnaVez();
 
 
 async function estaBotActivo() {
