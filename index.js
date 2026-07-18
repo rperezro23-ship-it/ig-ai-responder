@@ -6904,7 +6904,7 @@ ${FUENTES_HTML}
 ${estilosBase()}
 <style>
   .chat-shell{
-    display:flex; gap:18px; height:calc(100vh - 230px); min-height:460px;
+    display:flex; gap:18px; height:calc(100vh - 110px); min-height:460px;
   }
 
   .chat-list-panel{
@@ -7196,14 +7196,6 @@ ${estilosBase()}
   ${sidebarHTML("chats")}
   <div class="content-area">
   <div class="main">
-    <div class="page-header">
-      <div class="page-header-left">
-        <p class="page-eyebrow">Instagram</p>
-        <h1 class="page-title">Chats en vivo</h1>
-      </div>
-    </div>
-    <p class="page-sub">Conversaciones de la cuenta de Instagram conectada. La lista y el chat abierto se actualizan solos cada pocos segundos.</p>
-
     <div class="chat-shell">
       <div class="chat-list-panel">
         <div class="chat-list-head">
