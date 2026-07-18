@@ -8725,14 +8725,48 @@ ${estilosBase()}
     if(cont.scrollTop < 80) cargarPaginaAntigua();
   });
 
-  setInterval(async () => {
+  // El refresco automático se PAUSA por completo mientras la pestaña no
+  // está a la vista (cambiaste a otra pestaña, minimizaste el navegador,
+  // etc.) — dejar /chats abierto de fondo sin que nadie lo esté mirando
+  // igual generaba una consulta a Supabase cada 4 segundos, sumando
+  // consumo de datos innecesario todo ese tiempo. En cuanto vuelves a la
+  // pestaña, se refresca de inmediato y retoma el ciclo normal — no se
+  // pierde nada de actualidad, solo se evita gastar de más mientras nadie
+  // está viendo la pantalla.
+  async function refrescoPeriodico(){
     await cargarConversaciones();
     if(senderSeleccionado){
       await revisarMensajesNuevos();
       actualizarIndicadorVistoEnPantalla();
       actualizarIndicadorEscribiendo();
     }
-  }, 4000);
+  }
+
+  let intervaloRefresco = null;
+
+  function iniciarRefrescoPeriodico(){
+    if(intervaloRefresco) return; // ya estaba corriendo, no duplicar
+    refrescoPeriodico(); // refresco inmediato al (re)activar, sin esperar los 4s
+    intervaloRefresco = setInterval(refrescoPeriodico, 4000);
+  }
+
+  function pausarRefrescoPeriodico(){
+    if(!intervaloRefresco) return;
+    clearInterval(intervaloRefresco);
+    intervaloRefresco = null;
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if(document.visibilityState === "visible"){
+      iniciarRefrescoPeriodico();
+    } else {
+      pausarRefrescoPeriodico();
+    }
+  });
+
+  if(document.visibilityState === "visible"){
+    iniciarRefrescoPeriodico();
+  }
 
   document.getElementById("btnReporteDolores").addEventListener("click", async () => {
     const btn = document.getElementById("btnReporteDolores");
@@ -8793,7 +8827,6 @@ ${estilosBase()}
   }
 
   cargarEtapasDisponibles();
-  cargarConversaciones();
   cargarEtiquetasEnSelectorReporte();
 </script>
 </body>
