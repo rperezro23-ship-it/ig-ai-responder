@@ -7167,7 +7167,7 @@ ${estilosBase()}
   .chat-messages{
     flex:1; overflow-y:auto; padding:16px 20px; display:flex; flex-direction:column; gap:6px;
   }
-  .bubble-row{ display:flex; flex-direction:column; max-width:600px; }
+  .bubble-row{ display:flex; flex-direction:column; max-width:562px; }
   .bubble-row.user{ align-self:flex-start; align-items:flex-start; }
   .bubble-row.assistant{ align-self:flex-end; align-items:flex-end; }
   .bubble{
