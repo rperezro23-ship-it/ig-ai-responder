@@ -2115,13 +2115,24 @@ async function procesarBuffer(senderId) {
     let etapaConfig = obtenerEtapaConfig(etapaActualClave);
 
     // Etapa de entrada: si el lead es completamente nuevo (nunca se le ha
-    // asignado ninguna etapa y todavía no tiene historial) y hay una etapa
-    // marcada como "entrada" en /panel, entra directo ahí — sin necesidad de
-    // que ninguna palabra clave o condición coincida primero. Sirve para
-    // arrancar el flujo siempre desde un punto fijo (ej. cuando ya sabes por
-    // qué campaña/CTA llegó el lead) en vez de pasar por el prompt general.
+    // asignado ninguna etapa y NUNCA ha escrito nada él mismo) y hay una
+    // etapa marcada como "entrada" en /panel, entra directo ahí — sin
+    // necesidad de que ninguna palabra clave o condición coincida primero.
+    // Sirve para arrancar el flujo siempre desde un punto fijo (ej. cuando
+    // ya sabes por qué campaña/CTA llegó el lead) en vez de pasar por el
+    // prompt general.
+    //
+    // IMPORTANTE: se revisa si hay algún mensaje con role "user" en el
+    // historial — NO simplemente si el historial está vacío. La diferencia
+    // importa: si alguien le mandó un mensaje de bienvenida automático a
+    // este lead ANTES de que él escribiera nada (ej. la automatización de
+    // ManyChat a nuevos seguidores, o un mensaje manual desde la app), ese
+    // envío se registra en el historial como "assistant" — con solo
+    // revisar "length === 0" ya no se detectaría como lead nuevo cuando
+    // por fin escribiera, dejándolo sin ninguna etapa asignada.
     let entroPorEtapaDeEntrada = false;
-    if (!etapaActualClave && historial.length === 0) {
+    const yaEscribioAntes = historial.some(m => m.role === "user");
+    if (!etapaActualClave && !yaEscribioAntes) {
       const etapaEntrada = (configActual.etapas || []).find(e => e.entrada);
       if (etapaEntrada) {
         console.log(`🚪 ${senderId} es un lead nuevo — entra directo a la etapa de entrada "${etapaEntrada.clave}".`);
