@@ -7134,20 +7134,20 @@ ${estilosBase()}
   }
   .chat-window-head-id{ font-family:var(--mono); font-size:11px; color:var(--muted-dim); margin-top:1px; }
   .chat-messages{
-    flex:1; overflow-y:auto; padding:22px; display:flex; flex-direction:column; gap:12px;
+    flex:1; overflow-y:auto; padding:16px 20px; display:flex; flex-direction:column; gap:6px;
   }
-  .bubble-row{ display:flex; flex-direction:column; max-width:70%; }
+  .bubble-row{ display:flex; flex-direction:column; max-width:60%; }
   .bubble-row.user{ align-self:flex-start; align-items:flex-start; }
   .bubble-row.assistant{ align-self:flex-end; align-items:flex-end; }
   .bubble{
-    padding:11px 15px; border-radius:15px; font-size:14.5px; line-height:1.55;
+    padding:8px 13px; border-radius:18px; font-size:13.5px; line-height:1.4;
     white-space:pre-wrap; word-break:break-word;
   }
-  .bubble-row.user .bubble{ background:var(--surface-3); color:var(--text); border-bottom-left-radius:4px; }
-  .bubble-row.assistant .bubble{ background:var(--green); color:#04140D; border-bottom-right-radius:4px; }
-  .bubble-time{ font-size:11px; color:var(--muted-dim); margin-top:4px; font-family:var(--mono); padding:0 3px; }
+  .bubble-row.user .bubble{ background:var(--surface-3); color:var(--text); border-bottom-left-radius:5px; }
+  .bubble-row.assistant .bubble{ background:var(--green); color:#04140D; border-bottom-right-radius:5px; }
+  .bubble-time{ font-size:10px; color:var(--muted-dim); margin-top:2px; font-family:var(--mono); padding:0 3px; }
   .indicador-visto{
-    align-self:flex-end; font-size:11.5px; color:var(--muted-dim); margin-top:-6px; padding:0 3px;
+    align-self:flex-end; font-size:10.5px; color:var(--muted-dim); margin-top:-3px; padding:0 3px;
   }
   .dia-separador{
     display:flex; justify-content:center; margin:10px 0; align-self:stretch;
