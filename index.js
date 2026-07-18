@@ -192,9 +192,21 @@ async function obtenerConversacion(senderId) {
 }
 
 async function guardarConversacion(senderId, campos) {
+  // IMPORTANTE: "actualizado_en" YA NO se toca automáticamente aquí — antes
+  // se ponía en "ahora" en CADA llamada a esta función, sin importar si
+  // representaba actividad real (un mensaje) o solo una actualización de
+  // fondo (guardar el username, un evento de "visto", agregar una
+  // etiqueta, etc.) — eso hacía que la lista de /chats mostrara "hace 2
+  // min" en TODAS las conversaciones, incluso las que llevaban horas sin
+  // ningún mensaje real, porque cosas como el refresco del perfil de
+  // Instagram (que corre cada vez que se carga la lista) seguían
+  // "tocando" la fecha por error. Ahora, quien quiera que esta llamada
+  // cuente como actividad reciente tiene que pasar "actualizado_en"
+  // explícitamente dentro de "campos" (ver agregarAlHistorialDB, que sí lo
+  // hace porque representa un mensaje real).
   const { error } = await supabase
     .from("conversaciones")
-    .upsert({ sender_id: senderId, actualizado_en: new Date().toISOString(), ...campos });
+    .upsert({ sender_id: senderId, ...campos });
 
   if (error) console.error("❌ Error guardando conversación en Supabase:", error.message);
 }
@@ -204,7 +216,13 @@ async function agregarAlHistorialDB(senderId, role, content) {
   const historial = [...(conv.historial || []), { role, content }];
   while (historial.length > configActual.max_historial) historial.shift();
 
-  const campos = { historial };
+  const campos = {
+    historial,
+    // Esto SÍ es actividad real (un mensaje, en cualquiera de los dos
+    // sentidos) — por eso aquí sí se actualiza "actualizado_en" a propósito,
+    // a diferencia de guardarConversacion, que ya no lo hace automáticamente.
+    actualizado_en: new Date().toISOString()
+  };
   // Se registra el momento exacto en que se mandó el último mensaje DEL BOT
   // (no del cliente) — sirve para los seguimientos con "solo si está visto":
   // se compara contra la marca de "leído" (visto_hasta) que manda Instagram,
@@ -235,7 +253,13 @@ async function guardarMensajeChatCompleto(senderId, role, content) {
 }
 
 async function registrarMensajeUsuario(senderId, textoMensaje) {
-  const campos = { ultimo_mensaje_usuario: new Date().toISOString() };
+  const campos = {
+    ultimo_mensaje_usuario: new Date().toISOString(),
+    // El lead escribiendo es actividad real — se actualiza a propósito
+    // (ver la nota en guardarConversacion sobre por qué esto ya no es
+    // automático).
+    actualizado_en: new Date().toISOString()
+  };
 
   // "primer_mensaje_en" y "primer_mensaje_texto" se guardan UNA SOLA VEZ —
   // la primera vez que este sender_id le escribe al bot. La fecha sirve
