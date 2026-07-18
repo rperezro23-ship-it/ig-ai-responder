@@ -6807,7 +6807,7 @@ ${estilosBase()}
             <div class="audio-clave">[[audio:\${clave}]]</div>
             <div class="audio-nombre">\${(a.nombre_original || clave).replace(/</g,"&lt;")}</div>
           </div>
-          <audio controls src="\${a.url}"></audio>
+          <audio controls preload="none" src="\${a.url}"></audio>
           <button type="button" class="quitar btn-audio-quitar" data-clave="\${clave}">quitar</button>
         </div>
       \`;
@@ -6890,7 +6890,7 @@ ${estilosBase()}
       const f = fotos[clave];
       return \`
         <div class="audio-item" data-clave="\${clave}">
-          <img src="\${f.url}" alt="" style="width:52px; height:52px; object-fit:cover; border-radius:9px; flex-shrink:0;">
+          <img src="\${f.url}" alt="" loading="lazy" style="width:52px; height:52px; object-fit:cover; border-radius:9px; flex-shrink:0;">
           <div class="audio-info">
             <div class="audio-clave">[[foto:\${clave}]]</div>
             <div class="audio-nombre">\${(f.nombre_original || clave).replace(/</g,"&lt;")}</div>
@@ -8595,7 +8595,7 @@ ${estilosBase()}
     if (esImagen) {
       contenidoHTML = \`<img src="\${m.content.slice(10)}" alt="imagen enviada" loading="lazy">\`;
     } else if (esAudio) {
-      contenidoHTML = \`<audio controls src="\${m.content.slice(9)}"></audio>\`;
+      contenidoHTML = \`<audio controls preload="none" src="\${m.content.slice(9)}"></audio>\`;
     } else {
       contenidoHTML = escapar(m.content);
     }
