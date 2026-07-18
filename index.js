@@ -1109,6 +1109,33 @@ async function enviarMensajeInstagram(senderId, texto) {
   registrarMidBot(resp.data?.message_id);
 }
 
+// Activa el indicador de "escribiendo..." del LADO DEL LEAD en Instagram —
+// usando el "sender_action" de la API, en vez de un mensaje. Instagram lo
+// apaga solo después de unos 20-25 segundos, o en cuanto le llega un
+// mensaje real — así que solo hace falta prenderlo, nunca hace falta
+// apagarlo manualmente. Es un detalle cosmético (no crítico): si falla por
+// cualquier motivo, se ignora el error y se sigue con el envío normal del
+// mensaje, para que un fallo aquí nunca bloquee la respuesta real.
+async function activarEscribiendoInstagram(senderId) {
+  try {
+    const cuenta = await obtenerCuentaActiva();
+    if (!cuenta) return;
+
+    await axios.post(
+      `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
+      {
+        recipient: { id: senderId },
+        sender_action: "typing_on"
+      },
+      {
+        headers: { "Authorization": `Bearer ${cuenta.access_token}` }
+      }
+    );
+  } catch (err) {
+    console.error(`⚠️ No se pudo activar el indicador de "escribiendo..." para ${senderId} (no es crítico, se ignora):`, err.response?.data || err.message);
+  }
+}
+
 // Manda un audio pregrabado como adjunto ("attachment" tipo audio). Instagram
 // lo entrega en el chat como un mensaje de audio reproducible normal, igual
 // que cualquier nota de voz — la diferencia es que el archivo ya existe (no
@@ -2574,6 +2601,7 @@ async function procesarBuffer(senderId) {
   buffer.enProceso = false;
 
   if (buffer.mensajes.length > 0) {
+    activarEscribiendoInstagram(senderId);
     const delay = segundosAleatorios(configActual.min_delay, configActual.max_delay);
     buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
   } else {
@@ -2595,6 +2623,13 @@ function encolarMensaje(senderId, mensaje) {
   if (buffer.enProceso) return;
 
   if (buffer.timer) clearTimeout(buffer.timer);
+
+  // Le muestra al lead el indicador de "escribiendo..." de Instagram durante
+  // la pausa — simula mejor que hay una persona real del otro lado, en vez
+  // de que la respuesta aparezca de golpe sin ningún aviso previo. Es
+  // "fire and forget" (no se espera su resultado) porque es solo un detalle
+  // cosmético, nunca debe atrasar ni bloquear el envío real del mensaje.
+  activarEscribiendoInstagram(senderId);
 
   const delay = segundosAleatorios(configActual.min_delay, configActual.max_delay);
   buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
@@ -3092,7 +3127,13 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         etiquetas: Array.isArray(c.etiquetas) ? c.etiquetas : [],
         monto_pagado: Number(c.monto_pagado) || 0,
         bot_pausado: Boolean(c.bot_pausado),
-        visto_hasta: c.visto_hasta || null
+        visto_hasta: c.visto_hasta || null,
+        // Se reutiliza la bandera "enProceso" del buffer de mensajes en
+        // memoria — se activa justo cuando el bot empieza a procesar/generar
+        // la respuesta de este lead, y se apaga cuando termina. Sirve para
+        // mostrar los "tres puntitos" de "escribiendo..." en /chats, igual
+        // que hace la propia Instagram.
+        escribiendo: Boolean(buffers.get(c.sender_id)?.enProceso)
       };
     }));
 
@@ -7180,6 +7221,19 @@ ${estilosBase()}
   .indicador-visto{
     align-self:flex-end; font-size:10.5px; color:var(--muted-dim); margin-top:-3px; padding:0 3px;
   }
+  .typing-bubble{
+    display:flex; align-items:center; gap:4px; padding:11px 14px !important;
+  }
+  .typing-dot{
+    width:6px; height:6px; border-radius:50%; background:#04140D; opacity:.4;
+    animation:typing-bounce 1.2s infinite ease-in-out;
+  }
+  .typing-dot:nth-child(2){ animation-delay:.2s; }
+  .typing-dot:nth-child(3){ animation-delay:.4s; }
+  @keyframes typing-bounce{
+    0%, 60%, 100%{ transform:translateY(0); opacity:.4; }
+    30%{ transform:translateY(-4px); opacity:1; }
+  }
   .dia-separador{
     display:flex; justify-content:center; margin:10px 0; align-self:stretch;
   }
@@ -8332,6 +8386,7 @@ ${estilosBase()}
     document.getElementById("chatMensajes").innerHTML = '<div class="chat-empty">Cargando…</div>';
     document.getElementById("chatMensajes").dataset.primeraVez = "";
     await cargarUltimaPagina();
+    actualizarIndicadorEscribiendo();
   }
 
   function formatearHora(iso){
@@ -8379,6 +8434,35 @@ ${estilosBase()}
     if(existente) existente.remove();
     const html = construirIndicadorVistoHTML();
     if(html) cont.insertAdjacentHTML("beforeend", html);
+  }
+
+  // Los "tres puntitos" de "escribiendo..." — igual que en Instagram, se
+  // muestran mientras el bot está generando/enviando la respuesta de este
+  // lead en particular (se reutiliza la misma bandera que ya existía en el
+  // servidor para saber si un buffer de mensajes está en proceso).
+  function actualizarIndicadorEscribiendo(){
+    const cont = document.getElementById("chatMensajes");
+    if(!cont) return;
+    const existente = document.getElementById("indicadorEscribiendo");
+
+    const conv = conversaciones.find(c => c.sender_id === senderSeleccionado);
+    const debeEstarEscribiendo = Boolean(senderSeleccionado && conv?.escribiendo);
+
+    if(!debeEstarEscribiendo){
+      if(existente) existente.remove();
+      return;
+    }
+    if(existente) return; // ya está mostrado, no hace falta re-agregarlo
+
+    const estabaAbajo = cont.scrollTop + cont.clientHeight >= cont.scrollHeight - 60;
+    cont.insertAdjacentHTML("beforeend", \`
+      <div class="bubble-row assistant" id="indicadorEscribiendo">
+        <div class="bubble typing-bubble">
+          <span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>
+        </div>
+      </div>
+    \`);
+    if(estabaAbajo) cont.scrollTop = cont.scrollHeight;
   }
 
   function construirBurbujaHTML(m, mostrarSeparadorDia){
@@ -8523,6 +8607,7 @@ ${estilosBase()}
     if(senderSeleccionado){
       await revisarMensajesNuevos();
       actualizarIndicadorVistoEnPantalla();
+      actualizarIndicadorEscribiendo();
     }
   }, 4000);
 
