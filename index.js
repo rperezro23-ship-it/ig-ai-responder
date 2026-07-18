@@ -890,6 +890,12 @@ function estilosBase() {
   }
   .main{ width:100%; max-width:1360px; }
 
+  /* En /chats se reduce el padding lateral y se quita el límite de ancho —
+     así la lista de "Conversaciones" y el chat abierto aprovechan todo el
+     espacio disponible, en vez de dejar márgenes vacíos a los lados. */
+  .content-area-chats{ padding-left:14px; padding-right:14px; justify-content:flex-start; }
+  .main-chats{ max-width:none; }
+
   @media (max-width:860px){
     .app-shell{ display:block; }
     .sidebar{ position:static; width:100%; flex-direction:row; align-items:center;
@@ -7194,8 +7200,8 @@ ${estilosBase()}
 <body>
   <div class="app-shell">
   ${sidebarHTML("chats")}
-  <div class="content-area">
-  <div class="main">
+  <div class="content-area content-area-chats">
+  <div class="main main-chats">
     <div class="chat-shell">
       <div class="chat-list-panel">
         <div class="chat-list-head">
