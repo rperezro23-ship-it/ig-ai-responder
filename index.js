@@ -7172,7 +7172,7 @@ ${estilosBase()}
   .bubble-row.assistant{ align-self:flex-end; align-items:flex-end; }
   .bubble{
     padding:10px; border-radius:13px; font-size:13px; line-height:1.35;
-    white-space:pre-wrap; word-break:break-word;
+    word-break:break-word;
   }
   .bubble-row.user .bubble{ background:var(--surface-3); color:var(--text); border-bottom-left-radius:4px; }
   .bubble-row.assistant .bubble{ background:var(--green); color:#04140D; border-bottom-right-radius:4px; }
