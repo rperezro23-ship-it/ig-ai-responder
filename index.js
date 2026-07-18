@@ -2998,7 +2998,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado, bot_pausado, username")
+      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado, bot_pausado, username, visto_hasta")
       // Solo se muestran conversaciones donde el LEAD escribió algo alguna
       // vez — "ultimo_mensaje_usuario" únicamente se actualiza cuando llega
       // un mensaje DE la persona, nunca cuando se le manda algo a ella (ni
@@ -3061,7 +3061,8 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         etapa_nombre: etapaConfig ? (etapaConfig.nombre || etapaConfig.clave) : null,
         etiquetas: Array.isArray(c.etiquetas) ? c.etiquetas : [],
         monto_pagado: Number(c.monto_pagado) || 0,
-        bot_pausado: Boolean(c.bot_pausado)
+        bot_pausado: Boolean(c.bot_pausado),
+        visto_hasta: c.visto_hasta || null
       };
     }));
 
@@ -7145,6 +7146,9 @@ ${estilosBase()}
   .bubble-row.user .bubble{ background:var(--surface-3); color:var(--text); border-bottom-left-radius:4px; }
   .bubble-row.assistant .bubble{ background:var(--green); color:#04140D; border-bottom-right-radius:4px; }
   .bubble-time{ font-size:11px; color:var(--muted-dim); margin-top:4px; font-family:var(--mono); padding:0 3px; }
+  .indicador-visto{
+    align-self:flex-end; font-size:11.5px; color:var(--muted-dim); margin-top:-6px; padding:0 3px;
+  }
   .dia-separador{
     display:flex; justify-content:center; margin:10px 0; align-self:stretch;
   }
@@ -8325,6 +8329,36 @@ ${estilosBase()}
     return fecha.toLocaleDateString("es-MX", { day:"numeric", month:"long", year: fecha.getFullYear() !== hoy.getFullYear() ? "numeric" : undefined });
   }
 
+  // Indicador de "Visto" (igual que Instagram): solo se muestra si el
+  // ÚLTIMO mensaje de la conversación es uno que TÚ mandaste (el bot o
+  // manual), y el lead ya lo leyó — comparando su marca de "leído hasta"
+  // contra la fecha de ese último mensaje. Si el último mensaje es del
+  // lead (te acaba de escribir), no hay nada que mostrar como "visto".
+  function construirIndicadorVistoHTML(){
+    if(mensajesMostrados.length === 0) return "";
+    const ultimo = mensajesMostrados[mensajesMostrados.length - 1];
+    if(ultimo.role !== "assistant") return "";
+
+    const conv = conversaciones.find(c => c.sender_id === senderSeleccionado);
+    if(!conv?.visto_hasta || !ultimo.creado_en) return "";
+    if(new Date(conv.visto_hasta).getTime() < new Date(ultimo.creado_en).getTime()) return "";
+
+    return \`<div class="indicador-visto" id="indicadorVisto">Visto \${formatearTiempoRelativo(conv.visto_hasta)}</div>\`;
+  }
+
+  // Se llama en cada refresco periódico (sin necesidad de rehacer todo el
+  // chat) — el "visto" puede cambiar en cualquier momento, sin que llegue
+  // ningún mensaje nuevo, así que necesita su propia actualización aparte.
+  function actualizarIndicadorVistoEnPantalla(){
+    if(!senderSeleccionado) return;
+    const cont = document.getElementById("chatMensajes");
+    if(!cont || mensajesMostrados.length === 0) return;
+    const existente = document.getElementById("indicadorVisto");
+    if(existente) existente.remove();
+    const html = construirIndicadorVistoHTML();
+    if(html) cont.insertAdjacentHTML("beforeend", html);
+  }
+
   function construirBurbujaHTML(m, mostrarSeparadorDia){
     const esImagen = typeof m.content === "string" && m.content.startsWith("[[imagen]]");
     const esAudio = typeof m.content === "string" && m.content.startsWith("[[audio]]");
@@ -8366,7 +8400,7 @@ ${estilosBase()}
       const mostrarSeparador = diaDeEsteMensaje !== diaAnterior;
       diaAnterior = diaDeEsteMensaje;
       return construirBurbujaHTML(m, mostrarSeparador);
-    }).join("");
+    }).join("") + construirIndicadorVistoHTML();
 
     if(estabaAbajo || cont.dataset.primeraVez !== "hecho"){
       cont.scrollTop = cont.scrollHeight;
@@ -8462,9 +8496,12 @@ ${estilosBase()}
     if(cont.scrollTop < 80) cargarPaginaAntigua();
   });
 
-  setInterval(() => {
-    cargarConversaciones();
-    if(senderSeleccionado) revisarMensajesNuevos();
+  setInterval(async () => {
+    await cargarConversaciones();
+    if(senderSeleccionado){
+      await revisarMensajesNuevos();
+      actualizarIndicadorVistoEnPantalla();
+    }
   }, 4000);
 
   document.getElementById("btnReporteDolores").addEventListener("click", async () => {
