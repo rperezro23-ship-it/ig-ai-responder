@@ -7736,7 +7736,7 @@ ${estilosBase()}
         <div class="chat-window-head-uname">\${escapar(nombreMostrar(conv))}\${conv.califica ? ' <span title="Califica">✅</span>' : ''}\${conv.no_califica ? ' <span title="No Califica">🚫</span>' : ''}\${conv.agendo ? ' <span title="Agendó">📅</span>' : ''}\${conv.enlace_enviado ? ' <span title="Enlace enviado">🔗</span>' : ''}\${conv.bot_pausado ? ' <span title="Bot pausado">⏸️</span>' : ''}</div>
         <div class="chat-window-head-id">\${conv.sender_id}</div>
       </div>
-      \${conv.username ? \`<a class="btn-abrir-instagram" href="https://ig.me/m/\${encodeURIComponent(conv.username)}" target="_blank" rel="noopener noreferrer" title="Abrir esta conversación en Instagram (en una pestaña nueva)">↗️ Abrir en Instagram</a>\` : ''}
+      \${conv.username ? \`<a class="btn-abrir-instagram" href="https://www.instagram.com/\${encodeURIComponent(conv.username)}/" target="_blank" rel="noopener noreferrer" title="Abrir el perfil de este lead en Instagram (en una pestaña nueva) — desde ahí dale clic a &quot;Mensaje&quot; para abrir el chat">↗️ Ver perfil en Instagram</a>\` : ''}
     \`;
     banner.classList.toggle("visible", conv.en_ventana_24h === false);
     bannerPausado.classList.toggle("visible", Boolean(conv.bot_pausado));
