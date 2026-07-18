@@ -3371,6 +3371,31 @@ app.post("/chats/marcar-no-califica", requireAdminKey, async (req, res) => {
   }
 });
 
+// Igual que el de arriba, pero para marcar manualmente a un lead como
+// "Califica" — por ejemplo, si el admin decide que sí calificaría aunque
+// el bot no lo haya detectado así (o si se saltó una parte del proceso
+// pero el admin ya sabe que es un buen lead por otra vía).
+app.post("/chats/marcar-califica", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId, razon } = req.body || {};
+    if (!senderId) return res.status(400).json({ error: "Falta senderId." });
+
+    await guardarConversacion(senderId, {
+      califica: true,
+      calificado_en: new Date().toISOString(),
+      razon_calificacion: (razon && razon.trim()) || "Marcado manualmente por el admin desde /chats.",
+      no_califica: false,
+      no_califica_en: null,
+      razon_no_califica: null
+    });
+
+    console.log(`✅ ${senderId} marcado manualmente como CALIFICA desde /chats.`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // Genera un resumen (edad, cuánto peso quiere perder, obstáculo, y dolores
 // de salud/estética) de UNA conversación en particular — se pide bajo
@@ -7203,6 +7228,13 @@ ${estilosBase()}
             </div>
           </div>
           <div class="add-etiqueta-wrap">
+            <button type="button" class="btn-add-etiqueta" id="btnAddCalifica" style="color:var(--green); border-color:rgba(49,217,124,.35);">+ ✅ Califica</button>
+            <div class="etiqueta-popover" id="calificaPopover" style="display:none;">
+              <input type="text" id="inputRazonCalifica" placeholder="Motivo (opcional)" style="width:200px;">
+              <button type="button" id="btnConfirmarCalifica">Marcar</button>
+            </div>
+          </div>
+          <div class="add-etiqueta-wrap">
             <button type="button" class="btn-add-etiqueta" id="btnAddNoCalifica" style="color:var(--red); border-color:rgba(255,93,93,.35);">+ 🚫 No Califica</button>
             <div class="etiqueta-popover" id="noCalificaPopover" style="display:none;">
               <input type="text" id="inputRazonNoCalifica" placeholder="Motivo (opcional)" style="width:200px;">
@@ -7685,6 +7717,56 @@ ${estilosBase()}
   document.addEventListener("click", (e) => {
     if(popoverMonto.style.display !== "none" && !popoverMonto.contains(e.target) && e.target.id !== "btnAddMonto"){
       popoverMonto.style.display = "none";
+    }
+  });
+
+  // --- Popover para marcar manualmente a un lead como "Califica" ---
+  const popoverCalifica = document.getElementById("calificaPopover");
+  const inputRazonCalifica = document.getElementById("inputRazonCalifica");
+
+  document.getElementById("btnAddCalifica").addEventListener("click", () => {
+    const abriendo = popoverCalifica.style.display === "none";
+    popoverCalifica.style.display = abriendo ? "flex" : "none";
+    if(abriendo){
+      inputRazonCalifica.value = "";
+      inputRazonCalifica.focus();
+    }
+  });
+
+  async function confirmarCalifica(){
+    if(!senderSeleccionado) return;
+    if(!confirm("Marcar esta conversación como Califica?")) return;
+    const razon = inputRazonCalifica.value.trim();
+    const res = await fetch("/chats/marcar-califica", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ senderId: senderSeleccionado, razon })
+    });
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+    const data = await res.json();
+    if(data.ok){
+      const c = conversaciones.find(c => c.sender_id === senderSeleccionado);
+      if(c){
+        c.califica = true;
+        c.calificado_en = new Date().toISOString();
+        c.razon_calificacion = razon || "Marcado manualmente por el admin desde /chats.";
+        c.no_califica = false;
+        c.no_califica_en = null;
+        c.razon_no_califica = null;
+      }
+      popoverCalifica.style.display = "none";
+      renderHead();
+    } else {
+      alert("No se pudo marcar: " + (data.error || "error desconocido"));
+    }
+  }
+
+  document.getElementById("btnConfirmarCalifica").addEventListener("click", confirmarCalifica);
+  inputRazonCalifica.addEventListener("keydown", (e) => {
+    if(e.key === "Enter"){ e.preventDefault(); confirmarCalifica(); }
+  });
+  document.addEventListener("click", (e) => {
+    if(popoverCalifica.style.display !== "none" && !popoverCalifica.contains(e.target) && e.target.id !== "btnAddCalifica"){
+      popoverCalifica.style.display = "none";
     }
   });
 
