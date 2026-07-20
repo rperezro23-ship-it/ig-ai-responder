@@ -2145,6 +2145,15 @@ async function procesarBuffer(senderId) {
   buffer.mensajes = [];
   buffer.enProceso = true;
 
+  // Ya se va a generar/enviar la respuesta real — se detiene el refresco
+  // periódico del indicador de "escribiendo..." (si seguir mostrándolo un
+  // poco más después de esto, Instagram lo apaga solo cuando llega el
+  // mensaje real de todas formas).
+  if (buffer.intervaloEscribiendo) {
+    clearInterval(buffer.intervaloEscribiendo);
+    buffer.intervaloEscribiendo = null;
+  }
+
   const mensajeCompleto = mensajesAResponder.join("\n");
   console.log(`📨 Mensaje agrupado de ${senderId}: "${mensajeCompleto}"`);
 
@@ -2634,6 +2643,7 @@ async function procesarBuffer(senderId) {
 
   if (buffer.mensajes.length > 0) {
     activarEscribiendoInstagram(senderId);
+    buffer.intervaloEscribiendo = setInterval(() => activarEscribiendoInstagram(senderId), 15000);
     const delay = segundosAleatorios(configActual.min_delay, configActual.max_delay);
     buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
   } else {
@@ -2646,7 +2656,7 @@ function encolarMensaje(senderId, mensaje) {
   let buffer = buffers.get(senderId);
 
   if (!buffer) {
-    buffer = { mensajes: [], timer: null, enProceso: false };
+    buffer = { mensajes: [], timer: null, enProceso: false, intervaloEscribiendo: null };
     buffers.set(senderId, buffer);
   }
 
@@ -2655,13 +2665,19 @@ function encolarMensaje(senderId, mensaje) {
   if (buffer.enProceso) return;
 
   if (buffer.timer) clearTimeout(buffer.timer);
+  if (buffer.intervaloEscribiendo) clearInterval(buffer.intervaloEscribiendo);
 
   // Le muestra al lead el indicador de "escribiendo..." de Instagram durante
-  // la pausa — simula mejor que hay una persona real del otro lado, en vez
-  // de que la respuesta aparezca de golpe sin ningún aviso previo. Es
-  // "fire and forget" (no se espera su resultado) porque es solo un detalle
-  // cosmético, nunca debe atrasar ni bloquear el envío real del mensaje.
+  // TODA la pausa, sin importar qué tan larga sea — Instagram apaga este
+  // indicador solo, por su cuenta, después de unos 20-25 segundos, así que
+  // si la pausa configurada (min_delay/max_delay) dura más que eso (ej. 45
+  // segundos), sin este refresco el indicador desaparecería a la mitad y
+  // el mensaje llegaría de golpe, sin aviso, los últimos segundos. Por eso
+  // se vuelve a activar cada 15 segundos (con margen de sobra respecto a
+  // los 20-25 que dura) hasta que el mensaje real se mande. Es "fire and
+  // forget" — un fallo aquí nunca debe atrasar ni bloquear el envío real.
   activarEscribiendoInstagram(senderId);
+  buffer.intervaloEscribiendo = setInterval(() => activarEscribiendoInstagram(senderId), 15000);
 
   const delay = segundosAleatorios(configActual.min_delay, configActual.max_delay);
   buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
