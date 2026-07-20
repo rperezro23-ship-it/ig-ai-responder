@@ -3983,6 +3983,42 @@ let configActual = {
 // (al cargar desde Supabase al arrancar, o al guardar una nueva desde /panel).
 let openaiClient = new OpenAI({ apiKey: configActual.openai_api_key || undefined });
 
+// Copia "congelada" de los valores por defecto de arriba, tomada ANTES de
+// que configActual empiece a mutar (al cargar el agente activo, o al
+// cambiar de agente). Sirve como base para mostrar/editar un agente que NO
+// es el activo — nunca se debe usar "configActual" para esto, porque
+// configActual refleja al agente ACTIVO, no al que se está viendo. Usar
+// configActual como base hacía que un agente nuevo "en blanco" se viera
+// con TODA la configuración del agente activo, ya que sus campos vacíos
+// (frases: [], etapas: [], etc.) nunca sobrescribían nada al combinarlos.
+const CONFIG_POR_DEFECTO = JSON.parse(JSON.stringify(configActual));
+
+// Combina la configuración GUARDADA de un agente (que puede venir vacía o
+// incompleta — ej. un agente nuevo "en blanco") con una base segura. La
+// base es SIEMPRE "CONFIG_POR_DEFECTO" (la plantilla vacía), nunca el
+// agente que estaba activo antes — así un agente en blanco de verdad se ve
+// y se comporta en blanco, sin arrastrar nada del que estaba activo.
+//
+// EXCEPCIÓN a propósito: las credenciales (clave de OpenAI, token y datos
+// de Calendly) SÍ se mantienen del agente que estaba activo si el agente
+// nuevo/objetivo no trae las suyas propias — en la práctica, todos los
+// agentes de una misma cuenta suelen compartir la misma clave de OpenAI y
+// la misma conexión de Calendly, así que no tendría sentido obligar a
+// reconfigurarlas cada vez que se crea o activa un agente distinto.
+function fusionarConfigDeAgente(configAgente, configConCredencialesActuales) {
+  const combinada = { ...CONFIG_POR_DEFECTO, ...(configAgente || {}) };
+  const camposCompartidos = [
+    "openai_api_key", "calendly_token", "calendly_organization_uri",
+    "calendly_webhook_uri", "calendly_conectado_en"
+  ];
+  for (const campo of camposCompartidos) {
+    if (!combinada[campo] && configConCredencialesActuales?.[campo]) {
+      combinada[campo] = configConCredencialesActuales[campo];
+    }
+  }
+  return combinada;
+}
+
 function actualizarClienteOpenAI() {
   openaiClient = new OpenAI({ apiKey: configActual.openai_api_key || undefined });
 }
@@ -4051,11 +4087,11 @@ async function cargarConfigDesdeDB() {
 
       console.log(`✅ Migración automática: se creó "Agente 1" a partir de la configuración existente.`);
       agenteActivoId = nuevoAgente.id;
-      configActual = { ...configActual, ...(nuevoAgente.config || {}) };
+      configActual = { ...CONFIG_POR_DEFECTO, ...(nuevoAgente.config || {}) };
     } else {
       const activo = agentes.find(a => a.activo) || agentes[0];
       agenteActivoId = activo.id;
-      configActual = { ...configActual, ...(activo.config || {}) };
+      configActual = { ...CONFIG_POR_DEFECTO, ...(activo.config || {}) };
       console.log(`✅ Configuración cargada desde Supabase — agente activo: "${activo.nombre}" (id ${activo.id}).`);
     }
 
@@ -4465,7 +4501,13 @@ app.get("/config", requireAdminKey, async (req, res) => {
 
     if (error || !agente) return res.status(404).json({ error: "No se encontró ese agente." });
 
-    res.json(configParaFrontend({ ...configActual, ...(agente.config || {}) }));
+    // IMPORTANTE: la base para combinar es "CONFIG_POR_DEFECTO" (la
+    // plantilla en blanco), NUNCA "configActual" — configActual es la
+    // configuración del agente ACTIVO en este momento, y si la usáramos
+    // aquí, un agente nuevo "vacío" (config: {}) se vería con TODOS los
+    // campos del agente activo, ya que combinar con un objeto vacío no
+    // sobrescribe nada.
+    res.json(configParaFrontend(fusionarConfigDeAgente(agente.config, configActual)));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -4703,8 +4745,13 @@ app.post("/agentes/:id/activar", requireAdminKey, async (req, res) => {
 
     // Se aplica de inmediato en vivo — el bot usa esta configuración desde
     // el próximo mensaje que llegue, sin necesidad de reiniciar el servidor.
+    // Se usa la base en blanco (fusionarConfigDeAgente), no el agente que
+    // estaba activo antes, para que activar un agente "vacío" de verdad
+    // deje al bot sin prompt/etapas/disparadores — no que arrastre los del
+    // agente anterior por combinar con un objeto vacío.
+    const configPrevia = configActual;
     agenteActivoId = id;
-    configActual = { ...configActual, ...(agente.config || {}) };
+    configActual = fusionarConfigDeAgente(agente.config, configPrevia);
     configActual.etapas = normalizarEtapas(configActual.etapas || []);
     configActual.disparadores = normalizarDisparadores(configActual.disparadores || []);
     actualizarClienteOpenAI();
