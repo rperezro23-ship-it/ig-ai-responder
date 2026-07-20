@@ -4006,61 +4006,126 @@ function configParaFrontend(cfg) {
   };
 }
 
+// Id del agente actualmente ACTIVO (el que usa el bot en vivo para procesar
+// mensajes) — se determina al cargar, y se actualiza cada vez que se activa
+// un agente distinto desde /panel.
+let agenteActivoId = null;
+
 async function cargarConfigDesdeDB() {
   try {
-    const { data, error } = await supabase
-      .from("app_config")
+    const { data: agentes, error } = await supabase
+      .from("agentes")
       .select("*")
-      .eq("key", "bot_config")
-      .maybeSingle();
+      .order("creado_en", { ascending: true });
 
     if (error) {
-      console.error("❌ Error cargando configuración de Supabase, se usan los valores por defecto:", error.message);
+      console.error("❌ Error cargando agentes de Supabase, se usan los valores por defecto:", error.message);
       return;
     }
-    if (data && data.valor) {
-      configActual = { ...configActual, ...data.valor };
-      configActual.seguimientos = [...(configActual.seguimientos || [])].sort((a, b) => a.horas - b.horas);
-      configActual.seguimientos_enlace = [...(configActual.seguimientos_enlace || [])].sort((a, b) => a.horas - b.horas);
-      if (!Array.isArray(configActual.etapas)) configActual.etapas = [];
-      // Se re-normalizan las etapas también al CARGAR (no solo al guardar
-      // desde /panel), para migrar automáticamente formatos antiguos —por
-      // ejemplo, etapas guardadas antes de que "mensaje_fijo" (un solo texto)
-      // se convirtiera en "mensajes_fijos" (varias variantes que rotan). Sin
-      // esto, una etapa guardada con el formato viejo dejaría de mandar su
-      // mensaje fijo hasta que alguien la volviera a guardar a mano.
-      configActual.etapas = normalizarEtapas(configActual.etapas);
-      // Los disparadores GENERALES (no los de dentro de cada etapa, que ya
-      // se migran arriba via normalizarEtapas) también se re-normalizan al
-      // cargar, por la misma razón: para migrar automáticamente el modo
-      // "todas" (legado) a "combinaciones" sin depender de que alguien
-      // vuelva a guardar desde /panel.
-      configActual.disparadores = normalizarDisparadores(configActual.disparadores);
-      if (!Array.isArray(configActual.transiciones_generales)) configActual.transiciones_generales = [];
-      actualizarClienteOpenAI();
-      console.log("✅ Configuración cargada desde Supabase.");
+
+    // MIGRACIÓN AUTOMÁTICA (se corre una sola vez, la primera vez que se
+    // despliega esta versión): si todavía no existe ningún agente, se toma
+    // la configuración que ya existía en "app_config" (key "bot_config", el
+    // sistema de ANTES de que existieran los agentes) y se convierte en el
+    // primer agente, marcado como activo — así nadie pierde su
+    // configuración actual al actualizar a esta versión.
+    if (!agentes || agentes.length === 0) {
+      const { data: configVieja } = await supabase
+        .from("app_config")
+        .select("*")
+        .eq("key", "bot_config")
+        .maybeSingle();
+
+      const configInicial = (configVieja && configVieja.valor) ? configVieja.valor : {};
+
+      const { data: nuevoAgente, error: errorCreando } = await supabase
+        .from("agentes")
+        .insert({ nombre: "Agente 1", activo: true, config: configInicial })
+        .select()
+        .single();
+
+      if (errorCreando) {
+        console.error("❌ Error creando el primer agente (migración automática):", errorCreando.message);
+        return;
+      }
+
+      console.log(`✅ Migración automática: se creó "Agente 1" a partir de la configuración existente.`);
+      agenteActivoId = nuevoAgente.id;
+      configActual = { ...configActual, ...(nuevoAgente.config || {}) };
     } else {
-      console.log("ℹ️ No hay configuración guardada todavía, se usan los valores por defecto (.env).");
+      const activo = agentes.find(a => a.activo) || agentes[0];
+      agenteActivoId = activo.id;
+      configActual = { ...configActual, ...(activo.config || {}) };
+      console.log(`✅ Configuración cargada desde Supabase — agente activo: "${activo.nombre}" (id ${activo.id}).`);
     }
+
+    configActual.seguimientos = [...(configActual.seguimientos || [])].sort((a, b) => a.horas - b.horas);
+    configActual.seguimientos_enlace = [...(configActual.seguimientos_enlace || [])].sort((a, b) => a.horas - b.horas);
+    if (!Array.isArray(configActual.etapas)) configActual.etapas = [];
+    // Se re-normalizan las etapas también al CARGAR (no solo al guardar
+    // desde /panel), para migrar automáticamente formatos antiguos —por
+    // ejemplo, etapas guardadas antes de que "mensaje_fijo" (un solo texto)
+    // se convirtiera en "mensajes_fijos" (varias variantes que rotan). Sin
+    // esto, una etapa guardada con el formato viejo dejaría de mandar su
+    // mensaje fijo hasta que alguien la volviera a guardar a mano.
+    configActual.etapas = normalizarEtapas(configActual.etapas);
+    // Los disparadores GENERALES (no los de dentro de cada etapa, que ya
+    // se migran arriba via normalizarEtapas) también se re-normalizan al
+    // cargar, por la misma razón: para migrar automáticamente el modo
+    // "todas" (legado) a "combinaciones" sin depender de que alguien
+    // vuelva a guardar desde /panel.
+    configActual.disparadores = normalizarDisparadores(configActual.disparadores);
+    if (!Array.isArray(configActual.transiciones_generales)) configActual.transiciones_generales = [];
+    actualizarClienteOpenAI();
   } catch (err) {
     console.error("❌ Error inesperado cargando configuración:", err.message);
   }
 }
 
-async function guardarConfigDB(nuevaConfig) {
-  configActual = { ...configActual, ...nuevaConfig };
-  configActual.seguimientos = [...(configActual.seguimientos || [])].sort((a, b) => a.horas - b.horas);
-  configActual.seguimientos_enlace = [...(configActual.seguimientos_enlace || [])].sort((a, b) => a.horas - b.horas);
-  if (!Array.isArray(configActual.etapas)) configActual.etapas = [];
-  if (!Array.isArray(configActual.transiciones_generales)) configActual.transiciones_generales = [];
-  actualizarClienteOpenAI();
+// Guarda la configuración en el agente indicado (por defecto, el agente
+// ACTIVO — esto preserva el comportamiento de siempre para cualquier código
+// que no sepa nada de agentes). Si el agente que se está guardando es el
+// activo, también se actualiza "configActual" al instante (el bot en vivo
+// usa el cambio de inmediato, sin reiniciar) — si es un agente que NO está
+// activo, se guarda solo en su propia fila, sin afectar el comportamiento
+// en vivo del bot todavía.
+async function guardarConfigDB(nuevaConfig, agenteId) {
+  const idObjetivo = agenteId || agenteActivoId;
+  const esElActivo = idObjetivo === agenteActivoId;
+
+  const { data: agenteExistente, error: errorLeyendo } = await supabase
+    .from("agentes")
+    .select("config")
+    .eq("id", idObjetivo)
+    .maybeSingle();
+
+  if (errorLeyendo || !agenteExistente) {
+    console.error("❌ Error guardando configuración: no se encontró el agente indicado.", errorLeyendo?.message || "");
+    return esElActivo ? configActual : null;
+  }
+
+  let configFusionada = { ...(agenteExistente.config || {}), ...nuevaConfig };
+  configFusionada.seguimientos = [...(configFusionada.seguimientos || [])].sort((a, b) => a.horas - b.horas);
+  configFusionada.seguimientos_enlace = [...(configFusionada.seguimientos_enlace || [])].sort((a, b) => a.horas - b.horas);
+  if (!Array.isArray(configFusionada.etapas)) configFusionada.etapas = [];
+  if (!Array.isArray(configFusionada.transiciones_generales)) configFusionada.transiciones_generales = [];
 
   const { error } = await supabase
-    .from("app_config")
-    .upsert({ key: "bot_config", valor: configActual, actualizado_en: new Date().toISOString() });
+    .from("agentes")
+    .update({ config: configFusionada, actualizado_en: new Date().toISOString() })
+    .eq("id", idObjetivo);
 
-  if (error) console.error("❌ Error guardando configuración en Supabase:", error.message);
-  return configActual;
+  if (error) {
+    console.error("❌ Error guardando configuración en Supabase:", error.message);
+    return esElActivo ? configActual : null;
+  }
+
+  if (esElActivo) {
+    configActual = configFusionada;
+    actualizarClienteOpenAI();
+  }
+
+  return configFusionada;
 }
 
 cargarConfigDesdeDB();
@@ -4379,8 +4444,31 @@ app.get("/bot/apagar", requireAdminKey, async (req, res) => {
   res.json({ mensaje: "⏸️ Bot APAGADO (no responderá mensajes ni mandará seguimientos)", estado: "off" });
 });
 
-app.get("/config", requireAdminKey, (req, res) => {
-  res.json(configParaFrontend(configActual));
+app.get("/config", requireAdminKey, async (req, res) => {
+  const agenteId = req.query.agente_id ? Number(req.query.agente_id) : null;
+
+  // Sin "agente_id" (comportamiento de siempre): devuelve la configuración
+  // del agente ACTIVO, la que usa el bot en vivo ahora mismo.
+  if (!agenteId || agenteId === agenteActivoId) {
+    return res.json(configParaFrontend(configActual));
+  }
+
+  // Con "agente_id" de un agente que NO es el activo: se trae su propia
+  // configuración guardada (para poder verla/editarla en /panel sin afectar
+  // lo que está corriendo en vivo).
+  try {
+    const { data: agente, error } = await supabase
+      .from("agentes")
+      .select("config")
+      .eq("id", agenteId)
+      .maybeSingle();
+
+    if (error || !agente) return res.status(404).json({ error: "No se encontró ese agente." });
+
+    res.json(configParaFrontend({ ...configActual, ...(agente.config || {}) }));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Valida y normaliza un array de disparadores (usado tanto para los
@@ -4528,6 +4616,148 @@ function filtrarDestinosDeTransicionValidos(transiciones, clavesValidas) {
   return (transiciones || []).filter(t => t.etapa_destino === "" || clavesValidas.has(t.etapa_destino));
 }
 
+// Lista todos los agentes (solo lo básico — nombre, si está activo, fechas
+// — NUNCA la configuración completa aquí, para que este listado sea liviano
+// incluso si hay varios agentes con etapas/prompts largos).
+app.get("/agentes", requireAdminKey, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("agentes")
+      .select("id, nombre, activo, creado_en, actualizado_en")
+      .order("creado_en", { ascending: true });
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ agentes: data || [], agente_activo_id: agenteActivoId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Crea un agente nuevo — por defecto, EMPIEZA EN BLANCO (sin prompt, sin
+// etapas, sin disparadores, etc.) para armar una estructura de prospección
+// completamente distinta desde cero. Si se manda "clonar_de" con el ID de
+// otro agente, en cambio copia TODA su configuración como punto de partida
+// (útil para probar una variación de algo que ya tenías armado, sin tocar
+// el original). El agente nuevo NUNCA se activa automáticamente — hay que
+// activarlo a propósito desde /panel cuando esté listo.
+app.post("/agentes", requireAdminKey, async (req, res) => {
+  try {
+    const { nombre, clonar_de } = req.body || {};
+    if (!nombre || !nombre.trim()) return res.status(400).json({ error: "Falta el nombre del agente." });
+
+    let configInicial = {};
+    if (clonar_de) {
+      const { data: origen, error: errorOrigen } = await supabase
+        .from("agentes")
+        .select("config")
+        .eq("id", Number(clonar_de))
+        .maybeSingle();
+      if (errorOrigen || !origen) return res.status(404).json({ error: "No se encontró el agente que quieres clonar." });
+      // Se clona todo EXCEPTO los datos sensibles (claves) — para que un
+      // agente nuevo no herede sin querer la clave de OpenAI de otro,
+      // aunque en la práctica probablemente todos comparten la misma.
+      configInicial = { ...(origen.config || {}) };
+    }
+
+    const { data: nuevoAgente, error } = await supabase
+      .from("agentes")
+      .insert({ nombre: nombre.trim(), activo: false, config: configInicial })
+      .select("id, nombre, activo, creado_en")
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    console.log(`✨ Nuevo agente creado: "${nuevoAgente.nombre}" (id ${nuevoAgente.id})${clonar_de ? ` — clonado del agente ${clonar_de}` : " — empieza en blanco"}.`);
+    res.json({ agente: nuevoAgente });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Cambia cuál es el agente ACTIVO — el que el bot usa en vivo para procesar
+// mensajes nuevos a partir de este momento. Solo puede haber uno activo a
+// la vez, así que se apaga cualquier otro que lo estuviera.
+app.post("/agentes/:id/activar", requireAdminKey, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+
+    const { data: agente, error: errorLeyendo } = await supabase
+      .from("agentes")
+      .select("id, nombre, config")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (errorLeyendo || !agente) return res.status(404).json({ error: "No se encontró ese agente." });
+
+    const { error: errorApagando } = await supabase
+      .from("agentes")
+      .update({ activo: false })
+      .neq("id", id);
+    if (errorApagando) return res.status(500).json({ error: errorApagando.message });
+
+    const { error: errorPrendiendo } = await supabase
+      .from("agentes")
+      .update({ activo: true })
+      .eq("id", id);
+    if (errorPrendiendo) return res.status(500).json({ error: errorPrendiendo.message });
+
+    // Se aplica de inmediato en vivo — el bot usa esta configuración desde
+    // el próximo mensaje que llegue, sin necesidad de reiniciar el servidor.
+    agenteActivoId = id;
+    configActual = { ...configActual, ...(agente.config || {}) };
+    configActual.etapas = normalizarEtapas(configActual.etapas || []);
+    configActual.disparadores = normalizarDisparadores(configActual.disparadores || []);
+    actualizarClienteOpenAI();
+
+    console.log(`🔀 Agente activado: "${agente.nombre}" (id ${id}) — el bot ya está usando esta configuración en vivo.`);
+    res.json({ mensaje: `Agente "${agente.nombre}" activado.`, agente_activo_id: agenteActivoId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Renombrar un agente (no toca su configuración, solo el nombre mostrado).
+app.post("/agentes/:id/renombrar", requireAdminKey, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { nombre } = req.body || {};
+    if (!nombre || !nombre.trim()) return res.status(400).json({ error: "Falta el nuevo nombre." });
+
+    const { error } = await supabase
+      .from("agentes")
+      .update({ nombre: nombre.trim() })
+      .eq("id", id);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Borrar un agente — NUNCA se permite borrar el que está activo (para que
+// el bot siempre tenga alguna configuración corriendo), ni el único agente
+// que quede (siempre debe existir al menos uno).
+app.delete("/agentes/:id", requireAdminKey, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (id === agenteActivoId) {
+      return res.status(400).json({ error: "No puedes borrar el agente que está activo — activa otro primero." });
+    }
+
+    const { count } = await supabase.from("agentes").select("id", { count: "exact", head: true });
+    if ((count || 0) <= 1) {
+      return res.status(400).json({ error: "No puedes borrar el único agente que existe." });
+    }
+
+    const { error } = await supabase.from("agentes").delete().eq("id", id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post("/config", requireAdminKey, async (req, res) => {
   try {
     const { ai_prompt, contexto_base, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
@@ -4586,7 +4816,9 @@ app.post("/config", requireAdminKey, async (req, res) => {
       }));
     }
 
-    const guardado = await guardarConfigDB(nuevaConfig);
+    const agenteId = req.body?.agente_id ? Number(req.body.agente_id) : null;
+    const guardado = await guardarConfigDB(nuevaConfig, agenteId);
+    if (!guardado) return res.status(404).json({ error: "No se encontró el agente indicado." });
     res.json({ mensaje: "✅ Configuración guardada", config: configParaFrontend(guardado) });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -5511,6 +5743,32 @@ ${estilosBase()}
   }
   .add-paso:hover{ border-color:var(--green); color:var(--green); }
 
+  .agente-bar{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    padding:12px 16px; margin-bottom:20px;
+  }
+  .agente-bar-label{ font-weight:600; font-size:14px; color:var(--text); flex-shrink:0; }
+  #selectorAgente{
+    background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:7px 10px; font-size:13.5px; font-family:var(--body); max-width:220px;
+  }
+  .agente-bar-badge{
+    font-size:11.5px; font-weight:700; color:var(--green); background:rgba(49,217,124,.12);
+    border:1px solid rgba(49,217,124,.3); border-radius:20px; padding:3px 10px; flex-shrink:0;
+  }
+  .agente-bar-btn{
+    background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:7px 12px; font-size:13px; font-weight:600; cursor:pointer;
+    font-family:var(--body); white-space:nowrap;
+  }
+  .agente-bar-btn:hover{ border-color:var(--green); }
+  .agente-bar-btn-peligro{ color:var(--red); }
+  .agente-bar-btn-peligro:hover{ border-color:var(--red); }
+  .agente-bar-hint{
+    font-size:12px; color:var(--muted-dim); flex-basis:100%; margin-top:2px;
+  }
+
   .savebar{
     position:fixed; left:236px; right:0; bottom:0; background:linear-gradient(0deg, var(--bg) 65%, transparent);
     padding:22px 46px 24px;
@@ -5610,6 +5868,17 @@ ${estilosBase()}
         <button class="btn btn-on" id="btnOn">Encender bot</button>
         <button class="btn btn-off" id="btnOff">Apagar bot</button>
       </div>
+    </div>
+
+    <div class="agente-bar" id="agenteBar">
+      <span class="agente-bar-label">🤖 Agente:</span>
+      <select id="selectorAgente"></select>
+      <span class="agente-bar-badge" id="badgeAgenteActivo" style="display:none;">● En vivo</span>
+      <button type="button" class="agente-bar-btn" id="btnActivarAgente" style="display:none;">Activar este agente</button>
+      <button type="button" class="agente-bar-btn" id="btnRenombrarAgente">Renombrar</button>
+      <button type="button" class="agente-bar-btn" id="btnNuevoAgente">+ Nuevo agente</button>
+      <button type="button" class="agente-bar-btn agente-bar-btn-peligro" id="btnBorrarAgente">Borrar</button>
+      <span class="agente-bar-hint">Cada agente tiene su propio prompt, etapas, disparadores y transiciones — puedes armar y probar estructuras distintas sin tocar la que está en vivo.</span>
     </div>
 
     <div class="grid-2col">
@@ -6744,8 +7013,10 @@ ${estilosBase()}
     renderEtapas();
   });
 
-  async function cargarConfig(){
-    const cfg = await llamarGET("/config");
+  let agenteEnEdicionId = null;
+
+  async function cargarConfig(agenteId){
+    const cfg = await llamarGET(agenteId ? ("/config?agente_id=" + agenteId) : "/config");
     const msg = document.getElementById("saveMsg");
     if(!cfg){
       msg.textContent = "⚠️ No se pudo cargar la configuración — no toques 'Guardar' todavía.";
@@ -7023,7 +7294,8 @@ ${estilosBase()}
       transiciones_generales: transicionesGenerales,
       transiciones_generales_elegir_mejor: document.getElementById("transGeneralesElegirMejor").checked,
       calendly_pregunta_instagram: document.getElementById("calendlyPregunta").value,
-      calendly_pregunta_instagram_posicion: document.getElementById("calendlyPosicionPregunta").value
+      calendly_pregunta_instagram_posicion: document.getElementById("calendlyPosicionPregunta").value,
+      agente_id: agenteEnEdicionId
     };
     const nuevaClave = document.getElementById("openaiKey").value.trim();
     if(nuevaClave) body.openai_api_key = nuevaClave;
@@ -7046,8 +7318,97 @@ ${estilosBase()}
     setTimeout(() => { msg.textContent = ""; }, 2500);
   });
 
+  // --- Gestión de agentes ---
+  let listaAgentesCache = [];
+  let agenteActivoIdCache = null;
+
+  function actualizarUIAgente(){
+    const esElActivo = agenteEnEdicionId === agenteActivoIdCache;
+    document.getElementById("badgeAgenteActivo").style.display = esElActivo ? "inline-flex" : "none";
+    document.getElementById("btnActivarAgente").style.display = esElActivo ? "none" : "inline-block";
+  }
+
+  function renderSelectorAgentes(){
+    const sel = document.getElementById("selectorAgente");
+    sel.innerHTML = listaAgentesCache.map(a =>
+      \`<option value="\${a.id}"\${a.id === agenteEnEdicionId ? " selected" : ""}>\${a.nombre.replace(/</g,"&lt;")}\${a.activo ? " (en vivo)" : ""}</option>\`
+    ).join("");
+  }
+
+  async function cargarListaAgentes(idAMostrar){
+    const data = await llamarGET("/agentes");
+    if(!data || !Array.isArray(data.agentes) || data.agentes.length === 0) return;
+
+    listaAgentesCache = data.agentes;
+    agenteActivoIdCache = data.agente_activo_id;
+    agenteEnEdicionId = idAMostrar || agenteActivoIdCache;
+
+    renderSelectorAgentes();
+    actualizarUIAgente();
+    await cargarConfig(agenteEnEdicionId);
+  }
+
+  document.getElementById("selectorAgente").addEventListener("change", async (e) => {
+    agenteEnEdicionId = Number(e.target.value);
+    actualizarUIAgente();
+    await cargarConfig(agenteEnEdicionId);
+  });
+
+  document.getElementById("btnNuevoAgente").addEventListener("click", async () => {
+    const nombre = prompt("Nombre para el nuevo agente (ej. \\"Estructura B - mas directa\\"):");
+    if(!nombre || !nombre.trim()) return;
+    const clonar = confirm("Quieres empezar copiando la configuración del agente que estás viendo ahora mismo?\\n\\nAceptar = clonar esta configuración como punto de partida.\\nCancelar = empezar completamente en blanco.");
+    const data = await llamarPOST("/agentes", { nombre: nombre.trim(), clonar_de: clonar ? agenteEnEdicionId : null });
+    if(data && data.agente){
+      await cargarListaAgentes(data.agente.id);
+      alert('Agente "' + data.agente.nombre + '" creado. Todavía NO está activo — actívalo cuando esté listo con el botón "Activar este agente".');
+    } else if(data && data.error){
+      alert("No se pudo crear el agente: " + data.error);
+    }
+  });
+
+  document.getElementById("btnActivarAgente").addEventListener("click", async () => {
+    const agente = listaAgentesCache.find(a => a.id === agenteEnEdicionId);
+    if(!confirm('Activar "' + (agente?.nombre || "") + '"? El bot empezará a usar esta configuración de inmediato para responder mensajes nuevos.')) return;
+    const data = await llamarPOST("/agentes/" + agenteEnEdicionId + "/activar", {});
+    if(data && data.agente_activo_id !== undefined){
+      await cargarListaAgentes(agenteEnEdicionId);
+      alert("Listo, ese agente ya está en vivo.");
+    } else if(data && data.error){
+      alert("No se pudo activar: " + data.error);
+    }
+  });
+
+  document.getElementById("btnRenombrarAgente").addEventListener("click", async () => {
+    const agente = listaAgentesCache.find(a => a.id === agenteEnEdicionId);
+    const nuevoNombre = prompt("Nuevo nombre para este agente:", agente?.nombre || "");
+    if(!nuevoNombre || !nuevoNombre.trim() || nuevoNombre.trim() === agente?.nombre) return;
+    const data = await llamarPOST("/agentes/" + agenteEnEdicionId + "/renombrar", { nombre: nuevoNombre.trim() });
+    if(data && data.ok){
+      await cargarListaAgentes(agenteEnEdicionId);
+    } else if(data && data.error){
+      alert("No se pudo renombrar: " + data.error);
+    }
+  });
+
+  document.getElementById("btnBorrarAgente").addEventListener("click", async () => {
+    const agente = listaAgentesCache.find(a => a.id === agenteEnEdicionId);
+    if(agente?.activo){
+      alert("No puedes borrar el agente que está activo — activa otro primero.");
+      return;
+    }
+    if(!confirm('Borrar el agente "' + (agente?.nombre || "") + '" para siempre? Esto no se puede deshacer.')) return;
+    const res = await fetch("/agentes/" + agenteEnEdicionId, { method: "DELETE" });
+    const data = await res.json();
+    if(data && data.ok){
+      await cargarListaAgentes(); // vuelve a mostrar el activo por defecto
+    } else if(data && data.error){
+      alert("No se pudo borrar: " + data.error);
+    }
+  });
+
   actualizarEstado();
-  cargarConfig();
+  cargarListaAgentes();
 </script>
 </body>
 </html>
