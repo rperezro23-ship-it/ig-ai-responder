@@ -2726,6 +2726,27 @@ app.post("/webhook", async (req, res) => {
         continue;
       }
 
+      // Reacción a un mensaje (ej. el lead le da "like" o cualquier otro
+      // emoji con el doble tap / mantener presionado sobre un mensaje del
+      // bot, en vez de escribir una respuesta). Se trata exactamente igual
+      // que si hubiera escrito ese mismo emoji como mensaje de texto — nada
+      // especial que programar aparte, ya que las reglas generales y las
+      // condiciones de transición YA reconocen emojis afirmativos (👍🙌💯,
+      // etc.) como señales de "sí" cuando corresponde. Solo se procesan las
+      // reacciones NUEVAS ("react"), no cuando se QUITA una reacción
+      // ("unreact") — quitar un like no es una señal de nada en particular.
+      if (event.reaction) {
+        if (event.reaction.action !== "react") continue; // se ignora "unreact" (quitar la reacción)
+
+        const emojiReaccion = event.reaction.emoji || "👍";
+        console.log(`❤️ ${senderId} reaccionó con ${emojiReaccion} a un mensaje (mid: ${event.reaction.mid || "desconocido"}) — se procesa como si lo hubiera escrito.`);
+
+        await registrarMensajeUsuario(senderId, emojiReaccion);
+        await cancelarSeguimientosPendientesDB(senderId);
+        encolarMensaje(senderId, emojiReaccion);
+        continue;
+      }
+
       const mensajeTexto = event.message?.text;
       let mensaje = mensajeTexto;
 
