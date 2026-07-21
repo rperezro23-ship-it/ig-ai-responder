@@ -169,6 +169,32 @@ const buffers = new Map();       // { senderId: { mensajes: [], timer, enProceso
 const yaRespondidos = new Set(); // dedupe de message IDs recientes
 
 // ---------------------------------------------------------------
+// Notificaciones en tiempo real para /chats (Server-Sent Events)
+// ---------------------------------------------------------------
+// En vez de que /chats le pregunte a Supabase "¿algo nuevo?" cada pocos
+// segundos SIEMPRE (gastando consultas aunque no haya pasado nada), el
+// navegador mantiene abierta una única conexión larga a /eventos, y es el
+// SERVIDOR el que le avisa ("push") justo en el momento en que entra o sale
+// un mensaje real — solo ENTONCES el navegador hace la consulta real a
+// Supabase para traer los datos actualizados. Esto reduce muchísimo el
+// consumo de datos comparado con refrescar todo cada 4 segundos sin
+// importar si algo cambió o no.
+const clientesSSE = new Set(); // objetos "response" de Express de cada pestaña de /chats conectada
+
+function notificarCambioDeChat(senderId) {
+  const mensaje = `data: ${JSON.stringify({ senderId, en: Date.now() })}\n\n`;
+  for (const res of clientesSSE) {
+    try {
+      res.write(mensaje);
+    } catch (err) {
+      // Si falla el envío (la pestaña ya se cerró pero todavía no se limpió
+      // de la lista), simplemente se ignora — se termina de limpiar solo
+      // cuando el evento "close" de esa conexión se dispare.
+    }
+  }
+}
+
+// ---------------------------------------------------------------
 // Acceso a la base de datos (Supabase) — historial y seguimientos
 // ---------------------------------------------------------------
 
@@ -247,6 +273,11 @@ async function agregarAlHistorialDB(senderId, role, content) {
   // conversación COMPLETA con scroll hacia atrás, cada mensaje se guarda
   // ADEMÁS en esta tabla aparte, sin ningún límite.
   await guardarMensajeChatCompleto(senderId, role, content);
+
+  // Avisa en tiempo real a cualquier pestaña de /chats que esté conectada
+  // ahora mismo — así el navegador solo refresca cuando de verdad pasó
+  // algo, en vez de estar preguntando cada pocos segundos sin necesidad.
+  notificarCambioDeChat(senderId);
 
   return historial;
 }
@@ -3128,6 +3159,35 @@ app.get("/historial-paginado/:senderId", requireAdminKey, async (req, res) => {
 
 // Resumen de todas las conversaciones (usado por /chats para la lista de la izquierda).
 // Solo trae lo necesario para pintar la lista: último mensaje, quién lo mandó y cuándo.
+// Conexión larga que /chats abre una sola vez (no cada 4 segundos) — el
+// servidor le avisa por aquí, en tiempo real, cuando entra o sale un
+// mensaje real en cualquier conversación. El navegador usa este aviso para
+// decidir CUÁNDO vale la pena refrescar los datos, en vez de refrescar a
+// ciegas todo el tiempo.
+app.get("/eventos", requireAdminKey, (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no" // evita que algún proxy intermedio guarde el stream en buffer
+  });
+  res.write(": conectado\n\n"); // comentario SSE inicial, solo para confirmar la conexión
+
+  clientesSSE.add(res);
+
+  // Ping de vida cada 30s — mantiene la conexión abierta a través de
+  // proxies/balanceadores que cierran conexiones inactivas por timeout; no
+  // representa ninguna consulta a Supabase, es solo texto plano.
+  const intervaloPing = setInterval(() => {
+    try { res.write(": ping\n\n"); } catch (err) { /* se limpia con el evento "close" */ }
+  }, 30000);
+
+  req.on("close", () => {
+    clearInterval(intervaloPing);
+    clientesSSE.delete(res);
+  });
+});
+
 app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -9187,15 +9247,54 @@ ${estilosBase()}
     }
   }
 
+  // Conexión en tiempo real: en vez de refrescar cada 4 segundos SIEMPRE
+  // (sin importar si algo cambió), se abre UNA sola conexión larga a
+  // /eventos, y el servidor avisa por ahí justo cuando entra o sale un
+  // mensaje real en cualquier conversación — solo EN ESE MOMENTO se hace
+  // el refresco real. Esto reduce muchísimo el consumo de datos de
+  // Supabase comparado con estar preguntando "¿algo nuevo?" sin parar.
+  let fuenteEventos = null;
+
+  let temporizadorDebounce = null;
+
+  function conectarEventos(){
+    if(fuenteEventos) return; // ya está conectada, no duplicar
+    fuenteEventos = new EventSource("/eventos");
+    fuenteEventos.onmessage = () => {
+      // Pequeño debounce: si llegan varios avisos casi juntos (ej. varios
+      // leads escribiendo a la vez), se agrupan en un solo refresco en vez
+      // de disparar una consulta por cada aviso individual.
+      clearTimeout(temporizadorDebounce);
+      temporizadorDebounce = setTimeout(refrescoPeriodico, 400);
+    };
+    // No hace falta manejar "onerror" a mano — EventSource reintenta la
+    // conexión sola, automáticamente, si se corta por cualquier motivo.
+  }
+
+  function desconectarEventos(){
+    clearTimeout(temporizadorDebounce);
+    if(!fuenteEventos) return;
+    fuenteEventos.close();
+    fuenteEventos = null;
+  }
+
   let intervaloRefresco = null;
 
   function iniciarRefrescoPeriodico(){
     if(intervaloRefresco) return; // ya estaba corriendo, no duplicar
-    refrescoPeriodico(); // refresco inmediato al (re)activar, sin esperar los 4s
-    intervaloRefresco = setInterval(refrescoPeriodico, 4000);
+    refrescoPeriodico(); // refresco inmediato al (re)activar
+    conectarEventos();
+    // Este intervalo ya NO es el mecanismo principal de actualización (eso
+    // ahora lo hacen las notificaciones en tiempo real de arriba) — queda
+    // solo como red de respaldo, por si algún aviso se llegara a perder
+    // (ej. un corte de red muy breve), para que la pantalla nunca se quede
+    // desactualizada por mucho tiempo. Por eso el intervalo es mucho más
+    // largo que antes (60s en vez de 4s).
+    intervaloRefresco = setInterval(refrescoPeriodico, 60000);
   }
 
   function pausarRefrescoPeriodico(){
+    desconectarEventos();
     if(!intervaloRefresco) return;
     clearInterval(intervaloRefresco);
     intervaloRefresco = null;
