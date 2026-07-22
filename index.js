@@ -8107,16 +8107,23 @@ ${estilosBase()}
     const totalAgendo = conversaciones.filter(c => c.agendo).length;
     const totalEnlace = conversaciones.filter(c => c.enlace_enviado).length;
     const totalSeguimiento = conversaciones.filter(c => !c.en_ventana_24h && !c.no_califica && !c.agendo && !tieneEtiqueta(c, etiquetaCompraConfigurada)).length;
+    // El número que se MUESTRA en la pestaña respeta el filtro de días
+    // activo (si hay uno elegido) — así siempre coincide con lo que
+    // realmente se ve en la lista y con lo que se exportaría.
+    const diasSeguimientoActivo = document.getElementById("filtroDiasSeguimiento").value;
+    const totalSeguimientoMostrado = (filtroActual === "seguimiento" && diasSeguimientoActivo)
+      ? conversacionesFiltradas().length
+      : totalSeguimiento;
     document.getElementById("countTodas").textContent = conversaciones.length;
     document.getElementById("countHandoff").textContent = totalHandoff;
     document.getElementById("countCalifica").textContent = totalCalifica;
     document.getElementById("countNoCalifica").textContent = totalNoCalifica;
     document.getElementById("countAgendo").textContent = totalAgendo;
     document.getElementById("countEnlace").textContent = totalEnlace;
-    document.getElementById("countSeguimiento").textContent = totalSeguimiento;
+    document.getElementById("countSeguimiento").textContent = totalSeguimientoMostrado;
     actualizarBotonExportar({
       todas: conversaciones.length, handoff: totalHandoff, califica: totalCalifica,
-      nocalifica: totalNoCalifica, agendo: totalAgendo, enlace: totalEnlace, seguimiento: totalSeguimiento
+      nocalifica: totalNoCalifica, agendo: totalAgendo, enlace: totalEnlace, seguimiento: totalSeguimientoMostrado
     });
   }
 
@@ -8143,7 +8150,17 @@ ${estilosBase()}
 
     const total = totales[filtroActual] ?? 0;
     wrap.style.display = "inline-block";
-    btn.setAttribute("href", "/exportar/leads.csv?filtro=" + encodeURIComponent(filtroActual));
+
+    let href = "/exportar/leads.csv?filtro=" + encodeURIComponent(filtroActual);
+    // Si estás en Seguimiento y elegiste un umbral de antigüedad (ej. "hace
+    // 3+ días"), se manda también aquí — así el Excel/CSV descargado
+    // respeta exactamente la misma selección que estás viendo en pantalla,
+    // no todo el listado de seguimiento completo.
+    if(filtroActual === "seguimiento"){
+      const dias = document.getElementById("filtroDiasSeguimiento").value;
+      if(dias) href += "&dias=" + encodeURIComponent(dias);
+    }
+    btn.setAttribute("href", href);
     btn.setAttribute("style", estilos[filtroActual] || "");
     btn.setAttribute("title", titulos[filtroActual] || "Exportar");
     btn.textContent = "⬇ CSV (" + total + ")";
@@ -9599,10 +9616,11 @@ const TAMANO_LOTE_REPORTE = 8;
 app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
   try {
     const filtro = req.query.filtro || "todas";
+    const diasMinimos = req.query.dias ? Number(req.query.dias) : null;
 
     const { data, error } = await supabase
       .from("conversaciones")
-      .select("sender_id, historial, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, etapa, etiquetas, monto_pagado, username")
+      .select("sender_id, historial, ultimo_mensaje_usuario, ultimo_mensaje_bot_en, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, etapa, etiquetas, monto_pagado, username")
       // Mismo criterio que en /conversaciones: solo se exportan leads que
       // alguna vez escribieron algo — se excluyen los que solo recibieron
       // la bienvenida automática (ManyChat u otra) y nunca respondieron.
@@ -9630,6 +9648,16 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
         !c.en_ventana_24h && !c.no_califica && !c.agendo &&
         !(objetivo && Array.isArray(c.etiquetas) && c.etiquetas.some(e => normalizarParaComparar(e) === objetivo))
       );
+
+      // Mismo filtro opcional de antigüedad que se usa en /chats — si se
+      // manda "dias" en la URL, se exporta SOLO a quienes el último
+      // mensaje que les mandó el bot tiene al menos esa antigüedad, para
+      // que el archivo descargado sea exactamente la misma selección que
+      // se estaba viendo en pantalla.
+      if (Number.isFinite(diasMinimos) && diasMinimos > 0) {
+        const limiteMs = Date.now() - (diasMinimos * 24 * 60 * 60 * 1000);
+        filtradas = filtradas.filter(c => c.ultimo_mensaje_bot_en && new Date(c.ultimo_mensaje_bot_en).getTime() <= limiteMs);
+      }
     }
     // "todas" (o cualquier otro valor): sin filtro adicional.
 
