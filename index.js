@@ -3199,7 +3199,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
       // solo hacía falta el último mensaje de cada una para la vista
       // previa. Ahora se usan los campos livianos "ultimo_mensaje_texto" /
       // "ultimo_mensaje_role" en su lugar (ver agregarAlHistorialDB).
-      .select("sender_id, ultimo_mensaje_texto, ultimo_mensaje_role, ultimo_mensaje_usuario, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado, bot_pausado, username, visto_hasta")
+      .select("sender_id, ultimo_mensaje_texto, ultimo_mensaje_role, ultimo_mensaje_usuario, ultimo_mensaje_bot_en, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado, bot_pausado, username, visto_hasta")
       // Solo se muestran conversaciones donde el LEAD escribió algo alguna
       // vez — "ultimo_mensaje_usuario" únicamente se actualiza cuando llega
       // un mensaje DE la persona, nunca cuando se le manda algo a ella (ni
@@ -3262,6 +3262,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         monto_pagado: Number(c.monto_pagado) || 0,
         bot_pausado: Boolean(c.bot_pausado),
         visto_hasta: c.visto_hasta || null,
+        ultimo_mensaje_bot_en: c.ultimo_mensaje_bot_en || null,
         // Se reutiliza la bandera "enProceso" del buffer de mensajes en
         // memoria — se activa justo cuando el bot empieza a procesar/generar
         // la respuesta de este lead, y se apaga cuando termina. Sirve para
@@ -7897,6 +7898,15 @@ ${estilosBase()}
           <div class="chat-tab tab-enlace" id="tabEnlace" data-filtro="enlace" title="Enlace enviado">🔗 <span class="count" id="countEnlace"></span></div>
           <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff" title="Handoff (+24h)">⏰ <span class="count" id="countHandoff"></span></div>
           <div class="chat-tab tab-seguimiento" id="tabSeguimiento" data-filtro="seguimiento" title="Seguimiento pendiente (handoff, sin contar los que ya agendaron o no califican)">🔁 <span class="count" id="countSeguimiento"></span></div>
+          <select id="filtroDiasSeguimiento" class="select-mini" style="display:none;" title="Filtra por cuánto tiempo hace que se le mandó el último mensaje del bot — útil para hacer seguimiento con tu propia cadencia (cada 3er día, cada semana, etc.)">
+            <option value="">Cualquier antigüedad</option>
+            <option value="1">Hace 1+ día</option>
+            <option value="2">Hace 2+ días</option>
+            <option value="3">Hace 3+ días</option>
+            <option value="7">Hace 1+ semana</option>
+            <option value="14">Hace 2+ semanas</option>
+            <option value="30">Hace 1+ mes</option>
+          </select>
         </div>
         <div class="chat-toolbar">
           <select id="segmentoReporteDolores" class="select-mini" title="Segmento a analizar en el resumen de dolores/obstáculos">
@@ -8150,7 +8160,23 @@ ${estilosBase()}
     // insistirles), a los que ya agendaron (ya lograron lo que se buscaba),
     // y a los que ya tienen la etiqueta de "Compró" (por si alguien cerró
     // fuera del flujo normal del bot, sin haber confirmado "agendé").
-    if(filtroActual === "seguimiento") return conversaciones.filter(c => !c.en_ventana_24h && !c.no_califica && !c.agendo && !tieneEtiqueta(c, etiquetaCompraConfigurada));
+    if(filtroActual === "seguimiento") {
+      let base = conversaciones.filter(c => !c.en_ventana_24h && !c.no_califica && !c.agendo && !tieneEtiqueta(c, etiquetaCompraConfigurada));
+
+      // Filtro adicional, opcional: solo mostrar a quienes el ÚLTIMO
+      // mensaje que les mandó EL BOT (no el lead) tiene al menos esta
+      // antigüedad — sirve para hacer seguimiento con tu propia cadencia
+      // (ej. "solo quiero ver a quien no le escribo hace 3 días o más",
+      // para no repetirle un seguimiento a alguien al que ya le mandaste
+      // algo ayer).
+      const diasMinimos = document.getElementById("filtroDiasSeguimiento").value;
+      if(diasMinimos){
+        const limiteMs = Date.now() - (Number(diasMinimos) * 24 * 60 * 60 * 1000);
+        base = base.filter(c => c.ultimo_mensaje_bot_en && new Date(c.ultimo_mensaje_bot_en).getTime() <= limiteMs);
+      }
+
+      return base;
+    }
     return conversaciones;
   }
 
@@ -8952,46 +8978,62 @@ ${estilosBase()}
     else detenerYEnviarGrabacion();
   });
 
+  // El selector de "antigüedad del último mensaje del bot" solo tiene
+  // sentido dentro de la pestaña de Seguimiento — se muestra solo ahí.
+  function actualizarVisibilidadFiltroDias(){
+    document.getElementById("filtroDiasSeguimiento").style.display = (filtroActual === "seguimiento") ? "" : "none";
+  }
+
   document.getElementById("tabTodas").addEventListener("click", () => {
     filtroActual = "todas";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabTodas").classList.add("active");
+    actualizarVisibilidadFiltroDias();
     renderLista();
   });
   document.getElementById("tabHandoff").addEventListener("click", () => {
     filtroActual = "handoff";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabHandoff").classList.add("active");
+    actualizarVisibilidadFiltroDias();
     renderLista();
   });
   document.getElementById("tabSeguimiento").addEventListener("click", () => {
     filtroActual = "seguimiento";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabSeguimiento").classList.add("active");
+    actualizarVisibilidadFiltroDias();
     renderLista();
   });
   document.getElementById("tabCalifica").addEventListener("click", () => {
     filtroActual = "califica";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabCalifica").classList.add("active");
+    actualizarVisibilidadFiltroDias();
     renderLista();
   });
   document.getElementById("tabNoCalifica").addEventListener("click", () => {
     filtroActual = "nocalifica";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabNoCalifica").classList.add("active");
+    actualizarVisibilidadFiltroDias();
     renderLista();
   });
   document.getElementById("tabAgendo").addEventListener("click", () => {
     filtroActual = "agendo";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabAgendo").classList.add("active");
+    actualizarVisibilidadFiltroDias();
     renderLista();
   });
   document.getElementById("tabEnlace").addEventListener("click", () => {
     filtroActual = "enlace";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
     document.getElementById("tabEnlace").classList.add("active");
+    actualizarVisibilidadFiltroDias();
+    renderLista();
+  });
+  document.getElementById("filtroDiasSeguimiento").addEventListener("change", () => {
     renderLista();
   });
 
