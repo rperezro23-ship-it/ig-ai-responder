@@ -6428,7 +6428,21 @@ ${estilosBase()}
           <div style="height:1px; background:var(--border); margin:22px 0;"></div>
 
           <div id="listaEtapas"></div>
-          <button class="add-paso" id="addEtapa" type="button">+ Agregar etapa</button>
+          <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+            <button class="add-paso" id="addEtapa" type="button">+ Agregar etapa</button>
+            <button class="add-paso" id="btnCopiarEtapaDeAgente" type="button" style="background:rgba(63,199,232,.1); border-color:rgba(63,199,232,.35); color:#3FC7E8;">📋 Copiar etapa de otro agente</button>
+          </div>
+          <div id="popoverCopiarEtapa" class="paso" style="display:none; margin-top:12px; background:var(--surface-2);">
+            <label>¿De qué agente quieres copiar?</label>
+            <select id="selectAgenteOrigenCopia"></select>
+            <label style="margin-top:12px;">¿Cuál etapa de ese agente?</label>
+            <select id="selectEtapaOrigenCopia" disabled><option>Elige primero un agente...</option></select>
+            <p class="hint" id="hintCopiarEtapa" style="margin:10px 0;"></p>
+            <div style="display:flex; gap:10px;">
+              <button type="button" class="btn-primary" id="btnConfirmarCopiarEtapa" disabled>Copiar esta etapa aquí</button>
+              <button type="button" class="add-paso" id="btnCancelarCopiarEtapa">Cancelar</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -7207,6 +7221,117 @@ ${estilosBase()}
     leerEtapasDelDOM();
     etapas.push({ clave: "", nombre: "", prompt: "", mensajes_fijos: [], entrada: false, elegir_mejor_condicion: false, requiere_pregunta_final: false, disparadores: [], transiciones: [] });
     renderEtapas();
+  });
+
+  // --- Copiar una etapa completa (prompt, disparadores, transiciones, todo)
+  // desde OTRO agente hacia el que se está editando ahora mismo ---
+  let etapasDelAgenteOrigenCache = [];
+
+  document.getElementById("btnCopiarEtapaDeAgente").addEventListener("click", () => {
+    const popover = document.getElementById("popoverCopiarEtapa");
+    const abriendo = popover.style.display === "none";
+    popover.style.display = abriendo ? "block" : "none";
+    if(!abriendo) return;
+
+    const selectAgente = document.getElementById("selectAgenteOrigenCopia");
+    const otrosAgentes = listaAgentesCache.filter(a => a.id !== agenteEnEdicionId);
+    if(otrosAgentes.length === 0){
+      selectAgente.innerHTML = '<option value="">No tienes otro agente todavía</option>';
+      document.getElementById("selectEtapaOrigenCopia").innerHTML = '<option>—</option>';
+      return;
+    }
+    selectAgente.innerHTML = '<option value="">Elige un agente...</option>' +
+      otrosAgentes.map(a => \`<option value="\${a.id}">\${a.nombre.replace(/</g,"&lt;")}</option>\`).join("");
+    document.getElementById("selectEtapaOrigenCopia").innerHTML = '<option>Elige primero un agente...</option>';
+    document.getElementById("selectEtapaOrigenCopia").disabled = true;
+    document.getElementById("btnConfirmarCopiarEtapa").disabled = true;
+    document.getElementById("hintCopiarEtapa").textContent = "";
+  });
+
+  document.getElementById("btnCancelarCopiarEtapa").addEventListener("click", () => {
+    document.getElementById("popoverCopiarEtapa").style.display = "none";
+  });
+
+  document.getElementById("selectAgenteOrigenCopia").addEventListener("change", async (e) => {
+    const idOrigen = e.target.value;
+    const selectEtapa = document.getElementById("selectEtapaOrigenCopia");
+    document.getElementById("btnConfirmarCopiarEtapa").disabled = true;
+    document.getElementById("hintCopiarEtapa").textContent = "";
+
+    if(!idOrigen){
+      selectEtapa.innerHTML = '<option>Elige primero un agente...</option>';
+      selectEtapa.disabled = true;
+      return;
+    }
+
+    selectEtapa.innerHTML = '<option>Cargando etapas de ese agente...</option>';
+    selectEtapa.disabled = true;
+
+    // Se reutiliza el mismo endpoint que usa el selector de agentes para
+    // traer la configuración COMPLETA de cualquier agente (no solo el que
+    // se está editando ahora) — de ahí se saca su lista de etapas.
+    const cfgOrigen = await llamarGET("/config?agente_id=" + idOrigen);
+    etapasDelAgenteOrigenCache = (cfgOrigen && Array.isArray(cfgOrigen.etapas)) ? cfgOrigen.etapas : [];
+
+    if(etapasDelAgenteOrigenCache.length === 0){
+      selectEtapa.innerHTML = '<option value="">Ese agente no tiene ninguna etapa todavía</option>';
+      selectEtapa.disabled = true;
+      return;
+    }
+
+    selectEtapa.innerHTML = '<option value="">Elige una etapa...</option>' +
+      etapasDelAgenteOrigenCache.map((et, i) => \`<option value="\${i}">\${(et.nombre || et.clave || "Etapa " + (i + 1)).replace(/</g,"&lt;")}</option>\`).join("");
+    selectEtapa.disabled = false;
+  });
+
+  document.getElementById("selectEtapaOrigenCopia").addEventListener("change", (e) => {
+    const indice = e.target.value;
+    const btnConfirmar = document.getElementById("btnConfirmarCopiarEtapa");
+    const hint = document.getElementById("hintCopiarEtapa");
+
+    if(indice === ""){
+      btnConfirmar.disabled = true;
+      hint.textContent = "";
+      return;
+    }
+
+    const etapaElegida = etapasDelAgenteOrigenCache[Number(indice)];
+    leerEtapasDelDOM(); // para comparar contra las claves actuales, ya editadas
+    const yaExisteClave = etapaElegida.clave && etapas.some(et => et.clave === etapaElegida.clave);
+    hint.textContent = yaExisteClave
+      ? \`⚠️ Ya tienes una etapa con la clave "\${etapaElegida.clave}" — al copiar, se le pondrá "_copia" al final para no chocar con la existente.\`
+      : "Se copiará completa: prompt, mensajes fijos, disparadores, y transiciones.";
+    btnConfirmar.disabled = false;
+  });
+
+  document.getElementById("btnConfirmarCopiarEtapa").addEventListener("click", () => {
+    const indice = document.getElementById("selectEtapaOrigenCopia").value;
+    if(indice === "") return;
+
+    // Copia profunda — nunca se debe compartir el mismo objeto/arreglos en
+    // memoria entre los dos agentes, o editar uno afectaría al otro sin
+    // querer.
+    const copia = JSON.parse(JSON.stringify(etapasDelAgenteOrigenCache[Number(indice)]));
+
+    leerEtapasDelDOM();
+    if(copia.clave && etapas.some(et => et.clave === copia.clave)){
+      copia.clave = copia.clave + "_copia";
+    }
+    // La copia nunca debería llegar marcada como "entrada" — cada agente
+    // solo puede tener una etapa de entrada, y forzar esto evitaría
+    // confusión si el agente destino ya tiene la suya propia.
+    copia.entrada = false;
+
+    etapas.push(copia);
+    renderEtapas();
+    document.getElementById("popoverCopiarEtapa").style.display = "none";
+    document.getElementById("saveMsg").textContent = "✅ Etapa copiada — revísala abajo y no olvides darle a \\"Guardar cambios\\" para que quede guardada.";
+    document.getElementById("saveMsg").className = "save-msg";
+    document.getElementById("saveMsg").style.color = "var(--green)";
+    // Se desplaza la vista hasta la nueva etapa (la última de la lista),
+    // para que sea fácil encontrarla y revisarla de inmediato.
+    const tarjetas = document.querySelectorAll("#listaEtapas .etapa-card");
+    tarjetas[tarjetas.length - 1]?.scrollIntoView({ behavior: "smooth", block: "center" });
   });
 
   let agenteEnEdicionId = null;
