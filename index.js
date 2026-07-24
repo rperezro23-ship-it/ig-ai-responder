@@ -3627,6 +3627,33 @@ app.post("/chats/marcar-califica", requireAdminKey, async (req, res) => {
   }
 });
 
+// Igual que los dos de arriba, pero para marcar manualmente a un lead como
+// "Agendó" — por ejemplo, si confirmó la llamada por otro medio (WhatsApp,
+// verbalmente, etc.) y el bot nunca lo detectó automáticamente contra
+// Calendly. Al marcarlo, también se cancelan los seguimientos pendientes si
+// tienes activada esa opción en /panel — igual que pasaría si el bot lo
+// hubiera detectado por su cuenta.
+app.post("/chats/marcar-agendo", requireAdminKey, async (req, res) => {
+  try {
+    const { senderId } = req.body || {};
+    if (!senderId) return res.status(400).json({ error: "Falta senderId." });
+
+    await guardarConversacion(senderId, {
+      agendo: true,
+      agendo_en: new Date().toISOString()
+    });
+
+    if (configActual.parar_seguimientos_si_agendo) {
+      await cancelarSeguimientosPendientesDB(senderId);
+    }
+
+    console.log(`📅 ${senderId} marcado manualmente como AGENDÓ desde /chats.`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // Genera un resumen (edad, cuánto peso quiere perder, obstáculo, y dolores
 // de salud/estética) de UNA conversación en particular — se pide bajo
@@ -7997,6 +8024,7 @@ ${estilosBase()}
               <button type="button" id="btnConfirmarNoCalifica">Marcar</button>
             </div>
           </div>
+          <button type="button" class="btn-add-etiqueta" id="btnAddAgendo" style="color:var(--green); border-color:rgba(49,217,124,.35);" title="Marcar manualmente como que ya agendó — por ejemplo, si confirmó la llamada por otro medio (WhatsApp, verbalmente) y el bot no lo detectó automáticamente.">+ 📅 Agendó</button>
           <span class="status-sep">·</span>
           <button type="button" class="btn-pausar-bot" id="btnPausarBot" title="Pausar el bot para esta conversación — tú respondes manualmente">⏸️ Pausar bot</button>
         </div>
@@ -8643,6 +8671,29 @@ ${estilosBase()}
   document.addEventListener("click", (e) => {
     if(popoverNoCalifica.style.display !== "none" && !popoverNoCalifica.contains(e.target) && e.target.id !== "btnAddNoCalifica"){
       popoverNoCalifica.style.display = "none";
+    }
+  });
+
+  // Marcar Agendó manualmente — sin popover (no tiene campo de motivo,
+  // solo se marca la fecha de ahora mismo), un simple clic + confirmación.
+  document.getElementById("btnAddAgendo").addEventListener("click", async () => {
+    if(!senderSeleccionado) return;
+    if(!confirm("Marcar esta conversación como Agendó? Esto detiene los seguimientos automáticos pendientes (si tienes esa opción activada en /panel).")) return;
+    const res = await fetch("/chats/marcar-agendo", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ senderId: senderSeleccionado })
+    });
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+    const data = await res.json();
+    if(data.ok){
+      const c = conversaciones.find(c => c.sender_id === senderSeleccionado);
+      if(c){
+        c.agendo = true;
+        c.agendo_en = new Date().toISOString();
+      }
+      renderHead();
+    } else {
+      alert("No se pudo marcar: " + (data.error || "error desconocido"));
     }
   });
 
