@@ -168,6 +168,30 @@ const COLCHON_SEGURIDAD_MS = 2 * 60 * 1000; // 2 minutos de margen de seguridad
 const buffers = new Map();       // { senderId: { mensajes: [], timer, enProceso } }
 const yaRespondidos = new Set(); // dedupe de message IDs recientes
 
+// Procesa un arreglo con una función async, pero SOLO "limite" elementos a
+// la vez en paralelo (en vez de lanzar TODOS de golpe con Promise.all) —
+// esto es clave cuando la función hace llamadas a una API externa con
+// límite de solicitudes (como pedir el perfil de Instagram de cada
+// conversación): si tienes 100+ conversaciones y las 100 piden su perfil
+// exactamente al mismo tiempo, Meta empieza a rechazar por exceso de
+// solicitudes — incluso para leads completamente válidos — y todas fallan
+// en cascada. Procesando de a poco, se evita saturar ese límite.
+async function mapConLimite(items, limite, fn) {
+  const resultados = new Array(items.length);
+  let indice = 0;
+
+  async function trabajador() {
+    while (indice < items.length) {
+      const miIndice = indice++;
+      resultados[miIndice] = await fn(items[miIndice], miIndice);
+    }
+  }
+
+  const trabajadores = Array.from({ length: Math.min(limite, items.length) }, () => trabajador());
+  await Promise.all(trabajadores);
+  return resultados;
+}
+
 // ---------------------------------------------------------------
 // Notificaciones en tiempo real para /chats (Server-Sent Events)
 // ---------------------------------------------------------------
@@ -3218,7 +3242,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
 
     const totalPasosEnlace = (configActual.seguimientos_enlace || []).length;
 
-    const resumen = await Promise.all((data || []).map(async (c) => {
+    const resumen = await mapConLimite(data || [], 5, async (c) => {
       const perfil = await obtenerPerfilInstagram(c.sender_id);
 
       const enVentana24h = c.ultimo_mensaje_usuario
@@ -3270,7 +3294,7 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
         // que hace la propia Instagram.
         escribiendo: Boolean(buffers.get(c.sender_id)?.enProceso)
       };
-    }));
+    });
 
 
     res.json({ conversaciones: resumen });
@@ -9453,7 +9477,7 @@ app.get("/exportar/handoff.csv", requireAdminKey, async (req, res) => {
       return (Date.now() - new Date(c.ultimo_mensaje_usuario).getTime()) >= VENTANA_24H_MS;
     });
 
-    const filas = await Promise.all(fueraDeVentana.map(async (c) => {
+    const filas = await mapConLimite(fueraDeVentana, 5, async (c) => {
       const perfil = await obtenerPerfilInstagram(c.sender_id);
       const historial = Array.isArray(c.historial) ? c.historial : [];
       const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
@@ -9466,7 +9490,7 @@ app.get("/exportar/handoff.csv", requireAdminKey, async (req, res) => {
         horas_inactivo: horasInactivo,
         ultimo_mensaje: ultimo ? ultimo.content : ""
       };
-    }));
+    });
 
     const encabezados = ["username", "sender_id", "ultimo_mensaje_usuario", "horas_inactivo", "ultimo_mensaje"];
     const escaparCSV = (valor) => {
@@ -9501,7 +9525,7 @@ app.get("/exportar/calificados.csv", requireAdminKey, async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
 
-    const filas = await Promise.all((data || []).map(async (c) => {
+    const filas = await mapConLimite(data || [], 5, async (c) => {
       const perfil = await obtenerPerfilInstagram(c.sender_id);
       const historial = Array.isArray(c.historial) ? c.historial : [];
       const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
@@ -9519,7 +9543,7 @@ app.get("/exportar/calificados.csv", requireAdminKey, async (req, res) => {
         en_ventana_24h: enVentana24h ? "sí" : "no (handoff)",
         ultimo_mensaje: ultimo ? ultimo.content : ""
       };
-    }));
+    });
 
     const encabezados = ["username", "sender_id", "calificado_en", "razon_calificacion", "enlace_enviado", "enlace_enviado_en", "en_ventana_24h", "ultimo_mensaje"];
     const escaparCSV = (valor) => {
@@ -9555,7 +9579,7 @@ app.get("/exportar/enlace.csv", requireAdminKey, async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
 
-    const filas = await Promise.all((data || []).map(async (c) => {
+    const filas = await mapConLimite(data || [], 5, async (c) => {
       const perfil = await obtenerPerfilInstagram(c.sender_id);
       const historial = Array.isArray(c.historial) ? c.historial : [];
       const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
@@ -9572,7 +9596,7 @@ app.get("/exportar/enlace.csv", requireAdminKey, async (req, res) => {
         en_ventana_24h: enVentana24h ? "sí" : "no (handoff)",
         ultimo_mensaje: ultimo ? ultimo.content : ""
       };
-    }));
+    });
 
     const encabezados = ["username", "sender_id", "enlace_enviado_en", "califica", "razon_calificacion", "en_ventana_24h", "ultimo_mensaje"];
     const escaparCSV = (valor) => {
@@ -9661,7 +9685,7 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
     }
     // "todas" (o cualquier otro valor): sin filtro adicional.
 
-    const filas = await Promise.all(filtradas.map(async (c) => {
+    const filas = await mapConLimite(filtradas, 5, async (c) => {
       const perfil = await obtenerPerfilInstagram(c.sender_id);
       const historial = Array.isArray(c.historial) ? c.historial : [];
       const ultimo = historial.length > 0 ? historial[historial.length - 1] : null;
@@ -9684,7 +9708,7 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
         ultimo_mensaje_usuario: c.ultimo_mensaje_usuario || "",
         ultimo_mensaje: ultimo ? ultimo.content : ""
       };
-    }));
+    });
 
     const encabezados = [
       "username", "sender_id", "etapa", "califica", "razon_calificacion",
