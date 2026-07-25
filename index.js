@@ -37,8 +37,8 @@ const IG_APP_ID        = process.env.IG_APP_ID;       // ID de "Instagram API wi
 // Credenciales de Google Cloud (OAuth Client ID de tipo "Web application")
 // para la agenda propia — reemplaza a Calendly. Se generan en
 // console.cloud.google.com, dentro de "APIs & Services > Credentials".
-const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_CLIENT_ID     = (process.env.GOOGLE_CLIENT_ID || "").trim();
+const GOOGLE_CLIENT_SECRET = (process.env.GOOGLE_CLIENT_SECRET || "").trim();
 
 const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -10979,4 +10979,21 @@ app.get("/seguimientos/:senderId?", requireAdminKey, async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+// Diagnóstico seguro al arrancar — nunca imprime el secreto completo, solo
+// su longitud y sus primeros/últimos caracteres, para poder comparar contra
+// lo que de verdad hay en Google Cloud sin exponer el valor real en los
+// logs. Sirve para descartar rápido: ¿la variable de entorno en Render se
+// actualizó de verdad?, ¿tiene algún espacio de más al copiarla?, ¿es
+// realmente el mismo secreto que ves en Google?
+if (GOOGLE_CLIENT_ID) {
+  console.log(`🔑 GOOGLE_CLIENT_ID detectado: ${GOOGLE_CLIENT_ID.slice(0, 8)}...${GOOGLE_CLIENT_ID.slice(-20)} (${GOOGLE_CLIENT_ID.length} caracteres)`);
+} else {
+  console.log("⚠️ GOOGLE_CLIENT_ID no está configurado.");
+}
+if (GOOGLE_CLIENT_SECRET) {
+  console.log(`🔑 GOOGLE_CLIENT_SECRET detectado: ${GOOGLE_CLIENT_SECRET.slice(0, 6)}...${GOOGLE_CLIENT_SECRET.slice(-4)} (${GOOGLE_CLIENT_SECRET.length} caracteres, sin espacios al inicio/final: ${GOOGLE_CLIENT_SECRET === GOOGLE_CLIENT_SECRET.trim()})`);
+} else {
+  console.log("⚠️ GOOGLE_CLIENT_SECRET no está configurado.");
+}
+
 app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
