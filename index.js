@@ -4302,11 +4302,20 @@ app.get("/oauth/google/start", requireAdminKey, (req, res) => {
   const redirectUri = `${req.protocol}://${req.get("host")}/oauth/google/callback`;
   const state = generarOauthState();
 
+  const scopes = [
+    "https://www.googleapis.com/auth/calendar",
+    // Sin este permiso adicional, el access_token que devuelve Google NO
+    // alcanza para consultar el correo conectado (endpoint userinfo) — solo
+    // sirve para el calendario en sí. Se agrega aquí para poder mostrar en
+    // /calendario qué cuenta está conectada.
+    "https://www.googleapis.com/auth/userinfo.email"
+  ].join(" ");
+
   const url = "https://accounts.google.com/o/oauth2/v2/auth"
     + `?client_id=${encodeURIComponent(GOOGLE_CLIENT_ID)}`
     + `&redirect_uri=${encodeURIComponent(redirectUri)}`
     + `&response_type=code`
-    + `&scope=${encodeURIComponent("https://www.googleapis.com/auth/calendar")}`
+    + `&scope=${encodeURIComponent(scopes)}`
     + `&access_type=offline` // imprescindible para que Google entregue un refresh_token
     + `&prompt=consent`      // fuerza a que SIEMPRE entregue el refresh_token (si no, solo la primera vez)
     + `&state=${encodeURIComponent(state)}`;
@@ -4321,7 +4330,7 @@ app.get("/oauth/google/callback", async (req, res) => {
     <html><body style="font-family:sans-serif; max-width:600px; margin:60px auto; line-height:1.6;">
       <h2>❌ ${titulo}</h2>
       <p>${detalle || ""}</p>
-      <p><a href="/cuentas">Volver a cuentas</a></p>
+      <p><a href="/calendario">Volver a calendario</a></p>
     </body></html>
   `);
 
@@ -4351,19 +4360,28 @@ app.get("/oauth/google/callback", async (req, res) => {
       );
     }
 
-    // Datos del correo conectado, solo para mostrarlo en el panel.
-    const perfilResp = await axios.get("https://www.googleapis.com/oauth2/v2/userinfo", {
-      headers: { Authorization: `Bearer ${access_token}` }
-    });
+    // Datos del correo conectado, solo para mostrarlo en el panel — si esta
+    // consulta puntual falla por cualquier motivo, NO se debe perder toda
+    // la conexión ya lograda: se guarda igual, solo sin el correo (queda
+    // como "cuenta conectada" genérico en vez de mostrar el email real).
+    let email = null;
+    try {
+      const perfilResp = await axios.get("https://www.googleapis.com/oauth2/v2/userinfo", {
+        headers: { Authorization: `Bearer ${access_token}` }
+      });
+      email = perfilResp.data.email || null;
+    } catch (err) {
+      console.error("⚠️ No se pudo obtener el correo de la cuenta de Google conectada (no es crítico, se sigue igual):", err.response?.data || err.message);
+    }
 
     await guardarCuentaGoogleConectada({
       refresh_token,
-      email: perfilResp.data.email || null,
+      email,
       conectada_en: new Date().toISOString()
     });
     googleAccessTokenCache = null; // se descarta cualquier token viejo en memoria
 
-    res.redirect("/cuentas");
+    res.redirect("/calendario");
   } catch (err) {
     console.error("❌ Error en callback de OAuth de Google:", err.response?.data || err.message);
     paginaError("Error conectando Google Calendar", `<pre>${JSON.stringify(err.response?.data || err.message, null, 2)}</pre>`);
