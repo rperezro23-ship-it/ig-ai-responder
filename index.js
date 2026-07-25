@@ -34,6 +34,12 @@ const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN; // Instagram User Access To
 const IG_ACCOUNT_ID   = process.env.IG_ACCOUNT_ID;   // tu <IG_ID> — legado, ver "cuenta conectada" en Supabase
 const IG_APP_ID        = process.env.IG_APP_ID;       // ID de "Instagram API with Instagram Login" (Instagram Business Login) — NO es el App ID general de Meta
 
+// Credenciales de Google Cloud (OAuth Client ID de tipo "Web application")
+// para la agenda propia — reemplaza a Calendly. Se generan en
+// console.cloud.google.com, dentro de "APIs & Services > Credentials".
+const GOOGLE_CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+
 const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
@@ -606,6 +612,225 @@ async function eliminarCuentaConectada() {
 }
 
 // ---------------------------------------------------------------
+// Conexión con Google Calendar — reemplaza a Calendly. Se guarda el
+// "refresh_token" (que no vence nunca, salvo que se revoque el acceso
+// manualmente desde la cuenta de Google) y se usa para pedir un
+// "access_token" nuevo cada vez que hace falta (esos sí vencen, cada
+// hora). Mismo patrón exacto que la cuenta de Instagram — un solo
+// registro en "app_config", bajo una key distinta.
+// ---------------------------------------------------------------
+
+async function obtenerCuentaGoogleConectada() {
+  const { data, error } = await supabase
+    .from("app_config")
+    .select("*")
+    .eq("key", "google_calendar_conectado")
+    .maybeSingle();
+
+  if (error) {
+    console.error("❌ Error leyendo la cuenta de Google conectada:", error.message);
+    return null;
+  }
+  return (data && data.valor && data.valor.refresh_token) ? data.valor : null;
+}
+
+async function guardarCuentaGoogleConectada(cuenta) {
+  const { error } = await supabase
+    .from("app_config")
+    .upsert({ key: "google_calendar_conectado", valor: cuenta, actualizado_en: new Date().toISOString() });
+
+  if (error) console.error("❌ Error guardando la cuenta de Google:", error.message);
+}
+
+async function eliminarCuentaGoogleConectada() {
+  const { error } = await supabase
+    .from("app_config")
+    .delete()
+    .eq("key", "google_calendar_conectado");
+
+  if (error) console.error("❌ Error eliminando la cuenta de Google:", error.message);
+}
+
+// Cache en memoria del access_token vigente — evita pedir uno nuevo en
+// cada consulta si el que ya tenemos todavía no vence (dura 1 hora).
+let googleAccessTokenCache = null; // { access_token, vence_en }
+
+async function obtenerAccessTokenGoogleValido() {
+  const cuenta = await obtenerCuentaGoogleConectada();
+  if (!cuenta) return null;
+
+  if (googleAccessTokenCache && googleAccessTokenCache.vence_en > Date.now() + 60000) {
+    return googleAccessTokenCache.access_token;
+  }
+
+  try {
+    const resp = await axios.post("https://oauth2.googleapis.com/token", new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      refresh_token: cuenta.refresh_token,
+      grant_type: "refresh_token"
+    }));
+
+    googleAccessTokenCache = {
+      access_token: resp.data.access_token,
+      vence_en: Date.now() + (resp.data.expires_in || 3600) * 1000
+    };
+    return googleAccessTokenCache.access_token;
+  } catch (err) {
+    console.error("❌ Error renovando el access_token de Google:", err.response?.data || err.message);
+    return null;
+  }
+}
+
+// Convierte una hora "de reloj de pared" en una zona horaria específica
+// (ej. "15:00 en America/Mexico_City") a la fecha/hora UTC real que le
+// corresponde — contempla automáticamente el horario de verano. No usa
+// ninguna librería externa, solo la API estándar de Intl de JavaScript.
+function horaLocalAUtc(anio, mes, dia, hora, minuto, zonaHoraria) {
+  const comoSiFueraUtc = new Date(Date.UTC(anio, mes - 1, dia, hora, minuto));
+  const partes = new Intl.DateTimeFormat("en-US", {
+    timeZone: zonaHoraria, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit"
+  }).formatToParts(comoSiFueraUtc);
+  const obj = {};
+  for (const p of partes) obj[p.type] = p.value;
+  const equivalenteEnEsaZona = Date.UTC(
+    Number(obj.year), Number(obj.month) - 1, Number(obj.day),
+    obj.hour === "24" ? 0 : Number(obj.hour), Number(obj.minute), Number(obj.second)
+  );
+  const offsetMs = equivalenteEnEsaZona - comoSiFueraUtc.getTime();
+  return new Date(comoSiFueraUtc.getTime() - offsetMs);
+}
+
+const DIAS_SEMANA_CLAVE = ["domingo", "lunes", "martes", "miercoles", "jueves", "viernes", "sabado"];
+
+// Genera la lista de horarios REALMENTE disponibles para agendar — cruza
+// tu horario semanal configurado (de /panel) contra tu calendario de
+// Google real, quitando cualquier horario que ya tengas ocupado con algo
+// (sea un evento de este mismo sistema o cualquier otra cosa que tengas
+// agendada). Devuelve un arreglo de fechas ISO (inicio de cada slot).
+async function obtenerHorariosDisponibles() {
+  const zonaHoraria = configActual.agenda_zona_horaria || "America/Mexico_City";
+  const duracionMin = configActual.agenda_duracion_minutos || 30;
+  const diasHaciaAdelante = configActual.agenda_dias_hacia_adelante || 14;
+  const avisoMinimoMs = (configActual.agenda_aviso_minimo_horas || 2) * 60 * 60 * 1000;
+  const horarioSemanal = configActual.agenda_horario_semanal || {};
+
+  const ahora = new Date();
+  const limiteInferior = new Date(ahora.getTime() + avisoMinimoMs);
+
+  // 1) Se generan los horarios CANDIDATOS (sin revisar todavía si están
+  // ocupados) según el horario semanal configurado, para cada día del
+  // rango.
+  const candidatos = [];
+  for (let offsetDias = 0; offsetDias <= diasHaciaAdelante; offsetDias++) {
+    const fechaBase = new Date(ahora.getTime() + offsetDias * 24 * 60 * 60 * 1000);
+    // Se obtiene el año/mes/día en la ZONA HORARIA configurada (no en UTC
+    // ni en la del servidor), para que el "día de la semana" sea el
+    // correcto desde la perspectiva del lead/negocio.
+    const partesFecha = new Intl.DateTimeFormat("en-US", {
+      timeZone: zonaHoraria, year: "numeric", month: "2-digit", day: "2-digit", weekday: "long"
+    }).formatToParts(fechaBase);
+    const obj = {};
+    for (const p of partesFecha) obj[p.type] = p.value;
+    const claveDia = DIAS_SEMANA_CLAVE[["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"].indexOf(obj.weekday)];
+
+    const configDia = horarioSemanal[claveDia];
+    if (!configDia || !configDia.activo) continue;
+
+    const [horaDesde, minDesde] = configDia.desde.split(":").map(Number);
+    const [horaHasta, minHasta] = configDia.hasta.split(":").map(Number);
+
+    const inicioDia = horaLocalAUtc(Number(obj.year), Number(obj.month), Number(obj.day), horaDesde, minDesde, zonaHoraria);
+    const finDia = horaLocalAUtc(Number(obj.year), Number(obj.month), Number(obj.day), horaHasta, minHasta, zonaHoraria);
+
+    for (let cursor = inicioDia.getTime(); cursor + duracionMin * 60000 <= finDia.getTime(); cursor += duracionMin * 60000) {
+      if (cursor < limiteInferior.getTime()) continue; // muy pronto, no da tiempo de avisar
+      candidatos.push({ inicio: new Date(cursor), fin: new Date(cursor + duracionMin * 60000) });
+    }
+  }
+
+  if (candidatos.length === 0) return [];
+
+  // 2) Se consulta a Google, en UNA sola llamada, qué periodos están
+  // ocupados en todo el rango — mucho más eficiente que consultar horario
+  // por horario.
+  const accessToken = await obtenerAccessTokenGoogleValido();
+  if (!accessToken) {
+    console.error("⚠️ No se pudo obtener un access_token de Google — ¿está conectado Google Calendar en /cuentas?");
+    return [];
+  }
+
+  let periodosOcupados = [];
+  try {
+    const resp = await axios.post("https://www.googleapis.com/calendar/v3/freeBusy", {
+      timeMin: candidatos[0].inicio.toISOString(),
+      timeMax: candidatos[candidatos.length - 1].fin.toISOString(),
+      items: [{ id: "primary" }]
+    }, {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    });
+    periodosOcupados = resp.data.calendars?.primary?.busy || [];
+  } catch (err) {
+    console.error("❌ Error consultando disponibilidad en Google Calendar:", err.response?.data || err.message);
+    return [];
+  }
+
+  // 3) Se descartan los candidatos que se cruzan con algún periodo ocupado.
+  const seCruza = (inicio, fin, ocupado) => {
+    const ocupadoInicio = new Date(ocupado.start).getTime();
+    const ocupadoFin = new Date(ocupado.end).getTime();
+    return inicio.getTime() < ocupadoFin && fin.getTime() > ocupadoInicio;
+  };
+
+  return candidatos
+    .filter(c => !periodosOcupados.some(ocupado => seCruza(c.inicio, c.fin, ocupado)))
+    .map(c => c.inicio.toISOString());
+}
+
+// Crea el evento real en tu Google Calendar cuando alguien confirma un
+// horario — incluye una videollamada de Google Meet generada
+// automáticamente, y (si se dio un correo) invita al lead directamente.
+async function crearEventoGoogleCalendar({ inicioIso, nombre, email, notas }) {
+  const accessToken = await obtenerAccessTokenGoogleValido();
+  if (!accessToken) throw new Error("No hay una cuenta de Google Calendar conectada.");
+
+  const duracionMin = configActual.agenda_duracion_minutos || 30;
+  const inicio = new Date(inicioIso);
+  const fin = new Date(inicio.getTime() + duracionMin * 60000);
+
+  const evento = {
+    summary: `Llamada con ${nombre || "lead"}`,
+    description: notas || "",
+    start: { dateTime: inicio.toISOString() },
+    end: { dateTime: fin.toISOString() },
+    attendees: email ? [{ email }] : [],
+    conferenceData: {
+      createRequest: {
+        requestId: crypto.randomBytes(8).toString("hex"),
+        conferenceSolutionKey: { type: "hangoutsMeet" }
+      }
+    }
+  };
+
+  // Endpoint confirmado en la documentación oficial de Google:
+  // POST /calendar/v3/calendars/{calendarId}/events — "primary" como
+  // calendarId apunta siempre al calendario principal de la cuenta
+  // conectada.
+  const resp = await axios.post(
+    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+    evento,
+    {
+      params: { conferenceDataVersion: 1, sendUpdates: email ? "all" : "none" },
+      headers: { Authorization: `Bearer ${accessToken}` }
+    }
+  );
+
+  return resp.data; // incluye .id (para guardarlo) y .hangoutLink (el enlace de Meet)
+}
+
+// ---------------------------------------------------------------
 // Conexión con Calendly: se usa para saber, con certeza real (no solo
 // porque el lead lo dijo), si alguien ya agendó su llamada. Funciona con
 // un webhook — Calendly avisa automáticamente en el instante en que
@@ -680,6 +905,32 @@ let calendlyOrgUriCache = null;
 // reserva activa agendada. Se usa en el momento exacto en que un lead dice
 // "ya agendé" — no antes (no hay por qué gastar llamadas revisando a nadie
 // que no lo haya dicho) ni con webhooks (que costarían el plan Standard).
+// Verifica si un lead ya agendó, consultando NUESTRA PROPIA tabla de
+// reservas — mucho más simple y confiable que la verificación de Calendly,
+// ya que ahora controlamos los dos lados (el formulario Y el bot), no hace
+// falta ninguna llamada a una API externa para esto.
+async function verificarReservaPropia(username) {
+  const limpio = (username || "").trim().replace(/^@/, "").toLowerCase();
+  if (!limpio) return { encontrado: false, motivo: "El lead no tiene username de Instagram guardado." };
+
+  const { data, error } = await supabase
+    .from("reservas")
+    .select("*")
+    .eq("instagram_username", limpio)
+    .gte("inicio", new Date().toISOString()) // solo reservas futuras, no las que ya pasaron
+    .order("inicio", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("❌ Error verificando reserva propia:", error.message);
+    return { encontrado: false, motivo: "Error consultando la base de datos: " + error.message };
+  }
+  if (!data) return { encontrado: false, motivo: "No se encontró ninguna reserva futura con ese usuario de Instagram." };
+
+  return { encontrado: true, reserva: data };
+}
+
 async function verificarReservaEnCalendly(username, mensajeFecha) {
   const limpio = (username || "").trim().replace(/^@/, "").toLowerCase();
   if (!configActual.calendly_token?.trim() || !configActual.calendly_pregunta_instagram?.trim()) {
@@ -1084,6 +1335,7 @@ function sidebarHTML(activo) {
   <nav class="side-nav">
     ${link("/dashboard", "DSH", "Dashboard", "dashboard")}
     ${link("/cuentas", "CTA", "Cuentas", "cuentas")}
+    ${link("/calendario", "CAL", "Calendario", "calendario")}
     ${link("/panel", "CFG", "Configuración", "panel")}
     ${link("/chats", "CHT", "Chats", "chats")}
   </nav>
@@ -4041,6 +4293,440 @@ app.get("/oauth/instagram/callback", async (req, res) => {
   }
 });
 
+// --- OAuth de Google Calendar (reemplaza a Calendly) ---
+app.get("/oauth/google/start", requireAdminKey, (req, res) => {
+  if (!GOOGLE_CLIENT_ID) {
+    return res.status(500).send("Falta configurar GOOGLE_CLIENT_ID en las variables de entorno de Render.");
+  }
+
+  const redirectUri = `${req.protocol}://${req.get("host")}/oauth/google/callback`;
+  const state = generarOauthState();
+
+  const url = "https://accounts.google.com/o/oauth2/v2/auth"
+    + `?client_id=${encodeURIComponent(GOOGLE_CLIENT_ID)}`
+    + `&redirect_uri=${encodeURIComponent(redirectUri)}`
+    + `&response_type=code`
+    + `&scope=${encodeURIComponent("https://www.googleapis.com/auth/calendar")}`
+    + `&access_type=offline` // imprescindible para que Google entregue un refresh_token
+    + `&prompt=consent`      // fuerza a que SIEMPRE entregue el refresh_token (si no, solo la primera vez)
+    + `&state=${encodeURIComponent(state)}`;
+
+  res.redirect(url);
+});
+
+app.get("/oauth/google/callback", async (req, res) => {
+  const { code, state, error } = req.query;
+
+  const paginaError = (titulo, detalle) => res.status(400).type("html").send(`
+    <html><body style="font-family:sans-serif; max-width:600px; margin:60px auto; line-height:1.6;">
+      <h2>❌ ${titulo}</h2>
+      <p>${detalle || ""}</p>
+      <p><a href="/cuentas">Volver a cuentas</a></p>
+    </body></html>
+  `);
+
+  if (error) return paginaError("No se pudo conectar Google Calendar", error);
+  if (!validarOauthState(state)) return paginaError("El enlace de conexión expiró o ya se usó", "Vuelve a intentar desde el panel.");
+  if (!code) return paginaError("Falta el código de autorización de Google");
+
+  try {
+    const redirectUri = `${req.protocol}://${req.get("host")}/oauth/google/callback`;
+
+    const tokenResp = await axios.post("https://oauth2.googleapis.com/token", new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      code,
+      grant_type: "authorization_code",
+      redirect_uri: redirectUri
+    }));
+
+    const { refresh_token, access_token } = tokenResp.data;
+    if (!refresh_token) {
+      // Pasa si ya habías conectado esta cuenta antes y Google decide no
+      // volver a mandar el refresh_token — hay que revocar el acceso desde
+      // https://myaccount.google.com/permissions y conectar de nuevo.
+      return paginaError(
+        "Google no mandó un refresh_token",
+        "Ve a myaccount.google.com/permissions, quita el acceso a esta app, y vuelve a intentar conectar desde /cuentas."
+      );
+    }
+
+    // Datos del correo conectado, solo para mostrarlo en el panel.
+    const perfilResp = await axios.get("https://www.googleapis.com/oauth2/v2/userinfo", {
+      headers: { Authorization: `Bearer ${access_token}` }
+    });
+
+    await guardarCuentaGoogleConectada({
+      refresh_token,
+      email: perfilResp.data.email || null,
+      conectada_en: new Date().toISOString()
+    });
+    googleAccessTokenCache = null; // se descarta cualquier token viejo en memoria
+
+    res.redirect("/cuentas");
+  } catch (err) {
+    console.error("❌ Error en callback de OAuth de Google:", err.response?.data || err.message);
+    paginaError("Error conectando Google Calendar", `<pre>${JSON.stringify(err.response?.data || err.message, null, 2)}</pre>`);
+  }
+});
+
+app.post("/oauth/google/desconectar", requireAdminKey, async (req, res) => {
+  await eliminarCuentaGoogleConectada();
+  googleAccessTokenCache = null;
+  res.json({ ok: true });
+});
+
+// Estado actual de la conexión con Google Calendar — lo usa la página
+// /calendario para saber si mostrar "Conectar" o los datos de la cuenta ya
+// vinculada.
+app.get("/google/estado", requireAdminKey, async (req, res) => {
+  const cuenta = await obtenerCuentaGoogleConectada();
+  if (!cuenta) return res.json({ conectada: false });
+  res.json({
+    conectada: true,
+    email: cuenta.email || null,
+    conectada_en: cuenta.conectada_en || null
+  });
+});
+
+// ---------------------------------------------------------------
+// Página pública de agendar (reemplaza a Calendly) — la ve el LEAD, no
+// requiere ninguna clave de acceso. Flujo de dos pasos:
+//   1) Pregunta de presupuesto (y nombre) — si elige la opción marcada
+//      como "descalifica", nunca llega a ver el calendario.
+//   2) Si pasa el filtro, elige un horario real (consultado en vivo
+//      contra tu Google Calendar) y confirma.
+// El parámetro ?u=usuario en la URL pre-llena su usuario de Instagram
+// (para poder hacer luego coincidir la reserva con la conversación
+// correcta) — el mismo truco que usábamos con el enlace de Calendly.
+// ---------------------------------------------------------------
+app.get("/agendar", (req, res) => {
+  const usernamePrellenado = (req.query.u || "").toString().slice(0, 100);
+  res.type("html").send(`<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agenda tu llamada</title>
+<style>
+  :root{ --bg:#0B0E14; --surface:#12161F; --surface-2:#1A1F2B; --border:#232937; --text:#F4F6FA; --muted:#9CA5B5; --green:#31D97C; --red:#FF5D5D; }
+  *{ box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; padding:24px; }
+  .tarjeta{ background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:460px; width:100%; }
+  h1{ font-size:22px; margin:0 0 8px; }
+  p.sub{ color:var(--muted); font-size:14.5px; margin:0 0 24px; line-height:1.5; }
+  label{ display:block; font-size:13.5px; font-weight:600; margin:16px 0 6px; }
+  input[type=text], input[type=email]{
+    width:100%; background:var(--surface-2); border:1px solid var(--border); border-radius:8px;
+    padding:11px 13px; color:var(--text); font-size:14.5px; font-family:inherit;
+  }
+  .opcion{
+    display:flex; align-items:center; gap:10px; background:var(--surface-2); border:1px solid var(--border);
+    border-radius:10px; padding:13px 14px; margin-bottom:8px; cursor:pointer; transition:border-color .15s;
+  }
+  .opcion:hover{ border-color:var(--green); }
+  .opcion.elegida{ border-color:var(--green); background:rgba(49,217,124,.08); }
+  .opcion input{ accent-color:var(--green); width:17px; height:17px; }
+  button{
+    width:100%; background:var(--green); color:#04140D; border:none; border-radius:10px;
+    padding:14px; font-size:15px; font-weight:700; cursor:pointer; margin-top:22px;
+  }
+  button:disabled{ opacity:.5; cursor:not-allowed; }
+  button.secundario{ background:var(--surface-2); color:var(--text); border:1px solid var(--border); }
+  .dia-grupo{ margin-bottom:18px; }
+  .dia-titulo{ font-size:13px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.03em; margin-bottom:8px; }
+  .horarios-grid{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+  .horario-btn{
+    background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px 6px;
+    color:var(--text); font-size:13.5px; cursor:pointer; text-align:center;
+  }
+  .horario-btn:hover, .horario-btn.elegido{ border-color:var(--green); background:rgba(49,217,124,.1); }
+  .oculto{ display:none; }
+  .cargando{ text-align:center; color:var(--muted); padding:30px 0; }
+  .error{ color:var(--red); font-size:13.5px; margin-top:10px; }
+  .exito{ text-align:center; }
+  .exito .icono{ font-size:44px; margin-bottom:10px; }
+</style>
+</head>
+<body>
+  <div class="tarjeta">
+
+    <div id="pasoFormulario">
+      <h1>Agenda tu llamada</h1>
+      <p class="sub">Cuéntanos un poco de tu situación para poder ayudarte mejor.</p>
+      <label>Tu nombre</label>
+      <input type="text" id="inputNombre" placeholder="Ej: Juan Pérez">
+      <label id="labelPregunta"></label>
+      <div id="contenedorOpciones"></div>
+      <div class="error oculto" id="errorFormulario"></div>
+      <button id="btnContinuar">Continuar</button>
+    </div>
+
+    <div id="pasoNoCalifica" class="oculto">
+      <h1>Gracias por tu interés</h1>
+      <p class="sub" id="textoNoCalifica"></p>
+      <a id="botonRecursoNoCalifica" class="oculto" href="#" target="_blank" style="text-decoration:none;">
+        <button type="button">Ver recurso gratis</button>
+      </a>
+    </div>
+
+    <div id="pasoHorarios" class="oculto">
+      <h1>Elige un horario</h1>
+      <p class="sub">Estos son los horarios disponibles — elige el que mejor te quede.</p>
+      <div id="contenedorHorarios"><div class="cargando">Cargando horarios disponibles...</div></div>
+      <button id="btnVolverFormulario" class="secundario oculto">← Volver</button>
+    </div>
+
+    <div id="pasoConfirmar" class="oculto">
+      <h1>Confirma tu llamada</h1>
+      <p class="sub" id="resumenHorarioElegido"></p>
+      <label>Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
+      <input type="email" id="inputEmail" placeholder="tucorreo@ejemplo.com">
+      <div class="error oculto" id="errorConfirmar"></div>
+      <button id="btnConfirmarReserva">Confirmar</button>
+      <button id="btnVolverHorarios" class="secundario">← Elegir otro horario</button>
+    </div>
+
+    <div id="pasoExito" class="oculto exito">
+      <div class="icono">✅</div>
+      <h1>Listo, tu llamada quedó agendada</h1>
+      <p class="sub" id="resumenExito"></p>
+    </div>
+
+  </div>
+
+<script>
+  const usernamePrellenado = ${JSON.stringify(usernamePrellenado)};
+  let pregunta = null;
+  let opcionElegida = null;
+  let horarioElegido = null;
+
+  async function cargarPregunta(){
+    const res = await fetch("/agendar/pregunta");
+    pregunta = await res.json();
+    document.getElementById("labelPregunta").textContent = pregunta.texto;
+    const cont = document.getElementById("contenedorOpciones");
+    cont.innerHTML = pregunta.opciones.map((op, i) => \`
+      <label class="opcion" data-i="\${i}">
+        <input type="radio" name="opcionPresupuesto" value="\${i}">
+        <span>\${op.texto}</span>
+      </label>
+    \`).join("");
+    cont.querySelectorAll(".opcion").forEach(el => {
+      el.addEventListener("click", () => {
+        cont.querySelectorAll(".opcion").forEach(o => o.classList.remove("elegida"));
+        el.classList.add("elegida");
+        el.querySelector("input").checked = true;
+        opcionElegida = Number(el.dataset.i);
+      });
+    });
+  }
+
+  document.getElementById("btnContinuar").addEventListener("click", () => {
+    const nombre = document.getElementById("inputNombre").value.trim();
+    const errorEl = document.getElementById("errorFormulario");
+    errorEl.classList.add("oculto");
+
+    if(!nombre){ errorEl.textContent = "Por favor escribe tu nombre."; errorEl.classList.remove("oculto"); return; }
+    if(opcionElegida === null){ errorEl.textContent = "Por favor elige una opción."; errorEl.classList.remove("oculto"); return; }
+
+    const opcion = pregunta.opciones[opcionElegida];
+    if(opcion.descalifica){
+      document.getElementById("pasoFormulario").classList.add("oculto");
+      document.getElementById("textoNoCalifica").textContent = pregunta.mensaje_no_califica;
+      if(pregunta.enlace_no_califica){
+        const boton = document.getElementById("botonRecursoNoCalifica");
+        boton.href = pregunta.enlace_no_califica;
+        boton.classList.remove("oculto");
+      }
+      document.getElementById("pasoNoCalifica").classList.remove("oculto");
+      return;
+    }
+
+    document.getElementById("pasoFormulario").classList.add("oculto");
+    document.getElementById("pasoHorarios").classList.remove("oculto");
+    cargarHorarios();
+  });
+
+  async function cargarHorarios(){
+    const cont = document.getElementById("contenedorHorarios");
+    cont.innerHTML = '<div class="cargando">Cargando horarios disponibles...</div>';
+    try {
+      const res = await fetch("/agendar/horarios");
+      const data = await res.json();
+      if(!data.horarios || data.horarios.length === 0){
+        cont.innerHTML = '<p class="sub">No hay horarios disponibles por ahora — escríbenos directamente y te ayudamos a coordinar.</p>';
+        return;
+      }
+      const porDia = {};
+      data.horarios.forEach(h => {
+        const fecha = new Date(h);
+        const clave = fecha.toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long", timeZone: data.zona_horaria });
+        if(!porDia[clave]) porDia[clave] = [];
+        porDia[clave].push(h);
+      });
+      cont.innerHTML = Object.entries(porDia).map(([dia, horarios]) => \`
+        <div class="dia-grupo">
+          <div class="dia-titulo">\${dia}</div>
+          <div class="horarios-grid">
+            \${horarios.map(h => \`<button type="button" class="horario-btn" data-iso="\${h}">\${new Date(h).toLocaleTimeString("es-MX", { hour: "numeric", minute: "2-digit", timeZone: data.zona_horaria })}</button>\`).join("")}
+          </div>
+        </div>
+      \`).join("");
+      cont.querySelectorAll(".horario-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+          horarioElegido = btn.dataset.iso;
+          document.getElementById("pasoHorarios").classList.add("oculto");
+          document.getElementById("pasoConfirmar").classList.remove("oculto");
+          document.getElementById("resumenHorarioElegido").textContent =
+            new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZone: data.zona_horaria });
+        });
+      });
+    } catch (err) {
+      cont.innerHTML = '<p class="error">No se pudieron cargar los horarios. Intenta de nuevo en un momento.</p>';
+    }
+  }
+
+  document.getElementById("btnVolverHorarios").addEventListener("click", () => {
+    document.getElementById("pasoConfirmar").classList.add("oculto");
+    document.getElementById("pasoHorarios").classList.remove("oculto");
+  });
+
+  document.getElementById("btnConfirmarReserva").addEventListener("click", async () => {
+    const btn = document.getElementById("btnConfirmarReserva");
+    const errorEl = document.getElementById("errorConfirmar");
+    errorEl.classList.add("oculto");
+    btn.disabled = true;
+    btn.textContent = "Agendando...";
+    try {
+      const res = await fetch("/agendar/confirmar", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nombre: document.getElementById("inputNombre").value.trim(),
+          email: document.getElementById("inputEmail").value.trim(),
+          instagram_username: usernamePrellenado,
+          presupuesto: pregunta.opciones[opcionElegida].texto,
+          inicio_iso: horarioElegido
+        })
+      });
+      const data = await res.json();
+      if(!data.ok){
+        errorEl.textContent = data.error || "No se pudo agendar, intenta con otro horario.";
+        errorEl.classList.remove("oculto");
+        btn.disabled = false;
+        btn.textContent = "Confirmar";
+        return;
+      }
+      document.getElementById("pasoConfirmar").classList.add("oculto");
+      document.getElementById("resumenExito").textContent =
+        "Te esperamos el " + new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit" }) + ".";
+      document.getElementById("pasoExito").classList.remove("oculto");
+    } catch (err) {
+      errorEl.textContent = "Ocurrió un error, intenta de nuevo.";
+      errorEl.classList.remove("oculto");
+      btn.disabled = false;
+      btn.textContent = "Confirmar";
+    }
+  });
+
+  cargarPregunta();
+</script>
+</body>
+</html>`);
+});
+
+// Datos de la pregunta de presupuesto (público, sin datos sensibles).
+app.get("/agendar/pregunta", (req, res) => {
+  const p = configActual.agenda_pregunta_presupuesto || { texto: "", opciones: [] };
+  res.json({
+    texto: p.texto,
+    opciones: p.opciones,
+    mensaje_no_califica: configActual.agenda_mensaje_no_califica || "",
+    enlace_no_califica: configActual.agenda_enlace_no_califica || ""
+  });
+});
+
+// Lista de horarios disponibles (público) — consulta en vivo contra Google
+// Calendar cada vez que se pide, así siempre está actualizada.
+app.get("/agendar/horarios", async (req, res) => {
+  try {
+    const horarios = await obtenerHorariosDisponibles();
+    res.json({ horarios, zona_horaria: configActual.agenda_zona_horaria || "America/Mexico_City" });
+  } catch (err) {
+    console.error("❌ Error obteniendo horarios disponibles:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Confirma la reserva: crea el evento real en Google Calendar Y lo guarda
+// en nuestra propia tabla — desde ahí el bot puede verificar con certeza
+// si un lead agendó, sin depender de ninguna API externa.
+app.post("/agendar/confirmar", async (req, res) => {
+  try {
+    const { nombre, email, instagram_username, presupuesto, inicio_iso } = req.body || {};
+    if (!inicio_iso) return res.status(400).json({ error: "Falta el horario elegido." });
+
+    // Se vuelve a validar que el horario SIGA disponible justo antes de
+    // crear el evento — evita que dos personas agenden el mismo hueco si
+    // llegan casi al mismo tiempo.
+    const disponiblesAhora = await obtenerHorariosDisponibles();
+    if (!disponiblesAhora.includes(inicio_iso)) {
+      return res.status(409).json({ error: "Ese horario ya no está disponible, por favor elige otro." });
+    }
+
+    const eventoCreado = await crearEventoGoogleCalendar({
+      inicioIso: inicio_iso,
+      nombre: nombre || "Lead",
+      email: email || null,
+      notas: `Presupuesto: ${presupuesto || "no especificado"}\nInstagram: @${instagram_username || "no especificado"}`
+    });
+
+    const duracionMin = configActual.agenda_duracion_minutos || 30;
+    const inicio = new Date(inicio_iso);
+    const fin = new Date(inicio.getTime() + duracionMin * 60000);
+
+    const { error: errorGuardando } = await supabase.from("reservas").insert({
+      nombre: nombre || null,
+      instagram_username: (instagram_username || "").trim().replace(/^@/, "").toLowerCase() || null,
+      email: email || null,
+      presupuesto: presupuesto || null,
+      inicio: inicio.toISOString(),
+      fin: fin.toISOString(),
+      google_event_id: eventoCreado.id,
+      google_meet_link: eventoCreado.hangoutLink || null
+    });
+
+    if (errorGuardando) {
+      console.error("⚠️ El evento se creó en Google Calendar pero no se pudo guardar en Supabase:", errorGuardando.message);
+      // No se le muestra este error al lead — su llamada SÍ quedó agendada
+      // de verdad (lo importante), solo falló el registro interno.
+    }
+
+    console.log(`📅 Nueva reserva confirmada: ${nombre || "sin nombre"} (@${instagram_username || "sin username"}) para ${inicio.toISOString()}`);
+
+    // Si este lead ya tiene una conversación con el bot, se cancelan sus
+    // seguimientos pendientes de inmediato — ya no hace falta insistirle
+    // en agendar.
+    if (instagram_username) {
+      try {
+        const { data: conv } = await supabase
+          .from("conversaciones")
+          .select("sender_id")
+          .eq("username", (instagram_username || "").trim().replace(/^@/, "").toLowerCase())
+          .maybeSingle();
+        if (conv?.sender_id) await cancelarSeguimientosPendientesDB(conv.sender_id);
+      } catch (err) {
+        console.error("⚠️ No se pudo cancelar seguimientos tras la reserva:", err.message);
+      }
+    }
+
+    res.json({ ok: true, evento_id: eventoCreado.id });
+  } catch (err) {
+    console.error("❌ Error confirmando la reserva:", err.response?.data || err.message);
+    res.status(500).json({ error: "No se pudo agendar la llamada. Por favor intenta de nuevo o escríbenos directamente." });
+  }
+});
+
 // Placeholder: flujo de Facebook/Meta (vía Página vinculada) — pendiente de implementar.
 app.get("/oauth/facebook/start", requireAdminKey, (req, res) => {
   res.status(501).type("html").send(`
@@ -4121,6 +4807,40 @@ let configActual = {
   calendly_webhook_uri: "",
   calendly_conectado_en: null,
   calendly_pregunta_instagram_posicion: null, // en qué posición (a1, a2, a3...) está la pregunta del usuario de Instagram entre las preguntas personalizadas del evento
+
+  // --- Agenda propia (reemplaza a Calendly) ---
+  agenda_duracion_minutos: 30,
+  agenda_zona_horaria: "America/Mexico_City",
+  agenda_dias_hacia_adelante: 14, // hasta cuántos días a futuro se muestran horarios
+  agenda_aviso_minimo_horas: 2,   // no se muestran horarios más cerca que esto desde ahora
+  // Horario semanal — un bloque por día (se puede ajustar cada día por
+  // separado desde /panel). "activo:false" significa que ese día no se
+  // agenda nada.
+  agenda_horario_semanal: {
+    lunes:     { activo: true,  desde: "09:00", hasta: "17:00" },
+    martes:    { activo: true,  desde: "09:00", hasta: "17:00" },
+    miercoles: { activo: true,  desde: "09:00", hasta: "17:00" },
+    jueves:    { activo: true,  desde: "09:00", hasta: "17:00" },
+    viernes:   { activo: true,  desde: "09:00", hasta: "17:00" },
+    sabado:    { activo: false, desde: "09:00", hasta: "13:00" },
+    domingo:   { activo: false, desde: "09:00", hasta: "13:00" }
+  },
+  // Pregunta de presupuesto que filtra el acceso al calendario — se
+  // muestra ANTES del calendario, y si el lead elige la opción marcada
+  // como "descalifica", nunca llega a ver los horarios.
+  agenda_pregunta_presupuesto: {
+    texto: "¿Cuánto capital dispones para tu cambio?",
+    opciones: [
+      { texto: "Menos de 100 USD", descalifica: true },
+      { texto: "De 100 a 300 USD", descalifica: false },
+      { texto: "De 300 a 500 USD", descalifica: false }
+    ]
+  },
+  // Qué se le muestra a quien queda descalificado por la pregunta de
+  // arriba, en vez del calendario.
+  agenda_mensaje_no_califica: "Por ahora este programa no es para ti, pero aquí tienes un recurso gratis que te puede ayudar igual.",
+  agenda_enlace_no_califica: "", // ej. un lead magnet — se muestra como botón si se llena
+
   dashboard_etiqueta_asistio: "", // nombre exacto de la etiqueta manual que representa "asistió a la llamada"
   dashboard_etiqueta_compro: "",  // nombre exacto de la etiqueta manual que representa "compró / se cerró"
   franja_horaria_activa: false,
@@ -5436,6 +6156,155 @@ ${estilosBase()}
   }
 
   cargarCuentaActual();
+</script>
+</body>
+</html>
+  `);
+});
+
+app.get("/calendario", requireAdminSesion, (req, res) => {
+  res.type("html").send(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calendario — Instagram AI Responder</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+${FUENTES_HTML}
+${estilosBase()}
+<style>
+  .cuentas-titulo{ font-family:var(--mono); font-size:12.5px; letter-spacing:.14em;
+    text-transform:uppercase; color:#3FC7E8; margin:0 0 6px; }
+  .cuentas-subtitulo{ font-family:var(--display); font-weight:600; font-size:19px; margin:0 0 16px; }
+  .cuenta-item{
+    display:flex; align-items:center; gap:16px; background:var(--surface-3); border:1px solid var(--border);
+    border-radius:13px; padding:18px 20px;
+  }
+  .cuenta-info{ flex:1; min-width:0; }
+  .cuenta-info .nombre{ font-family:var(--display); font-weight:600; font-size:22px; margin-bottom:6px; }
+  .cuenta-info .detalle{ color:var(--muted); font-size:13.5px; line-height:1.65; font-family:var(--mono); }
+  .cuenta-info .detalle b{ color:#C9D1DE; font-weight:500; }
+  .cuenta-lado{ display:flex; flex-direction:column; align-items:flex-end; gap:10px; flex-shrink:0; }
+  .badge{ font-size:12.5px; font-family:var(--mono); padding:6px 13px; border-radius:20px;
+    background:var(--green-soft); color:var(--green); border:1px solid rgba(49,217,124,.3); white-space:nowrap; }
+  .btn-eliminar{
+    background:var(--red-soft); color:var(--red); border:1px solid rgba(255,93,93,.35);
+    border-radius:9px; padding:9px 15px; font-size:13.5px; font-weight:600; cursor:pointer;
+  }
+  .btn-eliminar:hover{ background:rgba(255,93,93,.18); }
+  .sin-cuenta{ color:var(--muted); font-size:15px; padding:8px 2px; }
+  .pasos-siguientes{ margin-top:22px; }
+  .paso-futuro{
+    display:flex; align-items:flex-start; gap:12px; padding:14px 16px; background:var(--surface-3);
+    border:1px dashed var(--border); border-radius:12px; margin-bottom:10px; opacity:.6;
+  }
+  .paso-futuro .num{
+    width:24px; height:24px; border-radius:50%; background:var(--surface-2); display:flex;
+    align-items:center; justify-content:center; font-size:12px; font-family:var(--mono); flex-shrink:0;
+  }
+  .paso-futuro .txt{ font-size:13.5px; line-height:1.5; }
+  .paso-futuro .txt b{ display:block; margin-bottom:2px; color:var(--text); }
+</style>
+</head>
+<body>
+  <div class="app-shell">
+  ${sidebarHTML("calendario")}
+  <div class="content-area">
+  <div class="main">
+    <div class="page-header">
+      <div class="page-header-left">
+        <p class="page-eyebrow">Agenda</p>
+        <h1 class="page-title">Calendario</h1>
+      </div>
+    </div>
+    <p class="page-sub">Tu propia página para agendar llamadas, con un filtro de calificación antes de mostrar el calendario — conectada directo a tu Google Calendar real, sin pasar por Calendly.</p>
+
+    <div class="card">
+      <p class="cuentas-titulo">Paso 1</p>
+      <p class="cuentas-subtitulo">Vincula tu cuenta de Gmail</p>
+      <p style="color:var(--muted); font-size:13.5px; margin:-8px 0 16px; line-height:1.6;">Es la cuenta de Google donde está el calendario que quieres usar para las llamadas — el sistema va a consultar tu disponibilidad real ahí, y va a crear el evento automáticamente cuando alguien agende.</p>
+      <div id="cuentaGoogleActual"><p class="sin-cuenta">Cargando…</p></div>
+    </div>
+
+    <div class="pasos-siguientes">
+      <div class="paso-futuro">
+        <span class="num">2</span>
+        <span class="txt"><b>Configurar la pregunta de calificación</b>La pregunta y las opciones que decide quién ve el calendario y quién no — próximamente aquí mismo.</span>
+      </div>
+      <div class="paso-futuro">
+        <span class="num">3</span>
+        <span class="txt"><b>Personalizar la página pública</b>Textos, horarios disponibles, duración de la llamada, zona horaria — próximamente aquí mismo.</span>
+      </div>
+    </div>
+  </div>
+  </div>
+  </div>
+
+<script>
+  async function llamarGET(endpoint){
+    const res = await fetch(endpoint);
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
+    return res.json();
+  }
+  async function llamarPOST(endpoint, body){
+    const res = await fetch(endpoint, {
+      method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body || {})
+    });
+    if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
+    return res.json();
+  }
+
+  function formatearFecha(iso){
+    if(!iso) return "fecha desconocida";
+    const d = new Date(iso);
+    return d.toLocaleDateString("es-MX", { day:"2-digit", month:"short" }) + ", " +
+      d.toLocaleTimeString("es-MX", { hour:"2-digit", minute:"2-digit" });
+  }
+
+  async function cargarCuentaGoogle(){
+    const cont = document.getElementById("cuentaGoogleActual");
+    const data = await llamarGET("/google/estado");
+
+    if(!data || !data.conectada){
+      cont.innerHTML = \`
+        <div class="cuenta-item">
+          <div class="cuenta-info">
+            <div class="nombre">Sin conectar</div>
+            <div class="detalle">Todavía no vinculaste ninguna cuenta de Google.</div>
+          </div>
+          <div class="cuenta-lado">
+            <button class="btn-hero" id="btnConectarGoogle">Conectar con Google</button>
+          </div>
+        </div>
+      \`;
+      document.getElementById("btnConectarGoogle").addEventListener("click", () => {
+        window.location.href = "/oauth/google/start";
+      });
+      return;
+    }
+
+    cont.innerHTML = \`
+      <div class="cuenta-item">
+        <div class="cuenta-info">
+          <div class="nombre">\${data.email || "cuenta conectada"}</div>
+          <div class="detalle">Conectada: <b>\${formatearFecha(data.conectada_en)}</b></div>
+        </div>
+        <div class="cuenta-lado">
+          <span class="badge">Conectada</span>
+          <button class="btn-eliminar" id="btnDesconectarGoogle">Desconectar</button>
+        </div>
+      </div>
+    \`;
+
+    document.getElementById("btnDesconectarGoogle").addEventListener("click", async () => {
+      if(!confirm("¿Seguro que quieres desconectar Google Calendar? La página de agendar dejará de funcionar hasta que conectes otra cuenta.")) return;
+      await llamarPOST("/oauth/google/desconectar");
+      cargarCuentaGoogle();
+    });
+  }
+
+  cargarCuentaGoogle();
 </script>
 </body>
 </html>
