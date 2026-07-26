@@ -4700,6 +4700,18 @@ app.get("/agendar", (req, res) => {
 
 <script>
   const usernamePrellenado = ${JSON.stringify(usernamePrellenado)};
+  // Misma lista que en /calendario, para el tipo de pregunta "teléfono".
+  const CODIGOS_PAIS = [
+    { c: "+52", n: "México" }, { c: "+34", n: "España" }, { c: "+1", n: "Estados Unidos / Canadá" },
+    { c: "+54", n: "Argentina" }, { c: "+57", n: "Colombia" }, { c: "+56", n: "Chile" },
+    { c: "+51", n: "Perú" }, { c: "+593", n: "Ecuador" }, { c: "+58", n: "Venezuela" },
+    { c: "+502", n: "Guatemala" }, { c: "+53", n: "Cuba" }, { c: "+591", n: "Bolivia" },
+    { c: "+1", n: "República Dominicana" }, { c: "+504", n: "Honduras" }, { c: "+595", n: "Paraguay" },
+    { c: "+503", n: "El Salvador" }, { c: "+505", n: "Nicaragua" }, { c: "+506", n: "Costa Rica" },
+    { c: "+507", n: "Panamá" }, { c: "+598", n: "Uruguay" }, { c: "+1", n: "Puerto Rico" },
+    { c: "+55", n: "Brasil" }, { c: "+44", n: "Reino Unido" }, { c: "+33", n: "Francia" },
+    { c: "+49", n: "Alemania" }, { c: "+39", n: "Italia" }, { c: "+351", n: "Portugal" }
+  ];
   let datosFormulario = null;
   let horarioElegido = null;
   let horariosPorDia = {};   // clave "YYYY-MM-DD" (en la zona horaria MOSTRADA) -> [iso, iso, ...]
@@ -4867,6 +4879,17 @@ app.get("/agendar", (req, res) => {
                 <span>\${op.texto}</span>
               </label>
             \`).join("")}
+          </div>
+        \`;
+      }
+      if(p.tipo === "telefono"){
+        return \`
+          <label>\${p.texto}\${marcaObligatoria}</label>
+          <div class="grupo-telefono" data-id="\${p.id}" data-tipo="telefono" data-obligatoria="\${p.obligatoria ? "1" : ""}" style="display:flex; gap:8px;">
+            <select class="input-tel-codigo" style="flex:0 0 auto; width:auto; min-width:96px;">
+              \${CODIGOS_PAIS.map(cp => \`<option value="\${cp.c}">\${cp.c} \${cp.n}</option>\`).join("")}
+            </select>
+            <input type="tel" class="input-tel-numero" placeholder="Número de WhatsApp" style="flex:1;" inputmode="numeric">
           </div>
         \`;
       }
@@ -5061,6 +5084,14 @@ app.get("/agendar", (req, res) => {
     document.querySelectorAll("#contenedorPreguntas .grupo-casillas").forEach(grupo => {
       const marcadas = Array.from(grupo.querySelectorAll("input:checked")).map(el => el.value);
       if(marcadas.length > 0) respuestas[grupo.dataset.id] = marcadas;
+      else if(grupo.dataset.obligatoria === "1" && !faltaObligatoria){
+        faltaObligatoria = (grupo.previousElementSibling?.textContent || "un campo obligatorio").replace(/\\s*\\*$/, "");
+      }
+    });
+    document.querySelectorAll("#contenedorPreguntas .grupo-telefono").forEach(grupo => {
+      const codigo = grupo.querySelector(".input-tel-codigo").value;
+      const numero = grupo.querySelector(".input-tel-numero").value.replace(/\\D/g, "").trim();
+      if(numero) respuestas[grupo.dataset.id] = codigo + " " + numero;
       else if(grupo.dataset.obligatoria === "1" && !faltaObligatoria){
         faltaObligatoria = (grupo.previousElementSibling?.textContent || "un campo obligatorio").replace(/\\s*\\*$/, "");
       }
@@ -6322,7 +6353,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (Array.isArray(agenda_preguntas)) {
       nuevaConfig.agenda_preguntas = agenda_preguntas
         .map((p, i) => {
-          const tipo = (p?.tipo === "opciones" || p?.tipo === "casillas") ? p.tipo : "texto";
+          const tipo = ["opciones", "casillas", "telefono"].includes(p?.tipo) ? p.tipo : "texto";
           const base = {
             id: String(p?.id || `pregunta_${i}`),
             texto: String(p?.texto || "").trim(),
@@ -7085,6 +7116,19 @@ ${estilosBase()}
     { clave: "viernes", nombre: "Viernes" }, { clave: "sabado", nombre: "Sábado" },
     { clave: "domingo", nombre: "Domingo" }
   ];
+  // Lista de códigos de país para el tipo de pregunta "teléfono" — se usa
+  // tanto aquí (vista previa) como en la página pública real de /agendar.
+  const CODIGOS_PAIS = [
+    { c: "+52", n: "México" }, { c: "+34", n: "España" }, { c: "+1", n: "Estados Unidos / Canadá" },
+    { c: "+54", n: "Argentina" }, { c: "+57", n: "Colombia" }, { c: "+56", n: "Chile" },
+    { c: "+51", n: "Perú" }, { c: "+593", n: "Ecuador" }, { c: "+58", n: "Venezuela" },
+    { c: "+502", n: "Guatemala" }, { c: "+53", n: "Cuba" }, { c: "+591", n: "Bolivia" },
+    { c: "+1", n: "República Dominicana" }, { c: "+504", n: "Honduras" }, { c: "+595", n: "Paraguay" },
+    { c: "+503", n: "El Salvador" }, { c: "+505", n: "Nicaragua" }, { c: "+506", n: "Costa Rica" },
+    { c: "+507", n: "Panamá" }, { c: "+598", n: "Uruguay" }, { c: "+1", n: "Puerto Rico" },
+    { c: "+55", n: "Brasil" }, { c: "+44", n: "Reino Unido" }, { c: "+33", n: "Francia" },
+    { c: "+49", n: "Alemania" }, { c: "+39", n: "Italia" }, { c: "+351", n: "Portugal" }
+  ];
   let horarioSemanal = {};
   // Estado ÚNICO de todas las preguntas del formulario — cada una:
   // { id, texto, tipo: "texto"|"opciones", estilo_visual: "radios"|"desplegable",
@@ -7169,6 +7213,19 @@ ${estilosBase()}
             \${(p.opciones || []).map(op => \`
               <div class="pv-opcion"><span class="cuadro"></span> \${op.texto || "(sin texto)"}</div>
             \`).join("") || '<div class="pv-vacio" style="padding:8px 0;">Agrega opciones abajo</div>'}
+          </div>
+        \`;
+      }
+      if(p.tipo === "telefono"){
+        return \`
+          <div class="pv-pregunta">
+            <label class="pv-label">\${p.texto || "(sin texto todavía)"}\${marcaObligatoria}</label>
+            <div style="display:flex; gap:6px;">
+              <select class="pv-select" style="flex:0 0 92px;" disabled>
+                <option>\${CODIGOS_PAIS[0].c}</option>
+              </select>
+              <input type="text" class="pv-texto" disabled placeholder="Número de WhatsApp">
+            </div>
           </div>
         \`;
       }
@@ -7289,6 +7346,7 @@ ${estilosBase()}
               <option value="texto" \${p.tipo === "texto" ? "selected" : ""}>Texto libre</option>
               <option value="opciones" \${p.tipo === "opciones" ? "selected" : ""}>Opción múltiple (una sola respuesta)</option>
               <option value="casillas" \${p.tipo === "casillas" ? "selected" : ""}>Selección múltiple (casillas, varias a la vez)</option>
+              <option value="telefono" \${p.tipo === "telefono" ? "selected" : ""}>Teléfono / WhatsApp (con código de país)</option>
             </select>
           </div>
           <div class="input-p-estilo-wrap \${p.tipo === "opciones" ? "" : "oculto"}">
