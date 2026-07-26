@@ -5035,14 +5035,14 @@ app.get("/agendar", (req, res) => {
       const valor = el.value.trim();
       if(valor) respuestas[el.dataset.id] = valor;
       else if(el.dataset.obligatoria === "1" && !faltaObligatoria){
-        faltaObligatoria = (el.previousElementSibling?.textContent || "un campo obligatorio").replace(/\s*\*$/, "");
+        faltaObligatoria = (el.previousElementSibling?.textContent || "un campo obligatorio").replace(/\\s*\\*$/, "");
       }
     });
     document.querySelectorAll("#contenedorPreguntas .grupo-radios").forEach(grupo => {
       const elegida = grupo.querySelector("input:checked");
       if(elegida) respuestas[grupo.dataset.id] = elegida.value;
       else if(grupo.dataset.obligatoria === "1" && !faltaObligatoria){
-        faltaObligatoria = (grupo.previousElementSibling?.textContent || "un campo obligatorio").replace(/\s*\*$/, "");
+        faltaObligatoria = (grupo.previousElementSibling?.textContent || "un campo obligatorio").replace(/\\s*\\*$/, "");
       }
     });
     if(faltaObligatoria){
