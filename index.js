@@ -4469,17 +4469,18 @@ app.get("/agendar", (req, res) => {
     box-shadow:0 8px 40px rgba(20,25,35,.06); transition:width .25s ease;
   }
   .contenedor.expandido{ width:1150px; }
-  .contenedor.expandido-form{ width:1210px; }
+  .contenedor.expandido-form{ width:1090px; }
   .panel-izq{
     width:400px; flex:none; padding:32px 28px; border-right:1px solid var(--border); overflow-y:auto;
   }
   .panel-der{ width:400px; flex:none; padding:32px 30px; min-width:0; overflow-y:auto; transition:width .25s ease; }
   .panel-der.ancho-form{ width:460px; }
   .panel-horas{
-    width:0; flex:none; padding:0; border-left:1px solid var(--border); overflow:hidden;
+    width:0; flex:none; padding:0; overflow:hidden;
     transition:width .25s ease, padding .25s ease; opacity:0; display:flex; flex-direction:column;
   }
   .panel-horas.visible{ width:350px; padding:32px 24px; opacity:1; }
+  .panel-horas.visible.vacio-form{ width:230px; }
   .perfil-foto{
     width:64px; height:64px; border-radius:50%; object-fit:cover; background:var(--accent-soft);
     display:flex; align-items:center; justify-content:center; font-size:26px; font-weight:700;
@@ -4604,7 +4605,7 @@ app.get("/agendar", (req, res) => {
     .panel-izq, .panel-der{ width:100%; }
     .panel-der.ancho-form{ width:100%; }
     .panel-izq{ border-right:none; border-bottom:1px solid var(--border); }
-    .panel-horas{ width:100%; border-left:none; border-top:1px solid var(--border); }
+    .panel-horas{ width:100%; }
     .panel-horas.visible{ width:100%; padding:20px 30px; }
   }
 </style>
@@ -4935,12 +4936,13 @@ app.get("/agendar", (req, res) => {
   }
 
   function vaciarPanelHoras(){
-    // Se deja el panel con el mismo ancho (350px) para que el cuadro NO
-    // cambie de tamaño al pasar del calendario al formulario — solo se
-    // vacía su contenido, quedando en blanco, ya que en este paso ya no
-    // corresponde mostrar los horarios.
+    // Se deja el panel visible (para que el cuadro no se recorte de
+    // golpe), pero se vacía su contenido y se reduce a 230px — ya en este
+    // paso no corresponde mostrar los horarios, solo queda como espacio
+    // en blanco.
     document.getElementById("tituloListaHorarios").textContent = "";
     document.getElementById("listaHorariosDia").innerHTML = "";
+    document.getElementById("panelHoras").classList.add("vacio-form");
   }
 
   function irAlFormulario(){
@@ -4952,7 +4954,8 @@ app.get("/agendar", (req, res) => {
     // La columna del medio (donde vive el formulario) crece de 400 a
     // 460px, para que sus campos puedan ocupar 400px con 30px de margen
     // a cada lado — y el cuadro completo ajusta su ancho total para
-    // compensar esos 60px extra.
+    // compensar esos 60px extra (menos el espacio en blanco, que ahora
+    // ocupa solo 230px en vez de 350px).
     document.querySelector(".panel-der").classList.add("ancho-form");
     document.querySelector(".contenedor").classList.remove("expandido");
     document.querySelector(".contenedor").classList.add("expandido-form");
@@ -4961,10 +4964,12 @@ app.get("/agendar", (req, res) => {
   document.getElementById("btnCambiarHorario").addEventListener("click", () => {
     document.getElementById("pasoFormulario").classList.add("oculto");
     document.getElementById("pasoCalendario").classList.remove("oculto");
-    // Se revierte la columna del medio a su ancho normal (400px) al
-    // volver al calendario.
+    // Se revierte la columna del medio a su ancho normal (400px), y el
+    // espacio en blanco vuelve a poder crecer a 350px (ver más abajo, se
+    // quita "vacio-form" antes de volver a renderizar los horarios reales).
     document.querySelector(".panel-der").classList.remove("ancho-form");
     document.querySelector(".contenedor").classList.remove("expandido-form");
+    document.getElementById("panelHoras").classList.remove("vacio-form");
     // Si ya había un día elegido antes de llegar al formulario, se vuelve
     // a mostrar sus horarios directamente (esto ya agrega "expandido" por
     // su cuenta), en vez de dejarlo en blanco.
