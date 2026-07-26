@@ -4686,9 +4686,9 @@ app.get("/agendar", (req, res) => {
           <span id="resumenHorarioTexto"></span>
           <a id="btnCambiarHorario">Cambiar</a>
         </div>
-        <label>Tu nombre</label>
+        <label id="labelCampoNombre">Tu nombre</label>
         <input type="text" id="inputNombre" placeholder="Ej: Juan Pérez">
-        <label>Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
+        <label id="labelCampoCorreo">Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
         <input type="email" id="inputEmail" placeholder="tucorreo@ejemplo.com">
         <div id="contenedorPreguntas"></div>
         <div class="error oculto" id="errorFormulario"></div>
@@ -4982,6 +4982,13 @@ app.get("/agendar", (req, res) => {
       document.getElementById("bloqueAdvertencia").classList.remove("oculto");
     }
 
+    // Los campos de nombre y correo también son configurables desde
+    // /calendario — texto y si son obligatorios.
+    const campoNombre = datosFormulario.campo_nombre || { texto: "Tu nombre", obligatorio: true };
+    const campoCorreo = datosFormulario.campo_correo || { texto: "Tu correo", obligatorio: false };
+    document.getElementById("labelCampoNombre").textContent = campoNombre.texto + (campoNombre.obligatorio ? " *" : "");
+    document.getElementById("labelCampoCorreo").textContent = campoCorreo.texto + (campoCorreo.obligatorio ? " *" : "");
+
     // TODAS las preguntas se renderizan aquí, cada una con su propio
     // estilo — "opciones"+"radios" se ve como círculos ya desplegados,
     // "opciones"+"desplegable" como un <select>, y "texto" como un campo
@@ -5205,10 +5212,22 @@ app.get("/agendar", (req, res) => {
   // cuyo caso ahí sí se confirma la reserva real contra Google Calendar).
   document.getElementById("btnAgendar").addEventListener("click", async () => {
     const nombre = document.getElementById("inputNombre").value.trim();
+    const correo = document.getElementById("inputEmail").value.trim();
     const errorEl = document.getElementById("errorFormulario");
     errorEl.classList.add("oculto");
 
-    if(!nombre){ errorEl.textContent = "Por favor escribe tu nombre."; errorEl.classList.remove("oculto"); return; }
+    const campoNombre = datosFormulario.campo_nombre || { texto: "Tu nombre", obligatorio: true };
+    const campoCorreo = datosFormulario.campo_correo || { texto: "Tu correo", obligatorio: false };
+    if(campoNombre.obligatorio && !nombre){
+      errorEl.textContent = "Por favor completa: " + campoNombre.texto;
+      errorEl.classList.remove("oculto");
+      return;
+    }
+    if(campoCorreo.obligatorio && !correo){
+      errorEl.textContent = "Por favor completa: " + campoCorreo.texto;
+      errorEl.classList.remove("oculto");
+      return;
+    }
 
     // Recolecta la respuesta de CADA pregunta (sea de texto, radios, o
     // desplegable), validando que las obligatorias sí tengan respuesta.
@@ -5321,6 +5340,8 @@ app.get("/agendar/pregunta", (req, res) => {
     preguntas: Array.isArray(configActual.agenda_preguntas) ? configActual.agenda_preguntas : [],
     mensaje_no_califica: configActual.agenda_mensaje_no_califica || "",
     enlace_no_califica: configActual.agenda_enlace_no_califica || "",
+    campo_nombre: configActual.agenda_campo_nombre || { texto: "Tu nombre", obligatorio: true },
+    campo_correo: configActual.agenda_campo_correo || { texto: "Tu correo", obligatorio: false },
     perfil: {
       nombre: configActual.agenda_nombre || "",
       titulo: configActual.agenda_titulo || "",
@@ -5352,6 +5373,18 @@ app.post("/agendar/confirmar", async (req, res) => {
   try {
     const { nombre, email, instagram_username, inicio_iso, respuestas } = req.body || {};
     if (!inicio_iso) return res.status(400).json({ error: "Falta el horario elegido." });
+
+    // Los campos de nombre y correo son configurables (texto y si son
+    // obligatorios) desde /calendario — se valida aquí con los mismos
+    // criterios, nunca solo confiar en la validación del navegador.
+    const campoNombre = configActual.agenda_campo_nombre || { texto: "Tu nombre", obligatorio: true };
+    const campoCorreo = configActual.agenda_campo_correo || { texto: "Tu correo", obligatorio: false };
+    if (campoNombre.obligatorio && !String(nombre || "").trim()) {
+      return res.status(400).json({ error: `Falta responder: ${campoNombre.texto}` });
+    }
+    if (campoCorreo.obligatorio && !String(email || "").trim()) {
+      return res.status(400).json({ error: `Falta responder: ${campoCorreo.texto}` });
+    }
 
     const preguntas = Array.isArray(configActual.agenda_preguntas) ? configActual.agenda_preguntas : [];
     const respuestasRecibidas = (respuestas && typeof respuestas === "object") ? respuestas : {};
@@ -5559,6 +5592,12 @@ let configActual = {
     sabado:    { activo: false, desde: "09:00", hasta: "13:00" },
     domingo:   { activo: false, desde: "09:00", hasta: "13:00" }
   },
+  // Los dos campos "fijos" que siempre están al inicio del formulario
+  // (nombre y correo) — su texto y si son obligatorios sí se pueden
+  // personalizar, pero a diferencia de "agenda_preguntas" siempre son de
+  // texto libre y siempre están en la misma posición (primero).
+  agenda_campo_nombre: { texto: "Tu nombre", obligatorio: true },
+  agenda_campo_correo: { texto: "Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)", obligatorio: false },
   // TODAS las preguntas del formulario, en un solo lugar — cada una puede
   // ser de texto libre, o de opción múltiple (con estilo "radios",
   // mostrando todas las opciones ya desplegadas, o "desplegable", como un
@@ -6439,7 +6478,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
             dashboard_etiqueta_asistio, dashboard_etiqueta_compro, franja_horaria_activa, franja_horaria_desde, franja_horaria_hasta,
             agenda_zona_horaria, agenda_duracion_minutos, agenda_dias_hacia_adelante, agenda_aviso_minimo_horas, agenda_horario_semanal,
             agenda_preguntas, agenda_mensaje_no_califica, agenda_enlace_no_califica, agenda_nombre, agenda_titulo,
-            agenda_foto_url, agenda_titulo_evento, agenda_texto_oferta, agenda_whatsapp_link } = req.body || {};
+            agenda_foto_url, agenda_titulo_evento, agenda_texto_oferta, agenda_whatsapp_link,
+            agenda_campo_nombre, agenda_campo_correo } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -6495,6 +6535,19 @@ app.post("/config", requireAdminKey, async (req, res) => {
       // Solo se guarda si TODOS los 7 días llegaron bien formados — evita
       // guardar un horario a medias por un error de formato puntual.
       if (Object.keys(horarioValido).length === DIAS_SEMANA_CLAVE.length) nuevaConfig.agenda_horario_semanal = horarioValido;
+    }
+
+    if (agenda_campo_nombre && typeof agenda_campo_nombre === "object") {
+      nuevaConfig.agenda_campo_nombre = {
+        texto: String(agenda_campo_nombre.texto || "Tu nombre").trim() || "Tu nombre",
+        obligatorio: Boolean(agenda_campo_nombre.obligatorio)
+      };
+    }
+    if (agenda_campo_correo && typeof agenda_campo_correo === "object") {
+      nuevaConfig.agenda_campo_correo = {
+        texto: String(agenda_campo_correo.texto || "Tu correo").trim() || "Tu correo",
+        obligatorio: Boolean(agenda_campo_correo.obligatorio)
+      };
     }
 
     if (Array.isArray(agenda_preguntas)) {
@@ -7259,6 +7312,19 @@ ${estilosBase()}
       </div>
       <p class="hint">Arma todas las preguntas que le vas a hacer al lead antes de mostrarle el calendario. En las de opción múltiple, marca con la casilla roja cuál (o cuáles) opción debe DESCALIFICAR — si el lead elige una así, nunca llega a ver el calendario. La vista previa de la derecha se actualiza mientras vas armando todo.</p>
 
+      <div class="pregunta-card" style="margin-bottom:18px;">
+        <span style="font-family:var(--mono); font-size:12px; color:var(--green);">Campo fijo — siempre es el primero del formulario</span>
+        <label style="margin-top:10px;">Texto del campo "nombre"</label>
+        <input type="text" id="inputCampoNombreTexto">
+        <label class="chk"><input type="checkbox" id="chkCampoNombreObligatorio"> Obligatorio</label>
+      </div>
+      <div class="pregunta-card" style="margin-bottom:18px;">
+        <span style="font-family:var(--mono); font-size:12px; color:var(--green);">Campo fijo — siempre es el segundo del formulario</span>
+        <label style="margin-top:10px;">Texto del campo "correo"</label>
+        <input type="text" id="inputCampoCorreoTexto">
+        <label class="chk"><input type="checkbox" id="chkCampoCorreoObligatorio"> Obligatorio</label>
+      </div>
+
       <div class="preguntas-editor-shell">
         <div>
           <div id="preguntasCont"></div>
@@ -7921,6 +7987,13 @@ ${estilosBase()}
     editorNoCalifica.establecerHTML(cfg.agenda_mensaje_no_califica || "");
     document.getElementById("inputEnlaceNoCalifica").value = cfg.agenda_enlace_no_califica || "";
 
+    const campoNombre = cfg.agenda_campo_nombre || { texto: "Tu nombre", obligatorio: true };
+    const campoCorreo = cfg.agenda_campo_correo || { texto: "Tu correo", obligatorio: false };
+    document.getElementById("inputCampoNombreTexto").value = campoNombre.texto;
+    document.getElementById("chkCampoNombreObligatorio").checked = campoNombre.obligatorio;
+    document.getElementById("inputCampoCorreoTexto").value = campoCorreo.texto;
+    document.getElementById("chkCampoCorreoObligatorio").checked = campoCorreo.obligatorio;
+
     preguntas = Array.isArray(cfg.agenda_preguntas) ? cfg.agenda_preguntas : [];
     renderPreguntas();
   }
@@ -7945,6 +8018,14 @@ ${estilosBase()}
       agenda_whatsapp_link: document.getElementById("inputAgendaWhatsapp").value.trim(),
       agenda_mensaje_no_califica: editorNoCalifica.obtenerHTML(),
       agenda_enlace_no_califica: document.getElementById("inputEnlaceNoCalifica").value.trim(),
+      agenda_campo_nombre: {
+        texto: document.getElementById("inputCampoNombreTexto").value.trim() || "Tu nombre",
+        obligatorio: document.getElementById("chkCampoNombreObligatorio").checked
+      },
+      agenda_campo_correo: {
+        texto: document.getElementById("inputCampoCorreoTexto").value.trim() || "Tu correo",
+        obligatorio: document.getElementById("chkCampoCorreoObligatorio").checked
+      },
       agenda_preguntas: preguntas
     });
 
