@@ -4433,6 +4433,7 @@ app.get("/agendar", (req, res) => {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agenda tu llamada</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
   :root{
     --bg:#F7F8FA; --card:#FFFFFF; --border:#E3E6EB; --text:#1A2028; --muted:#68707E;
@@ -4446,12 +4447,12 @@ app.get("/agendar", (req, res) => {
   }
   .contenedor{
     background:var(--card); border:1px solid var(--border); border-radius:20px;
-    max-width:920px; width:100%; display:flex; overflow:hidden; box-shadow:0 8px 40px rgba(20,25,35,.06);
+    width:800px; max-width:100%; display:flex; overflow:hidden; box-shadow:0 8px 40px rgba(20,25,35,.06);
   }
   .panel-izq{
-    width:300px; flex-shrink:0; padding:32px 28px; border-right:1px solid var(--border);
+    width:400px; flex:none; padding:32px 28px; border-right:1px solid var(--border);
   }
-  .panel-der{ flex:1; min-width:0; padding:32px 30px; }
+  .panel-der{ width:400px; flex:none; padding:32px 30px; min-width:0; }
   .perfil-foto{
     width:64px; height:64px; border-radius:50%; object-fit:cover; background:var(--accent-soft);
     display:flex; align-items:center; justify-content:center; font-size:26px; font-weight:700;
@@ -4481,6 +4482,10 @@ app.get("/agendar", (req, res) => {
     padding:11px 13px; color:var(--text); font-size:14.5px; font-family:inherit;
   }
   input[type=text]:focus, input[type=email]:focus{ outline:none; border-color:var(--accent); }
+  select{
+    width:100%; background:#fff; border:1px solid var(--border); border-radius:8px;
+    padding:9px 11px; color:var(--text); font-size:12.5px; font-family:inherit;
+  }
   .opcion{
     display:flex; align-items:center; gap:10px; background:#fff; border:1.5px solid var(--border);
     border-radius:10px; padding:13px 14px; margin-bottom:8px; cursor:pointer; transition:border-color .15s;
@@ -4500,9 +4505,12 @@ app.get("/agendar", (req, res) => {
   .error{ color:var(--red); font-size:13.5px; margin-top:10px; }
   .exito{ text-align:center; }
   .exito .icono{ font-size:44px; margin-bottom:10px; }
+  .resumen-horario{
+    background:var(--accent-soft); border:1px solid #CFE1FF; border-radius:10px; padding:12px 14px;
+    font-size:13.5px; margin-bottom:18px; display:flex; align-items:center; gap:8px;
+  }
+  .resumen-horario a{ margin-left:auto; font-size:12.5px; color:var(--accent); font-weight:600; cursor:pointer; text-decoration:none; }
 
-  .cal-shell{ display:flex; gap:26px; flex-wrap:wrap; }
-  .cal-lado{ flex:1; min-width:260px; }
   .cal-cabecera{ display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
   .cal-cabecera button{
     background:transparent; color:var(--text); border:1px solid var(--border); border-radius:8px;
@@ -4524,8 +4532,9 @@ app.get("/agendar", (req, res) => {
   }
   .cal-dia.elegido{ background:var(--accent); color:#fff; }
   .cal-dia.elegido::after{ background:#fff; }
-  .cal-zona{ font-size:12px; color:var(--muted); margin-top:16px; }
-  .lista-horarios{ display:flex; flex-direction:column; gap:8px; max-height:340px; overflow-y:auto; padding-right:4px; }
+  .cal-zona{ margin-top:16px; }
+  .cal-zona-label{ font-size:11px; color:var(--muted); margin-bottom:4px; display:flex; align-items:center; gap:5px; }
+  .lista-horarios{ display:flex; flex-direction:column; gap:8px; max-height:220px; overflow-y:auto; padding-right:4px; margin-top:16px; }
   .lista-horarios-titulo{ font-size:13px; font-weight:600; margin-bottom:10px; }
   .horario-btn{
     background:#fff; border:1.5px solid var(--accent); border-radius:8px; padding:11px 10px;
@@ -4533,9 +4542,10 @@ app.get("/agendar", (req, res) => {
   }
   .horario-btn:hover{ background:var(--accent); color:#fff; }
 
-  @media (max-width: 680px){
-    .contenedor{ flex-direction:column; }
-    .panel-izq{ width:100%; border-right:none; border-bottom:1px solid var(--border); }
+  @media (max-width: 700px){
+    .contenedor{ width:100%; flex-direction:column; }
+    .panel-izq, .panel-der{ width:100%; }
+    .panel-izq{ border-right:none; border-bottom:1px solid var(--border); }
   }
 </style>
 </head>
@@ -4560,15 +4570,40 @@ app.get("/agendar", (req, res) => {
 
     <div class="panel-der">
 
-      <div id="pasoFormulario">
-        <h1 class="titulo-paso">Antes de agendar</h1>
-        <p class="sub">Cuéntanos un poco de tu situación para poder ayudarte mejor.</p>
+      <div id="pasoCalendario">
+        <h1 class="titulo-paso">Selecciona una fecha y hora</h1>
+        <div id="cargandoHorarios" class="cargando">Cargando horarios disponibles...</div>
+        <div id="sinHorarios" class="sub oculto">No hay horarios disponibles por ahora — escríbenos directamente y te ayudamos a coordinar.</div>
+        <div id="calShell" class="oculto">
+          <div class="cal-cabecera">
+            <button type="button" id="btnMesAnterior">‹</button>
+            <span class="cal-mes" id="calMesTitulo"></span>
+            <button type="button" id="btnMesSiguiente">›</button>
+          </div>
+          <div class="cal-grid" id="calGridDiasSemana"></div>
+          <div class="cal-grid" id="calGridDias"></div>
+          <div class="lista-horarios oculto" id="listaHorariosDia"></div>
+          <div class="cal-zona">
+            <div class="cal-zona-label">🌐 Zona horaria</div>
+            <select id="selectZonaHoraria"></select>
+          </div>
+        </div>
+      </div>
+
+      <div id="pasoFormulario" class="oculto">
+        <h1 class="titulo-paso">Un último paso</h1>
+        <div class="resumen-horario">
+          <span id="resumenHorarioTexto"></span>
+          <a id="btnCambiarHorario">Cambiar</a>
+        </div>
         <label>Tu nombre</label>
         <input type="text" id="inputNombre" placeholder="Ej: Juan Pérez">
+        <label>Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
+        <input type="email" id="inputEmail" placeholder="tucorreo@ejemplo.com">
         <label id="labelPregunta"></label>
         <div id="contenedorOpciones"></div>
         <div class="error oculto" id="errorFormulario"></div>
-        <button class="ancho" id="btnContinuar">Continuar</button>
+        <button class="ancho" id="btnAgendar">Agendar</button>
       </div>
 
       <div id="pasoNoCalifica" class="oculto">
@@ -4577,38 +4612,6 @@ app.get("/agendar", (req, res) => {
         <a id="botonRecursoNoCalifica" class="oculto" href="#" target="_blank" style="text-decoration:none;">
           <button type="button">Ver recurso gratis</button>
         </a>
-      </div>
-
-      <div id="pasoCalendario" class="oculto">
-        <h1 class="titulo-paso">Selecciona una fecha y hora</h1>
-        <div id="cargandoHorarios" class="cargando">Cargando horarios disponibles...</div>
-        <div id="sinHorarios" class="sub oculto">No hay horarios disponibles por ahora — escríbenos directamente y te ayudamos a coordinar.</div>
-        <div id="calShell" class="cal-shell oculto">
-          <div class="cal-lado">
-            <div class="cal-cabecera">
-              <button type="button" id="btnMesAnterior">‹</button>
-              <span class="cal-mes" id="calMesTitulo"></span>
-              <button type="button" id="btnMesSiguiente">›</button>
-            </div>
-            <div class="cal-grid" id="calGridDiasSemana"></div>
-            <div class="cal-grid" id="calGridDias"></div>
-            <div class="cal-zona" id="calZonaHoraria"></div>
-          </div>
-          <div class="cal-lado">
-            <div class="lista-horarios-titulo" id="tituloListaHorarios">Elige un día en el calendario</div>
-            <div class="lista-horarios" id="listaHorariosDia"></div>
-          </div>
-        </div>
-      </div>
-
-      <div id="pasoConfirmar" class="oculto">
-        <h1 class="titulo-paso">Confirma tu llamada</h1>
-        <p class="sub" id="resumenHorarioElegido"></p>
-        <label>Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
-        <input type="email" id="inputEmail" placeholder="tucorreo@ejemplo.com">
-        <div class="error oculto" id="errorConfirmar"></div>
-        <button class="ancho" id="btnConfirmarReserva">Confirmar</button>
-        <button class="secundario ancho" id="btnVolverHorarios">← Elegir otro horario</button>
       </div>
 
       <div id="pasoExito" class="oculto exito">
@@ -4625,20 +4628,45 @@ app.get("/agendar", (req, res) => {
   let pregunta = null;
   let opcionElegida = null;
   let horarioElegido = null;
-  let horariosPorDia = {};   // clave "YYYY-MM-DD" (en la zona horaria configurada) -> [iso, iso, ...]
-  let zonaHorariaAgenda = "America/Mexico_City";
-  let anioCalendario = null;  // año que se muestra en el calendario (número simple, sin Date)
-  let mesCalendario = null;   // mes que se muestra, 1-12 (número simple, sin Date) — se evita
-                               // guardar esto como un objeto Date reinterpretado entre la zona
-                               // horaria local del navegador y la zona horaria configurada del
-                               // negocio, porque eso puede "correr" la medianoche al día (y hasta
-                               // al mes) anterior según la diferencia entre ambas zonas.
+  let horariosPorDia = {};   // clave "YYYY-MM-DD" (en la zona horaria MOSTRADA) -> [iso, iso, ...]
+  let zonaHorariaMostrada = Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Mexico_City";
+  let todosLosHorarios = []; // se guarda el arreglo original para poder re-agrupar si cambia la zona
+  let anioCalendario = null;
+  let mesCalendario = null;
   let diaElegidoClave = null;
 
   function clavePorDia(iso, zona){
     const partes = new Intl.DateTimeFormat("en-CA", { timeZone: zona, year:"numeric", month:"2-digit", day:"2-digit" }).formatToParts(new Date(iso));
     const obj = {}; for(const p of partes) obj[p.type] = p.value;
     return \`\${obj.year}-\${obj.month}-\${obj.day}\`;
+  }
+
+  function poblarSelectorZonaHoraria(){
+    const sel = document.getElementById("selectZonaHoraria");
+    let zonas;
+    try {
+      zonas = Intl.supportedValuesOf("timeZone");
+    } catch (err) {
+      // Navegadores viejos que no soportan supportedValuesOf: se deja al
+      // menos la zona detectada como única opción, para no romper nada.
+      zonas = [zonaHorariaMostrada];
+    }
+    sel.innerHTML = zonas.map(z => \`<option value="\${z}"\${z === zonaHorariaMostrada ? " selected" : ""}>\${z.replace(/_/g," ")}</option>\`).join("");
+    sel.addEventListener("change", () => {
+      zonaHorariaMostrada = sel.value;
+      reagruparPorDia();
+      renderCalendario();
+      if(diaElegidoClave) renderHorariosDelDia(diaElegidoClave);
+    });
+  }
+
+  function reagruparPorDia(){
+    horariosPorDia = {};
+    todosLosHorarios.forEach(iso => {
+      const clave = clavePorDia(iso, zonaHorariaMostrada);
+      if(!horariosPorDia[clave]) horariosPorDia[clave] = [];
+      horariosPorDia[clave].push(iso);
+    });
   }
 
   async function cargarPregunta(){
@@ -4680,32 +4708,6 @@ app.get("/agendar", (req, res) => {
     });
   }
 
-  document.getElementById("btnContinuar").addEventListener("click", () => {
-    const nombre = document.getElementById("inputNombre").value.trim();
-    const errorEl = document.getElementById("errorFormulario");
-    errorEl.classList.add("oculto");
-
-    if(!nombre){ errorEl.textContent = "Por favor escribe tu nombre."; errorEl.classList.remove("oculto"); return; }
-    if(opcionElegida === null){ errorEl.textContent = "Por favor elige una opción."; errorEl.classList.remove("oculto"); return; }
-
-    const opcion = pregunta.opciones[opcionElegida];
-    if(opcion.descalifica){
-      document.getElementById("pasoFormulario").classList.add("oculto");
-      document.getElementById("textoNoCalifica").textContent = pregunta.mensaje_no_califica;
-      if(pregunta.enlace_no_califica){
-        const boton = document.getElementById("botonRecursoNoCalifica");
-        boton.href = pregunta.enlace_no_califica;
-        boton.classList.remove("oculto");
-      }
-      document.getElementById("pasoNoCalifica").classList.remove("oculto");
-      return;
-    }
-
-    document.getElementById("pasoFormulario").classList.add("oculto");
-    document.getElementById("pasoCalendario").classList.remove("oculto");
-    cargarHorarios();
-  });
-
   async function cargarHorarios(){
     document.getElementById("cargandoHorarios").classList.remove("oculto");
     document.getElementById("sinHorarios").classList.add("oculto");
@@ -4720,25 +4722,15 @@ app.get("/agendar", (req, res) => {
         return;
       }
 
-      zonaHorariaAgenda = data.zona_horaria || "America/Mexico_City";
-      horariosPorDia = {};
-      data.horarios.forEach(iso => {
-        const clave = clavePorDia(iso, zonaHorariaAgenda);
-        if(!horariosPorDia[clave]) horariosPorDia[clave] = [];
-        horariosPorDia[clave].push(iso);
-      });
+      todosLosHorarios = data.horarios;
+      reagruparPorDia();
 
-      // Arranca mostrando el mes del PRIMER horario disponible (no
-      // necesariamente el mes calendario de hoy, por si hoy ya no queda
-      // ningún horario libre) — se extrae el año/mes UNA sola vez aquí,
-      // ya en la zona horaria correcta, y de ahí en adelante se navega
-      // con números simples (ver más abajo) para no volver a mezclar
-      // zonas horarias.
-      const clavePrimerHorario = clavePorDia(data.horarios[0], zonaHorariaAgenda);
+      const clavePrimerHorario = clavePorDia(todosLosHorarios[0], zonaHorariaMostrada);
       const [anioInicial, mesInicial] = clavePrimerHorario.split("-").map(Number);
       anioCalendario = anioInicial;
       mesCalendario = mesInicial;
-      document.getElementById("calZonaHoraria").textContent = "Zona horaria: " + zonaHorariaAgenda.replace(/_/g, " ");
+
+      poblarSelectorZonaHoraria();
       document.getElementById("calShell").classList.remove("oculto");
       renderCalendario();
     } catch (err) {
@@ -4752,7 +4744,7 @@ app.get("/agendar", (req, res) => {
     const nombresDia = ["dom","lun","mar","mié","jue","vie","sáb"];
     document.getElementById("calGridDiasSemana").innerHTML = nombresDia.map(d => \`<div class="cal-diasemana">\${d}</div>\`).join("");
 
-    const anio = anioCalendario, mes = mesCalendario; // mes: 1-12 — ya son números simples, sin Date de por medio
+    const anio = anioCalendario, mes = mesCalendario; // mes: 1-12 — números simples, sin Date de por medio
 
     document.getElementById("calMesTitulo").textContent =
       new Date(anio, mes - 1, 1).toLocaleDateString("es-MX", { month: "long", year: "numeric" });
@@ -4779,8 +4771,8 @@ app.get("/agendar", (req, res) => {
     });
 
     // No se deja retroceder antes del mes de hoy (calculado en la zona
-    // horaria del negocio, no en la del navegador).
-    const claveHoy = clavePorDia(new Date().toISOString(), zonaHorariaAgenda);
+    // horaria MOSTRADA, no en la del navegador crudo).
+    const claveHoy = clavePorDia(new Date().toISOString(), zonaHorariaMostrada);
     const [anioHoy, mesHoy] = claveHoy.split("-").map(Number);
     const esMesActualOAnterior = anio === anioHoy && mes === mesHoy;
     document.getElementById("btnMesAnterior").disabled = esMesActualOAnterior;
@@ -4788,26 +4780,31 @@ app.get("/agendar", (req, res) => {
 
   function renderHorariosDelDia(clave){
     const horarios = horariosPorDia[clave] || [];
-    const fechaTitulo = new Date(clave + "T12:00:00").toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long" });
-    document.getElementById("tituloListaHorarios").textContent = fechaTitulo;
-    document.getElementById("listaHorariosDia").innerHTML = horarios.map(iso => \`
-      <button type="button" class="horario-btn" data-iso="\${iso}">\${new Date(iso).toLocaleTimeString("es-MX", { hour:"numeric", minute:"2-digit", timeZone: zonaHorariaAgenda })}</button>
+    const cont = document.getElementById("listaHorariosDia");
+    cont.classList.remove("oculto");
+    cont.innerHTML = horarios.map(iso => \`
+      <button type="button" class="horario-btn" data-iso="\${iso}">\${new Date(iso).toLocaleTimeString("es-MX", { hour:"numeric", minute:"2-digit", timeZone: zonaHorariaMostrada })}</button>
     \`).join("");
     document.querySelectorAll(".horario-btn").forEach(btn => {
       btn.addEventListener("click", () => {
         horarioElegido = btn.dataset.iso;
-        document.getElementById("pasoCalendario").classList.add("oculto");
-        document.getElementById("pasoConfirmar").classList.remove("oculto");
-        document.getElementById("resumenHorarioElegido").textContent =
-          new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZone: zonaHorariaAgenda });
+        irAlFormulario();
       });
     });
   }
 
-  // Navegación de mes con año/mes NUMÉRICOS simples (nunca un objeto Date
-  // reinterpretado entre zonas horarias) — evita el bug donde la
-  // medianoche se "corre" un día (y a veces hasta un mes) al mezclar la
-  // zona horaria local del navegador con la del negocio.
+  function irAlFormulario(){
+    document.getElementById("pasoCalendario").classList.add("oculto");
+    document.getElementById("pasoFormulario").classList.remove("oculto");
+    document.getElementById("resumenHorarioTexto").textContent =
+      new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZone: zonaHorariaMostrada });
+  }
+
+  document.getElementById("btnCambiarHorario").addEventListener("click", () => {
+    document.getElementById("pasoFormulario").classList.add("oculto");
+    document.getElementById("pasoCalendario").classList.remove("oculto");
+  });
+
   document.getElementById("btnMesAnterior").addEventListener("click", () => {
     mesCalendario--;
     if(mesCalendario < 1){ mesCalendario = 12; anioCalendario--; }
@@ -4819,25 +4816,42 @@ app.get("/agendar", (req, res) => {
     renderCalendario();
   });
 
-  document.getElementById("btnVolverHorarios").addEventListener("click", () => {
-    document.getElementById("pasoConfirmar").classList.add("oculto");
-    document.getElementById("pasoCalendario").classList.remove("oculto");
-  });
-
-  document.getElementById("btnConfirmarReserva").addEventListener("click", async () => {
-    const btn = document.getElementById("btnConfirmarReserva");
-    const errorEl = document.getElementById("errorConfirmar");
+  // El botón "Agendar" hace las dos cosas: revisa si la opción de
+  // presupuesto elegida DESCALIFICA (en cuyo caso nunca se llega a crear
+  // la reserva, se manda a la pantalla de "no califica") o SÍ califica (en
+  // cuyo caso ahí sí se confirma la reserva real contra Google Calendar).
+  document.getElementById("btnAgendar").addEventListener("click", async () => {
+    const nombre = document.getElementById("inputNombre").value.trim();
+    const errorEl = document.getElementById("errorFormulario");
     errorEl.classList.add("oculto");
+
+    if(!nombre){ errorEl.textContent = "Por favor escribe tu nombre."; errorEl.classList.remove("oculto"); return; }
+    if(opcionElegida === null){ errorEl.textContent = "Por favor elige una opción."; errorEl.classList.remove("oculto"); return; }
+
+    const opcion = pregunta.opciones[opcionElegida];
+    if(opcion.descalifica){
+      document.getElementById("pasoFormulario").classList.add("oculto");
+      document.getElementById("textoNoCalifica").textContent = pregunta.mensaje_no_califica;
+      if(pregunta.enlace_no_califica){
+        const boton = document.getElementById("botonRecursoNoCalifica");
+        boton.href = pregunta.enlace_no_califica;
+        boton.classList.remove("oculto");
+      }
+      document.getElementById("pasoNoCalifica").classList.remove("oculto");
+      return;
+    }
+
+    const btn = document.getElementById("btnAgendar");
     btn.disabled = true;
     btn.textContent = "Agendando...";
     try {
       const res = await fetch("/agendar/confirmar", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          nombre: document.getElementById("inputNombre").value.trim(),
+          nombre,
           email: document.getElementById("inputEmail").value.trim(),
           instagram_username: usernamePrellenado,
-          presupuesto: pregunta.opciones[opcionElegida].texto,
+          presupuesto: opcion.texto,
           inicio_iso: horarioElegido
         })
       });
@@ -4846,22 +4860,23 @@ app.get("/agendar", (req, res) => {
         errorEl.textContent = data.error || "No se pudo agendar, intenta con otro horario.";
         errorEl.classList.remove("oculto");
         btn.disabled = false;
-        btn.textContent = "Confirmar";
+        btn.textContent = "Agendar";
         return;
       }
-      document.getElementById("pasoConfirmar").classList.add("oculto");
+      document.getElementById("pasoFormulario").classList.add("oculto");
       document.getElementById("resumenExito").textContent =
-        "Te esperamos el " + new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit" }) + ".";
+        "Te esperamos el " + new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZone: zonaHorariaMostrada }) + ".";
       document.getElementById("pasoExito").classList.remove("oculto");
     } catch (err) {
       errorEl.textContent = "Ocurrió un error, intenta de nuevo.";
       errorEl.classList.remove("oculto");
       btn.disabled = false;
-      btn.textContent = "Confirmar";
+      btn.textContent = "Agendar";
     }
   });
 
   cargarPregunta();
+  cargarHorarios();
 </script>
 </body>
 </html>`);
