@@ -4504,7 +4504,7 @@ app.get("/agendar", (req, res) => {
 
   h1.titulo-paso{ font-size:19px; margin:0 0 6px; }
   p.sub{ color:var(--muted); font-size:14px; margin:0 0 22px; line-height:1.5; }
-  label{ display:block; font-size:13.5px; font-weight:600; margin:16px 0 6px; }
+  label{ display:block; font-size:13.5px; font-weight:600; margin:16px 0 10px; }
   input[type=text], input[type=email]{
     width:100%; background:#fff; border:1px solid var(--border); border-radius:8px;
     padding:11px 13px; color:var(--text); font-size:14.5px; font-family:inherit;
@@ -4548,37 +4548,11 @@ app.get("/agendar", (req, res) => {
     border-radius:8px; overflow:hidden;
   }
   .tel-caja:focus-within{ border-color:var(--accent); }
-  .tel-pais-widget{ position:relative; flex:0 0 auto; }
-  .tel-pais-boton{
-    background:transparent; border:none; padding:11px 10px 11px 13px;
-    color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;
-    display:flex; align-items:center; gap:6px; white-space:nowrap;
+  .input-tel-codigo{
+    flex:0 0 auto; max-width:150px; background:transparent; border:none;
+    padding:11px 8px 11px 13px; color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;
   }
-  .tel-pais-boton .flecha{ color:var(--muted); font-size:10px; margin-left:2px; }
-  .tel-pais-panel{
-    position:absolute; top:calc(100% + 6px); left:0; width:300px; background:#fff;
-    border:1px solid var(--border); border-radius:10px; box-shadow:0 10px 30px rgba(20,25,35,.15);
-    z-index:30; overflow:hidden;
-  }
-  .tel-pais-titulo{ font-size:15px; font-weight:700; color:#1A2028; padding:14px 16px 10px; }
-  .tel-pais-buscador{
-    width:100%; border:none; border-bottom:1px solid var(--border); padding:10px 16px;
-    font-size:13.5px; font-family:inherit; color:#1A2028; box-sizing:border-box;
-  }
-  .tel-pais-buscador:focus{ outline:none; }
-  .tel-pais-lista{ max-height:280px; overflow-y:auto; }
-  .tel-pais-item{
-    display:flex; align-items:center; gap:10px; padding:9px 16px; font-size:13.5px;
-    color:#1A2028; cursor:pointer;
-  }
-  .tel-pais-item .bandera{ font-size:17px; flex-shrink:0; }
-  .tel-pais-item .nombre{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .tel-pais-item .codigo{ color:#68707E; flex-shrink:0; }
-  .tel-pais-item:nth-child(even){ background:#F7F8FA; }
-  .tel-pais-item:hover{ background:var(--accent-soft); }
-  .tel-pais-item.elegido{ background:var(--accent); color:#fff; }
-  .tel-pais-item.elegido .codigo{ color:#fff; }
-  .tel-pais-sin-resultados{ padding:16px; font-size:13px; color:#68707E; text-align:center; }
+  .input-tel-codigo:focus{ outline:none; }
   .tel-divisor{ width:1px; align-self:stretch; background:var(--border); margin:8px 0; flex-shrink:0; }
   .input-tel-numero{
     border:none !important; background:transparent !important; flex:1; min-width:0;
@@ -4589,7 +4563,7 @@ app.get("/agendar", (req, res) => {
     display:flex; align-items:center; gap:10px; padding:0; margin-bottom:15px; cursor:pointer;
   }
   .opcion:last-child{ margin-bottom:0; }
-  .opcion span{ color:var(--text); font-size:14px; }
+  .opcion span{ color:var(--text); font-size:14px; font-weight:400; }
   .opcion input{ accent-color:var(--accent); width:17px; height:17px; flex-shrink:0; }
   button{
     background:var(--accent); color:#fff; border:none; border-radius:9px;
@@ -5053,18 +5027,9 @@ app.get("/agendar", (req, res) => {
           <label>\${p.texto}\${marcaObligatoria}</label>
           <div class="grupo-telefono" data-id="\${p.id}" data-tipo="telefono" data-obligatoria="\${p.obligatoria ? "1" : ""}">
             <div class="tel-caja">
-              <div class="tel-pais-widget">
-                <button type="button" class="tel-pais-boton">
-                  <span class="tel-pais-bandera">\${PAIS_POR_DEFECTO.f}</span>
-                  <span class="tel-pais-codigo-actual">\${PAIS_POR_DEFECTO.c}</span>
-                  <span class="flecha">▾</span>
-                </button>
-                <div class="tel-pais-panel oculto">
-                  <div class="tel-pais-titulo">Seleccionar el código de país</div>
-                  <input type="text" class="tel-pais-buscador" placeholder="Buscar país...">
-                  <div class="tel-pais-lista"></div>
-                </div>
-              </div>
+              <select class="input-tel-codigo">
+                \${CODIGOS_PAIS.map(cp => \`<option value="\${cp.c}"\${cp.n === PAIS_POR_DEFECTO.n ? " selected" : ""}>\${cp.f} \${cp.n} \${cp.c}</option>\`).join("")}
+              </select>
               <div class="tel-divisor"></div>
               <input type="tel" class="input-tel-numero" placeholder="Número de WhatsApp" inputmode="numeric">
             </div>
@@ -5084,61 +5049,6 @@ app.get("/agendar", (req, res) => {
           el.classList.add("elegida");
           el.querySelector("input").checked = true;
         });
-      });
-    });
-
-    // Widget de código de país (con banderas y buscador) para cada
-    // pregunta de tipo "teléfono" — se inicializa una instancia
-    // independiente por cada una, por si hubiera más de una en el mismo
-    // formulario.
-    cont.querySelectorAll(".tel-pais-widget").forEach(widget => {
-      let paisElegido = PAIS_POR_DEFECTO;
-      const boton = widget.querySelector(".tel-pais-boton");
-      const panel = widget.querySelector(".tel-pais-panel");
-      const buscador = widget.querySelector(".tel-pais-buscador");
-      const lista = widget.querySelector(".tel-pais-lista");
-
-      function renderListaPaises(filtro){
-        const filtroNorm = filtro.trim().toLowerCase();
-        const filtrados = CODIGOS_PAIS.filter(p => p.n.toLowerCase().includes(filtroNorm) || p.c.includes(filtroNorm));
-        if(filtrados.length === 0){
-          lista.innerHTML = '<div class="tel-pais-sin-resultados">Sin resultados</div>';
-          return;
-        }
-        lista.innerHTML = filtrados.map(p => \`
-          <div class="tel-pais-item \${p.c === paisElegido.c && p.n === paisElegido.n ? "elegido" : ""}" data-codigo="\${p.c}" data-nombre="\${p.n.replace(/"/g,"&quot;")}">
-            <span class="bandera">\${p.f}</span>
-            <span class="nombre">\${p.n}</span>
-            <span class="codigo">\${p.c}</span>
-          </div>
-        \`).join("");
-        lista.querySelectorAll(".tel-pais-item").forEach(item => {
-          item.addEventListener("click", () => {
-            paisElegido = { c: item.dataset.codigo, n: item.dataset.nombre };
-            widget.querySelector(".tel-pais-bandera").textContent = CODIGOS_PAIS.find(p => p.c === paisElegido.c && p.n === paisElegido.n)?.f || "🏳️";
-            widget.querySelector(".tel-pais-codigo-actual").textContent = paisElegido.c;
-            widget.dataset.codigoElegido = paisElegido.c;
-            panel.classList.add("oculto");
-          });
-        });
-      }
-
-      widget.dataset.codigoElegido = paisElegido.c;
-      renderListaPaises("");
-
-      boton.addEventListener("click", () => {
-        const abriendo = panel.classList.contains("oculto");
-        document.querySelectorAll(".tel-pais-panel").forEach(p => p.classList.add("oculto"));
-        panel.classList.toggle("oculto", !abriendo);
-        if(abriendo){
-          buscador.value = "";
-          renderListaPaises("");
-          buscador.focus();
-        }
-      });
-      buscador.addEventListener("input", () => renderListaPaises(buscador.value));
-      document.addEventListener("click", (e) => {
-        if(!widget.contains(e.target)) panel.classList.add("oculto");
       });
     });
   }
@@ -5322,7 +5232,7 @@ app.get("/agendar", (req, res) => {
       }
     });
     document.querySelectorAll("#contenedorPreguntas .grupo-telefono").forEach(grupo => {
-      const codigo = grupo.querySelector(".tel-pais-widget")?.dataset.codigoElegido || PAIS_POR_DEFECTO.c;
+      const codigo = grupo.querySelector(".input-tel-codigo")?.value || PAIS_POR_DEFECTO.c;
       const numero = grupo.querySelector(".input-tel-numero").value.replace(/\\D/g, "").trim();
       if(numero) respuestas[grupo.dataset.id] = codigo + " " + numero;
       else if(grupo.dataset.obligatoria === "1" && !faltaObligatoria){
@@ -7143,10 +7053,10 @@ ${estilosBase()}
   }
   .pv-pregunta{ margin-bottom:18px; }
   .pv-pregunta:last-child{ margin-bottom:0; }
-  .pv-label{ display:block; font-size:13px; font-weight:600; color:#1A2028; margin-bottom:8px; }
+  .pv-label{ display:block; font-size:13px; font-weight:600; color:#1A2028; margin-bottom:10px; }
   .pv-label .req{ color:#E0432B; }
   .pv-opcion{
-    display:flex; align-items:center; gap:9px; margin-bottom:15px; font-size:14px; color:#1A2028;
+    display:flex; align-items:center; gap:9px; margin-bottom:15px; font-size:14px; color:#1A2028; font-weight:400;
   }
   .pv-opcion:last-child{ margin-bottom:0; }
   .pv-opcion .circulo{ width:15px; height:15px; border-radius:50%; border:1.5px solid #C7CCD4; flex-shrink:0; }
