@@ -10402,6 +10402,10 @@ ${estilosBase()}
             <option value="14">Hace 2+ semanas</option>
             <option value="30">Hace 1+ mes</option>
           </select>
+          <label id="filtroExcluirAgendoWrap" style="display:none; align-items:center; gap:6px; font-size:12.5px; color:var(--muted); cursor:pointer; white-space:nowrap;" title="Oculta (y excluye del CSV) a quienes ya agendaron — para hacerles seguimiento solo a quienes todavía no han agendado su llamada.">
+            <input type="checkbox" id="filtroExcluirAgendo" style="width:15px; height:15px; accent-color:#3FC7E8; cursor:pointer;">
+            Excluir quienes ya agendaron
+          </label>
         </div>
         <div class="chat-toolbar">
           <select id="segmentoReporteDolores" class="select-mini" title="Segmento a analizar en el resumen de dolores/obstáculos">
@@ -10610,16 +10614,23 @@ ${estilosBase()}
     const totalSeguimientoMostrado = (filtroActual === "seguimiento" && diasSeguimientoActivo)
       ? conversacionesFiltradas().length
       : totalSeguimiento;
+    // Mismo criterio para Enlace Enviado: si el checkbox de "excluir
+    // quienes ya agendaron" está activo, el número de la pestaña también
+    // debe reflejar esa exclusión, no el total sin filtrar.
+    const excluirAgendoActivo = document.getElementById("filtroExcluirAgendo").checked;
+    const totalEnlaceMostrado = (filtroActual === "enlace" && excluirAgendoActivo)
+      ? conversacionesFiltradas().length
+      : totalEnlace;
     document.getElementById("countTodas").textContent = conversaciones.length;
     document.getElementById("countHandoff").textContent = totalHandoff;
     document.getElementById("countCalifica").textContent = totalCalifica;
     document.getElementById("countNoCalifica").textContent = totalNoCalifica;
     document.getElementById("countAgendo").textContent = totalAgendo;
-    document.getElementById("countEnlace").textContent = totalEnlace;
+    document.getElementById("countEnlace").textContent = totalEnlaceMostrado;
     document.getElementById("countSeguimiento").textContent = totalSeguimientoMostrado;
     actualizarBotonExportar({
       todas: conversaciones.length, handoff: totalHandoff, califica: totalCalifica,
-      nocalifica: totalNoCalifica, agendo: totalAgendo, enlace: totalEnlace, seguimiento: totalSeguimientoMostrado
+      nocalifica: totalNoCalifica, agendo: totalAgendo, enlace: totalEnlaceMostrado, seguimiento: totalSeguimientoMostrado
     });
   }
 
@@ -10656,6 +10667,12 @@ ${estilosBase()}
       const dias = document.getElementById("filtroDiasSeguimiento").value;
       if(dias) href += "&dias=" + encodeURIComponent(dias);
     }
+    // Mismo criterio para Enlace Enviado: si el checkbox de "excluir
+    // quienes ya agendaron" está activo, el CSV descargado debe respetar
+    // exactamente lo mismo que se ve en pantalla.
+    if(filtroActual === "enlace" && document.getElementById("filtroExcluirAgendo").checked){
+      href += "&excluir_agendo=1";
+    }
     btn.setAttribute("href", href);
     btn.setAttribute("style", estilos[filtroActual] || "");
     btn.setAttribute("title", titulos[filtroActual] || "Exportar");
@@ -10667,7 +10684,11 @@ ${estilosBase()}
     if(filtroActual === "califica") return conversaciones.filter(c => c.califica);
     if(filtroActual === "nocalifica") return conversaciones.filter(c => c.no_califica);
     if(filtroActual === "agendo") return conversaciones.filter(c => c.agendo);
-    if(filtroActual === "enlace") return conversaciones.filter(c => c.enlace_enviado);
+    if(filtroActual === "enlace") {
+      let base = conversaciones.filter(c => c.enlace_enviado);
+      if(document.getElementById("filtroExcluirAgendo").checked) base = base.filter(c => !c.agendo);
+      return base;
+    }
     // "Seguimiento pendiente": todos los que salieron de la ventana de 24h
     // (handoff), EXCLUYENDO a los que ya no califican (no vale la pena
     // insistirles), a los que ya agendaron (ya lograron lo que se buscaba),
@@ -11516,8 +11537,11 @@ ${estilosBase()}
 
   // El selector de "antigüedad del último mensaje del bot" solo tiene
   // sentido dentro de la pestaña de Seguimiento — se muestra solo ahí.
+  // El checkbox de "excluir quienes ya agendaron" solo tiene sentido
+  // dentro de la pestaña de Enlace Enviado.
   function actualizarVisibilidadFiltroDias(){
     document.getElementById("filtroDiasSeguimiento").style.display = (filtroActual === "seguimiento") ? "" : "none";
+    document.getElementById("filtroExcluirAgendoWrap").style.display = (filtroActual === "enlace") ? "flex" : "none";
   }
 
   document.getElementById("tabTodas").addEventListener("click", () => {
@@ -11570,6 +11594,9 @@ ${estilosBase()}
     renderLista();
   });
   document.getElementById("filtroDiasSeguimiento").addEventListener("change", () => {
+    renderLista();
+  });
+  document.getElementById("filtroExcluirAgendo").addEventListener("change", () => {
     renderLista();
   });
 
@@ -12136,6 +12163,7 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
   try {
     const filtro = req.query.filtro || "todas";
     const diasMinimos = req.query.dias ? Number(req.query.dias) : null;
+    const excluirAgendo = req.query.excluir_agendo === "1";
 
     const { data, error } = await supabase
       .from("conversaciones")
@@ -12158,7 +12186,13 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
     if (filtro === "califica") filtradas = filtradas.filter(c => c.califica);
     else if (filtro === "nocalifica") filtradas = filtradas.filter(c => c.no_califica);
     else if (filtro === "agendo") filtradas = filtradas.filter(c => c.agendo);
-    else if (filtro === "enlace") filtradas = filtradas.filter(c => c.enlace_enviado);
+    else if (filtro === "enlace") {
+      filtradas = filtradas.filter(c => c.enlace_enviado);
+      // Igual que en pantalla: si se pide excluir a quienes ya agendaron
+      // (para hacer seguimiento solo a quienes aún no han agendado su
+      // llamada), se aplica aquí también.
+      if (excluirAgendo) filtradas = filtradas.filter(c => !c.agendo);
+    }
     else if (filtro === "handoff") filtradas = filtradas.filter(c => !c.en_ventana_24h);
     else if (filtro === "seguimiento") {
       const etiquetaCompra = configActual.dashboard_etiqueta_compro?.trim();
@@ -12227,7 +12261,7 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
       todas: "todos_los_leads", califica: "califican", nocalifica: "no_califican",
       agendo: "agendaron", enlace: "enlace_enviado", handoff: "handoff", seguimiento: "seguimiento_pendiente"
     };
-    const nombreArchivo = nombresArchivo[filtro] || "leads";
+    const nombreArchivo = (nombresArchivo[filtro] || "leads") + (excluirAgendo ? "_sin_agendar" : "");
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}_${fechaArchivo}.csv"`);
