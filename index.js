@@ -4554,6 +4554,7 @@ app.get("/agendar", (req, res) => {
   button.secundario{ background:transparent; color:var(--text); border:1px solid var(--border); }
   button.ancho{ width:100%; }
   .oculto{ display:none !important; }
+  #calShell{ margin-top:35px; }
   .cargando{ text-align:center; color:var(--muted); padding:30px 0; font-size:14px; }
   .error{ color:var(--red); font-size:13.5px; margin-top:10px; }
   .exito{ text-align:center; }
@@ -4585,7 +4586,7 @@ app.get("/agendar", (req, res) => {
   }
   .cal-dia.elegido{ background:var(--accent); color:#fff; }
   .cal-dia.elegido::after{ background:#fff; }
-  .cal-zona{ margin-top:16px; }
+  .cal-zona{ margin-top:35px; }
   .cal-zona-label{ font-size:12px; color:var(--muted); margin-bottom:4px; display:flex; align-items:center; gap:5px; }
   .lista-horarios{ display:flex; flex-direction:column; gap:8px; flex:1; overflow-y:auto; padding-right:4px; margin-top:16px; }
   .lista-horarios-titulo{ font-size:15px; font-weight:600; margin-bottom:10px; flex-shrink:0; }
@@ -4930,13 +4931,17 @@ app.get("/agendar", (req, res) => {
     document.querySelector(".contenedor").classList.add("expandido");
   }
 
-  function ocultarPanelHoras(){
-    document.getElementById("panelHoras").classList.remove("visible");
-    document.querySelector(".contenedor").classList.remove("expandido");
+  function vaciarPanelHoras(){
+    // Se deja el panel con el mismo ancho (350px) para que el cuadro NO
+    // cambie de tamaño al pasar del calendario al formulario — solo se
+    // vacía su contenido, quedando en blanco, ya que en este paso ya no
+    // corresponde mostrar los horarios.
+    document.getElementById("tituloListaHorarios").textContent = "";
+    document.getElementById("listaHorariosDia").innerHTML = "";
   }
 
   function irAlFormulario(){
-    ocultarPanelHoras();
+    vaciarPanelHoras();
     document.getElementById("pasoCalendario").classList.add("oculto");
     document.getElementById("pasoFormulario").classList.remove("oculto");
     document.getElementById("resumenHorarioTexto").textContent =
@@ -4947,8 +4952,7 @@ app.get("/agendar", (req, res) => {
     document.getElementById("pasoFormulario").classList.add("oculto");
     document.getElementById("pasoCalendario").classList.remove("oculto");
     // Si ya había un día elegido antes de llegar al formulario, se vuelve
-    // a expandir mostrando sus horarios directamente, en vez de dejarlo
-    // colapsado sin nada que elegir.
+    // a mostrar sus horarios directamente, en vez de dejarlo en blanco.
     if(diaElegidoClave) renderHorariosDelDia(diaElegidoClave);
   });
 
