@@ -4469,10 +4469,12 @@ app.get("/agendar", (req, res) => {
     box-shadow:0 8px 40px rgba(20,25,35,.06); transition:width .25s ease;
   }
   .contenedor.expandido{ width:1150px; }
+  .contenedor.expandido-form{ width:1210px; }
   .panel-izq{
     width:400px; flex:none; padding:32px 28px; border-right:1px solid var(--border); overflow-y:auto;
   }
-  .panel-der{ width:400px; flex:none; padding:32px 30px; min-width:0; overflow-y:auto; }
+  .panel-der{ width:400px; flex:none; padding:32px 30px; min-width:0; overflow-y:auto; transition:width .25s ease; }
+  .panel-der.ancho-form{ width:460px; }
   .panel-horas{
     width:0; flex:none; padding:0; border-left:1px solid var(--border); overflow:hidden;
     transition:width .25s ease, padding .25s ease; opacity:0; display:flex; flex-direction:column;
@@ -4598,8 +4600,9 @@ app.get("/agendar", (req, res) => {
 
   @media (max-width: 700px){
     .contenedor{ width:100%; height:auto; max-height:92vh; flex-direction:column; }
-    .contenedor.expandido{ width:100%; }
+    .contenedor.expandido, .contenedor.expandido-form{ width:100%; }
     .panel-izq, .panel-der{ width:100%; }
+    .panel-der.ancho-form{ width:100%; }
     .panel-izq{ border-right:none; border-bottom:1px solid var(--border); }
     .panel-horas{ width:100%; border-left:none; border-top:1px solid var(--border); }
     .panel-horas.visible{ width:100%; padding:20px 30px; }
@@ -4946,13 +4949,25 @@ app.get("/agendar", (req, res) => {
     document.getElementById("pasoFormulario").classList.remove("oculto");
     document.getElementById("resumenHorarioTexto").textContent =
       new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZone: zonaHorariaMostrada });
+    // La columna del medio (donde vive el formulario) crece de 400 a
+    // 460px, para que sus campos puedan ocupar 400px con 30px de margen
+    // a cada lado — y el cuadro completo ajusta su ancho total para
+    // compensar esos 60px extra.
+    document.querySelector(".panel-der").classList.add("ancho-form");
+    document.querySelector(".contenedor").classList.remove("expandido");
+    document.querySelector(".contenedor").classList.add("expandido-form");
   }
 
   document.getElementById("btnCambiarHorario").addEventListener("click", () => {
     document.getElementById("pasoFormulario").classList.add("oculto");
     document.getElementById("pasoCalendario").classList.remove("oculto");
+    // Se revierte la columna del medio a su ancho normal (400px) al
+    // volver al calendario.
+    document.querySelector(".panel-der").classList.remove("ancho-form");
+    document.querySelector(".contenedor").classList.remove("expandido-form");
     // Si ya había un día elegido antes de llegar al formulario, se vuelve
-    // a mostrar sus horarios directamente, en vez de dejarlo en blanco.
+    // a mostrar sus horarios directamente (esto ya agrega "expandido" por
+    // su cuenta), en vez de dejarlo en blanco.
     if(diaElegidoClave) renderHorariosDelDia(diaElegidoClave);
   });
 
