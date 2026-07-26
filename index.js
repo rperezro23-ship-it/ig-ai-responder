@@ -4600,13 +4600,14 @@ app.get("/agendar", (req, res) => {
   .horario-btn:hover{ background:var(--accent); color:#fff; }
 
   @media (max-width: 700px){
-    .contenedor{ width:100%; height:auto; max-height:92vh; flex-direction:column; }
+    .contenedor{ width:100%; height:auto; max-height:none; flex-direction:column; overflow:visible; }
     .contenedor.expandido, .contenedor.expandido-form{ width:100%; }
-    .panel-izq, .panel-der{ width:100%; }
+    .panel-izq, .panel-der{ width:100%; overflow:visible; }
     .panel-der.ancho-form{ width:100%; }
     .panel-izq{ border-right:none; border-bottom:1px solid var(--border); }
-    .panel-horas{ width:100%; }
+    .panel-horas{ width:100%; overflow:visible; }
     .panel-horas.visible{ width:100%; padding:20px 30px; }
+    body{ align-items:flex-start; padding:16px; }
   }
 </style>
 </head>
@@ -4671,6 +4672,7 @@ app.get("/agendar", (req, res) => {
         <input type="email" id="inputEmail" placeholder="tucorreo@ejemplo.com">
         <label id="labelPregunta"></label>
         <div id="contenedorOpciones"></div>
+        <div id="contenedorPreguntasExtra"></div>
         <div class="error oculto" id="errorFormulario"></div>
         <button class="ancho" id="btnAgendar">Agendar</button>
       </div>
@@ -4843,6 +4845,27 @@ app.get("/agendar", (req, res) => {
         opcionElegida = Number(el.dataset.i);
       });
     });
+
+    // Preguntas ADICIONALES del formulario (aparte de la de presupuesto)
+    // — nunca descalifican, solo se recolectan como información extra.
+    const contExtra = document.getElementById("contenedorPreguntasExtra");
+    const preguntasExtra = pregunta.preguntas_extra || [];
+    contExtra.innerHTML = preguntasExtra.map(p => {
+      const marcaObligatoria = p.obligatoria ? " *" : "";
+      if(p.tipo === "opciones"){
+        return \`
+          <label>\${p.texto}\${marcaObligatoria}</label>
+          <select class="input-pregunta-extra" data-id="\${p.id}" data-obligatoria="\${p.obligatoria ? "1" : ""}">
+            <option value="">Elige una opción...</option>
+            \${p.opciones.map(op => \`<option value="\${op}">\${op}</option>\`).join("")}
+          </select>
+        \`;
+      }
+      return \`
+        <label>\${p.texto}\${marcaObligatoria}</label>
+        <input type="text" class="input-pregunta-extra" data-id="\${p.id}" data-obligatoria="\${p.obligatoria ? "1" : ""}">
+      \`;
+    }).join("");
   }
 
   async function cargarHorarios(){
@@ -4999,6 +5022,23 @@ app.get("/agendar", (req, res) => {
     if(!nombre){ errorEl.textContent = "Por favor escribe tu nombre."; errorEl.classList.remove("oculto"); return; }
     if(opcionElegida === null){ errorEl.textContent = "Por favor elige una opción."; errorEl.classList.remove("oculto"); return; }
 
+    // Recolecta las respuestas a las preguntas extra, validando que las
+    // marcadas como obligatorias sí tengan respuesta.
+    const respuestasExtra = {};
+    let faltaObligatoria = null;
+    document.querySelectorAll(".input-pregunta-extra").forEach(el => {
+      const valor = el.value.trim();
+      if(valor) respuestasExtra[el.dataset.id] = valor;
+      else if(el.dataset.obligatoria === "1" && !faltaObligatoria){
+        faltaObligatoria = el.previousElementSibling?.textContent || "un campo obligatorio";
+      }
+    });
+    if(faltaObligatoria){
+      errorEl.textContent = "Por favor completa: " + faltaObligatoria;
+      errorEl.classList.remove("oculto");
+      return;
+    }
+
     const opcion = pregunta.opciones[opcionElegida];
     if(opcion.descalifica){
       document.getElementById("pasoFormulario").classList.add("oculto");
@@ -5023,7 +5063,8 @@ app.get("/agendar", (req, res) => {
           email: document.getElementById("inputEmail").value.trim(),
           instagram_username: usernamePrellenado,
           presupuesto: opcion.texto,
-          inicio_iso: horarioElegido
+          inicio_iso: horarioElegido,
+          respuestas_extra: respuestasExtra
         })
       });
       const data = await res.json();
@@ -5061,6 +5102,7 @@ app.get("/agendar/pregunta", (req, res) => {
     opciones: p.opciones,
     mensaje_no_califica: configActual.agenda_mensaje_no_califica || "",
     enlace_no_califica: configActual.agenda_enlace_no_califica || "",
+    preguntas_extra: Array.isArray(configActual.agenda_preguntas_extra) ? configActual.agenda_preguntas_extra : [],
     perfil: {
       nombre: configActual.agenda_nombre || "",
       titulo: configActual.agenda_titulo || "",
@@ -5090,8 +5132,18 @@ app.get("/agendar/horarios", async (req, res) => {
 // si un lead agendó, sin depender de ninguna API externa.
 app.post("/agendar/confirmar", async (req, res) => {
   try {
-    const { nombre, email, instagram_username, presupuesto, inicio_iso } = req.body || {};
+    const { nombre, email, instagram_username, presupuesto, inicio_iso, respuestas_extra } = req.body || {};
     if (!inicio_iso) return res.status(400).json({ error: "Falta el horario elegido." });
+
+    // Valida que las preguntas extra marcadas como OBLIGATORIAS sí tengan
+    // respuesta — nunca confiar solo en la validación del navegador.
+    const preguntasExtra = Array.isArray(configActual.agenda_preguntas_extra) ? configActual.agenda_preguntas_extra : [];
+    const respuestasRecibidas = (respuestas_extra && typeof respuestas_extra === "object") ? respuestas_extra : {};
+    for (const p of preguntasExtra) {
+      if (p.obligatoria && !String(respuestasRecibidas[p.id] || "").trim()) {
+        return res.status(400).json({ error: `Falta responder: ${p.texto}` });
+      }
+    }
 
     // Se vuelve a validar que el horario SIGA disponible justo antes de
     // crear el evento — evita que dos personas agenden el mismo hueco si
@@ -5101,11 +5153,23 @@ app.post("/agendar/confirmar", async (req, res) => {
       return res.status(409).json({ error: "Ese horario ya no está disponible, por favor elige otro." });
     }
 
+    // Las respuestas extra se agregan a las notas del evento de Google
+    // Calendar, para que queden visibles ahí mismo sin tener que entrar a
+    // Supabase a buscarlas.
+    const lineasExtra = preguntasExtra
+      .map(p => respuestasRecibidas[p.id] ? `${p.texto}: ${respuestasRecibidas[p.id]}` : null)
+      .filter(Boolean);
+    const notasCompletas = [
+      `Presupuesto: ${presupuesto || "no especificado"}`,
+      `Instagram: @${instagram_username || "no especificado"}`,
+      ...lineasExtra
+    ].join("\n");
+
     const eventoCreado = await crearEventoGoogleCalendar({
       inicioIso: inicio_iso,
       nombre: nombre || "Lead",
       email: email || null,
-      notas: `Presupuesto: ${presupuesto || "no especificado"}\nInstagram: @${instagram_username || "no especificado"}`
+      notas: notasCompletas
     });
 
     const duracionMin = configActual.agenda_duracion_minutos || 30;
@@ -5117,6 +5181,7 @@ app.post("/agendar/confirmar", async (req, res) => {
       instagram_username: (instagram_username || "").trim().replace(/^@/, "").toLowerCase() || null,
       email: email || null,
       presupuesto: presupuesto || null,
+      respuestas_extra: Object.keys(respuestasRecibidas).length > 0 ? respuestasRecibidas : null,
       inicio: inicio.toISOString(),
       fin: fin.toISOString(),
       google_event_id: eventoCreado.id,
@@ -5277,6 +5342,12 @@ let configActual = {
   agenda_titulo_evento: "Agenda una llamada de Consultoría acá👇",
   agenda_texto_oferta: "Pierde de 10 a 20 kg en solo 3 a 6 meses",
   agenda_whatsapp_link: "",
+  // Preguntas ADICIONALES del formulario, aparte de la de presupuesto —
+  // no filtran el acceso al calendario (esa sigue siendo únicamente la de
+  // presupuesto), solo recogen información extra del lead. Cada una:
+  // { id, texto, tipo: "texto" | "opciones", opciones: [string,...] (si
+  // tipo="opciones"), obligatoria: boolean }.
+  agenda_preguntas_extra: [],
 
   dashboard_etiqueta_asistio: "", // nombre exacto de la etiqueta manual que representa "asistió a la llamada"
   dashboard_etiqueta_compro: "",  // nombre exacto de la etiqueta manual que representa "compró / se cerró"
@@ -6116,7 +6187,10 @@ app.post("/config", requireAdminKey, async (req, res) => {
     const { ai_prompt, contexto_base, min_delay, max_delay, max_historial, seguimientos, seguimientos_enlace, openai_api_key,
             calificacion_activa, calificar_automatico_con_enlace, no_seguir_si_no_califica, parar_seguimientos_si_agendo, criterios_calificacion, enlace_calificacion, disparadores, etapas, transiciones_generales,
             transiciones_generales_elegir_mejor, mensajes_error_audio, calendly_token, calendly_pregunta_instagram, calendly_pregunta_instagram_posicion,
-            dashboard_etiqueta_asistio, dashboard_etiqueta_compro, franja_horaria_activa, franja_horaria_desde, franja_horaria_hasta } = req.body || {};
+            dashboard_etiqueta_asistio, dashboard_etiqueta_compro, franja_horaria_activa, franja_horaria_desde, franja_horaria_hasta,
+            agenda_zona_horaria, agenda_duracion_minutos, agenda_dias_hacia_adelante, agenda_aviso_minimo_horas, agenda_horario_semanal,
+            agenda_pregunta_presupuesto, agenda_mensaje_no_califica, agenda_enlace_no_califica, agenda_nombre, agenda_titulo,
+            agenda_foto_url, agenda_titulo_evento, agenda_texto_oferta, agenda_whatsapp_link, agenda_preguntas_extra } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -6154,6 +6228,54 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (Array.isArray(etapas)) nuevaConfig.etapas = normalizarEtapas(etapas);
     if (Array.isArray(transiciones_generales)) nuevaConfig.transiciones_generales = normalizarTransiciones(transiciones_generales);
     if (typeof transiciones_generales_elegir_mejor === "boolean") nuevaConfig.transiciones_generales_elegir_mejor = transiciones_generales_elegir_mejor;
+
+    // --- Configuración de /agendar (la agenda propia, reemplaza a Calendly) ---
+    if (typeof agenda_zona_horaria === "string" && agenda_zona_horaria.trim()) nuevaConfig.agenda_zona_horaria = agenda_zona_horaria.trim();
+    if (Number.isFinite(Number(agenda_duracion_minutos)) && Number(agenda_duracion_minutos) > 0) nuevaConfig.agenda_duracion_minutos = Math.floor(Number(agenda_duracion_minutos));
+    if (Number.isFinite(Number(agenda_dias_hacia_adelante)) && Number(agenda_dias_hacia_adelante) > 0) nuevaConfig.agenda_dias_hacia_adelante = Math.floor(Number(agenda_dias_hacia_adelante));
+    if (Number.isFinite(Number(agenda_aviso_minimo_horas)) && Number(agenda_aviso_minimo_horas) >= 0) nuevaConfig.agenda_aviso_minimo_horas = Number(agenda_aviso_minimo_horas);
+
+    if (agenda_horario_semanal && typeof agenda_horario_semanal === "object") {
+      const horarioValido = {};
+      for (const dia of DIAS_SEMANA_CLAVE) {
+        const d = agenda_horario_semanal[dia];
+        if (d && typeof d === "object" && /^\d{2}:\d{2}$/.test(d.desde || "") && /^\d{2}:\d{2}$/.test(d.hasta || "")) {
+          horarioValido[dia] = { activo: Boolean(d.activo), desde: d.desde, hasta: d.hasta };
+        }
+      }
+      // Solo se guarda si TODOS los 7 días llegaron bien formados — evita
+      // guardar un horario a medias por un error de formato puntual.
+      if (Object.keys(horarioValido).length === DIAS_SEMANA_CLAVE.length) nuevaConfig.agenda_horario_semanal = horarioValido;
+    }
+
+    if (agenda_pregunta_presupuesto && typeof agenda_pregunta_presupuesto === "object" && Array.isArray(agenda_pregunta_presupuesto.opciones)) {
+      nuevaConfig.agenda_pregunta_presupuesto = {
+        texto: String(agenda_pregunta_presupuesto.texto || "").trim(),
+        opciones: agenda_pregunta_presupuesto.opciones
+          .map(o => ({ texto: String(o?.texto || "").trim(), descalifica: Boolean(o?.descalifica) }))
+          .filter(o => o.texto)
+      };
+    }
+    if (typeof agenda_mensaje_no_califica === "string") nuevaConfig.agenda_mensaje_no_califica = agenda_mensaje_no_califica.trim();
+    if (typeof agenda_enlace_no_califica === "string") nuevaConfig.agenda_enlace_no_califica = agenda_enlace_no_califica.trim();
+    if (typeof agenda_nombre === "string") nuevaConfig.agenda_nombre = agenda_nombre.trim();
+    if (typeof agenda_titulo === "string") nuevaConfig.agenda_titulo = agenda_titulo.trim();
+    if (typeof agenda_foto_url === "string") nuevaConfig.agenda_foto_url = agenda_foto_url.trim();
+    if (typeof agenda_titulo_evento === "string") nuevaConfig.agenda_titulo_evento = agenda_titulo_evento.trim();
+    if (typeof agenda_texto_oferta === "string") nuevaConfig.agenda_texto_oferta = agenda_texto_oferta.trim();
+    if (typeof agenda_whatsapp_link === "string") nuevaConfig.agenda_whatsapp_link = agenda_whatsapp_link.trim();
+
+    if (Array.isArray(agenda_preguntas_extra)) {
+      nuevaConfig.agenda_preguntas_extra = agenda_preguntas_extra
+        .map((p, i) => ({
+          id: String(p?.id || `extra_${i}`),
+          texto: String(p?.texto || "").trim(),
+          tipo: p?.tipo === "opciones" ? "opciones" : "texto",
+          opciones: Array.isArray(p?.opciones) ? p.opciones.map(o => String(o || "").trim()).filter(Boolean) : [],
+          obligatoria: Boolean(p?.obligatoria)
+        }))
+        .filter(p => p.texto);
+    }
 
     // Descarta transiciones (generales o por etapa) que apunten a una etapa
     // que ya no existe en el guardado actual.
@@ -6631,17 +6753,50 @@ ${estilosBase()}
   }
   .btn-eliminar:hover{ background:rgba(255,93,93,.18); }
   .sin-cuenta{ color:var(--muted); font-size:15px; padding:8px 2px; }
-  .pasos-siguientes{ margin-top:22px; }
-  .paso-futuro{
-    display:flex; align-items:flex-start; gap:12px; padding:14px 16px; background:var(--surface-3);
-    border:1px dashed var(--border); border-radius:12px; margin-bottom:10px; opacity:.6;
+
+  select{
+    width:100%; background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:10px; padding:12px 14px; font-family:var(--body); font-size:15.5px; outline:none;
   }
-  .paso-futuro .num{
-    width:24px; height:24px; border-radius:50%; background:var(--surface-2); display:flex;
-    align-items:center; justify-content:center; font-size:12px; font-family:var(--mono); flex-shrink:0;
+  select:focus{ border-color:var(--green); }
+
+  .dia-fila{
+    display:flex; align-items:center; gap:14px; padding:11px 0; border-bottom:1px solid var(--border);
   }
-  .paso-futuro .txt{ font-size:13.5px; line-height:1.5; }
-  .paso-futuro .txt b{ display:block; margin-bottom:2px; color:var(--text); }
+  .dia-fila:last-child{ border-bottom:none; }
+  .dia-fila label.chk{ display:flex; align-items:center; gap:9px; width:130px; flex-shrink:0; margin:0; color:var(--text); font-weight:600; cursor:pointer; }
+  .dia-fila input[type=checkbox]{ width:17px; height:17px; accent-color:var(--green); cursor:pointer; flex-shrink:0; }
+  .dia-fila .horas{ display:flex; align-items:center; gap:8px; flex:1; }
+  .dia-fila input[type=time]{
+    background:var(--surface-3); border:1px solid var(--border); color:var(--text); border-radius:8px;
+    padding:9px 10px; font-family:var(--body); font-size:14.5px; outline:none;
+  }
+  .dia-fila input[type=time]:focus{ border-color:var(--green); }
+  .dia-fila.inactivo .horas{ opacity:.35; pointer-events:none; }
+
+  .opcion-fila{ display:flex; align-items:center; gap:10px; margin-bottom:9px; }
+  .opcion-fila input[type=text]{ flex:1; }
+  .opcion-fila label.chk-mini{ display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--muted); white-space:nowrap; margin:0; cursor:pointer; flex-shrink:0; }
+  .opcion-fila input[type=checkbox]{ width:16px; height:16px; accent-color:var(--red); cursor:pointer; }
+  .opcion-fila .quitar-x{ background:none; border:none; color:var(--muted); font-size:18px; cursor:pointer; flex-shrink:0; line-height:1; padding:0 4px; }
+  .opcion-fila .quitar-x:hover{ color:var(--red); }
+
+  .pregunta-extra-card{
+    border:1px solid var(--border); border-radius:11px; padding:16px; margin-bottom:12px; background:rgba(255,255,255,.015);
+  }
+  .pregunta-extra-card .fila-tipo{ display:flex; gap:10px; align-items:flex-end; margin-top:12px; }
+  .pregunta-extra-card .fila-tipo > div{ flex:1; }
+  .pregunta-extra-card label.chk{ display:flex; align-items:center; gap:8px; margin:12px 0 0; color:var(--text); font-weight:500; font-size:14px; cursor:pointer; }
+  .pregunta-extra-card input[type=checkbox]{ width:16px; height:16px; accent-color:var(--green); cursor:pointer; }
+  .pregunta-extra-card .opciones-sub{ margin-top:12px; padding-left:2px; }
+
+  .btn-guardar-agenda{
+    font-family:var(--display); font-weight:600; font-size:15px; border:none; border-radius:11px;
+    padding:14px 22px; cursor:pointer; color:#04140D; background:linear-gradient(90deg, #31D97C, #34C9E8);
+    margin-top:6px;
+  }
+  .btn-guardar-agenda:hover{ filter:brightness(1.06); }
+  .mensaje-guardado{ font-size:13.5px; margin-top:12px; min-height:18px; }
 </style>
 </head>
 <body>
@@ -6660,20 +6815,72 @@ ${estilosBase()}
     <div class="card">
       <p class="cuentas-titulo">Paso 1</p>
       <p class="cuentas-subtitulo">Vincula tu cuenta de Gmail</p>
-      <p style="color:var(--muted); font-size:13.5px; margin:-8px 0 16px; line-height:1.6;">Es la cuenta de Google donde está el calendario que quieres usar para las llamadas — el sistema va a consultar tu disponibilidad real ahí, y va a crear el evento automáticamente cuando alguien agende.</p>
+      <p class="hint" style="margin-top:-8px;">Es la cuenta de Google donde está el calendario que quieres usar para las llamadas — el sistema va a consultar tu disponibilidad real ahí, y va a crear el evento automáticamente cuando alguien agende.</p>
       <div id="cuentaGoogleActual"><p class="sin-cuenta">Cargando…</p></div>
     </div>
 
-    <div class="pasos-siguientes">
-      <div class="paso-futuro">
-        <span class="num">2</span>
-        <span class="txt"><b>Configurar la pregunta de calificación</b>La pregunta y las opciones que decide quién ve el calendario y quién no — próximamente aquí mismo.</span>
-      </div>
-      <div class="paso-futuro">
-        <span class="num">3</span>
-        <span class="txt"><b>Personalizar la página pública</b>Textos, horarios disponibles, duración de la llamada, zona horaria — próximamente aquí mismo.</span>
-      </div>
+    <div class="card">
+      <p class="cuentas-titulo">Paso 2</p>
+      <p class="cuentas-subtitulo">Horario disponible</p>
+      <p class="hint" style="margin-top:-8px;">Marca los días en que sí trabajas, y el rango de horas de cada uno — son los únicos horarios que se le van a ofrecer a los leads (siempre cruzados contra lo que ya tengas ocupado en tu calendario real).</p>
+      <div id="horarioSemanalCont"></div>
     </div>
+
+    <div class="card">
+      <p class="cuentas-titulo">Paso 3</p>
+      <p class="cuentas-subtitulo">Configuración general</p>
+      <div class="row2">
+        <div><label>Duración de la llamada (minutos)</label><input type="number" id="inputDuracion" min="5" step="5"></div>
+        <div><label>Días hacia adelante a mostrar</label><input type="number" id="inputDiasAdelante" min="1"></div>
+      </div>
+      <div class="row2" style="margin-top:14px;">
+        <div><label>Aviso mínimo antes de la llamada (horas)</label><input type="number" id="inputAvisoMinimo" min="0" step="0.5"></div>
+        <div><label>Zona horaria de tu negocio</label><input type="text" id="inputZonaNegocio" placeholder="America/Mexico_City"></div>
+      </div>
+      <p class="hint" style="margin:10px 0 0;">La zona horaria de tu negocio se usa para calcular tu horario de trabajo — cada visitante de la página ve los horarios convertidos a la suya propia automáticamente.</p>
+    </div>
+
+    <div class="card">
+      <p class="cuentas-titulo">Paso 4</p>
+      <p class="cuentas-subtitulo">Personalización de la página pública</p>
+      <div class="row2">
+        <div><label>Tu nombre</label><input type="text" id="inputAgendaNombre"></div>
+        <div><label>Tu título</label><input type="text" id="inputAgendaTitulo"></div>
+      </div>
+      <label style="margin-top:14px;">URL de tu foto (opcional — si la dejas vacía, se muestra tu inicial)</label>
+      <input type="text" id="inputAgendaFoto" placeholder="https://...">
+      <label style="margin-top:14px;">Título del evento</label>
+      <input type="text" id="inputAgendaTituloEvento">
+      <label style="margin-top:14px;">Frase de oferta (al final del panel izquierdo)</label>
+      <input type="text" id="inputAgendaOferta">
+      <label style="margin-top:14px;">Enlace de WhatsApp (opcional — si lo llenas, aparece el aviso "si no encuentras un horario libre")</label>
+      <input type="text" id="inputAgendaWhatsapp" placeholder="https://wa.me/...">
+    </div>
+
+    <div class="card">
+      <p class="cuentas-titulo">Paso 5</p>
+      <p class="cuentas-subtitulo">Pregunta de calificación</p>
+      <p class="hint" style="margin-top:-8px;">Esta es la pregunta que decide quién ve el calendario y quién no — marca la casilla roja en la opción (u opciones) que deben quedar descalificadas.</p>
+      <label>Texto de la pregunta</label>
+      <input type="text" id="inputPreguntaTexto">
+      <div id="opcionesPreguntaCont" style="margin-top:14px;"></div>
+      <button type="button" class="add-paso" id="btnAgregarOpcion">+ Agregar opción</button>
+      <label style="margin-top:18px;">Mensaje para quien NO califica</label>
+      <textarea id="inputMensajeNoCalifica"></textarea>
+      <label style="margin-top:14px;">Enlace de un recurso para quien no califica (opcional — aparece como botón)</label>
+      <input type="text" id="inputEnlaceNoCalifica">
+    </div>
+
+    <div class="card">
+      <p class="cuentas-titulo">Paso 6</p>
+      <p class="cuentas-subtitulo">Preguntas adicionales del formulario</p>
+      <p class="hint" style="margin-top:-8px;">Aparte de la pregunta de calificación — estas NO bloquean el acceso al calendario, solo recolectan información extra del lead junto con la reserva.</p>
+      <div id="preguntasExtraCont"></div>
+      <button type="button" class="add-paso" id="btnAgregarPreguntaExtra">+ Agregar pregunta</button>
+    </div>
+
+    <button type="button" class="btn-guardar-agenda" id="btnGuardarAgenda">Guardar cambios</button>
+    <p class="mensaje-guardado" id="mensajeGuardado"></p>
   </div>
   </div>
   </div>
@@ -6741,7 +6948,221 @@ ${estilosBase()}
     });
   }
 
+  // --- Estado de todo lo demás (se lee del backend una vez, se edita en
+  // memoria, y se manda todo junto al guardar) ---
+  const DIAS = [
+    { clave: "lunes", nombre: "Lunes" }, { clave: "martes", nombre: "Martes" },
+    { clave: "miercoles", nombre: "Miércoles" }, { clave: "jueves", nombre: "Jueves" },
+    { clave: "viernes", nombre: "Viernes" }, { clave: "sabado", nombre: "Sábado" },
+    { clave: "domingo", nombre: "Domingo" }
+  ];
+  let horarioSemanal = {};
+  let opcionesPregunta = [];
+  let preguntasExtra = [];
+
+  function renderHorarioSemanal(){
+    const cont = document.getElementById("horarioSemanalCont");
+    cont.innerHTML = DIAS.map(d => {
+      const cfg = horarioSemanal[d.clave] || { activo: false, desde: "09:00", hasta: "17:00" };
+      return \`
+        <div class="dia-fila \${cfg.activo ? "" : "inactivo"}" data-dia="\${d.clave}">
+          <label class="chk"><input type="checkbox" class="chk-dia-activo" \${cfg.activo ? "checked" : ""}> \${d.nombre}</label>
+          <div class="horas">
+            <input type="time" class="input-desde" value="\${cfg.desde}">
+            <span style="color:var(--muted);">a</span>
+            <input type="time" class="input-hasta" value="\${cfg.hasta}">
+          </div>
+        </div>
+      \`;
+    }).join("");
+    cont.querySelectorAll(".chk-dia-activo").forEach(chk => {
+      chk.addEventListener("change", () => {
+        chk.closest(".dia-fila").classList.toggle("inactivo", !chk.checked);
+      });
+    });
+  }
+
+  function leerHorarioSemanalDelDOM(){
+    const resultado = {};
+    document.querySelectorAll("#horarioSemanalCont .dia-fila").forEach(fila => {
+      resultado[fila.dataset.dia] = {
+        activo: fila.querySelector(".chk-dia-activo").checked,
+        desde: fila.querySelector(".input-desde").value || "09:00",
+        hasta: fila.querySelector(".input-hasta").value || "17:00"
+      };
+    });
+    return resultado;
+  }
+
+  function renderOpcionesPregunta(){
+    const cont = document.getElementById("opcionesPreguntaCont");
+    cont.innerHTML = opcionesPregunta.map((op, i) => \`
+      <div class="opcion-fila" data-i="\${i}">
+        <input type="text" class="input-opcion-texto" value="\${(op.texto || "").replace(/"/g,"&quot;")}" placeholder="Texto de la opción">
+        <label class="chk-mini"><input type="checkbox" class="chk-opcion-descalifica" \${op.descalifica ? "checked" : ""}> Descalifica</label>
+        <button type="button" class="quitar-x" title="Quitar esta opción">✕</button>
+      </div>
+    \`).join("");
+    cont.querySelectorAll(".quitar-x").forEach(btn => {
+      btn.addEventListener("click", () => {
+        leerOpcionesPreguntaDelDOM();
+        opcionesPregunta.splice(Number(btn.closest(".opcion-fila").dataset.i), 1);
+        renderOpcionesPregunta();
+      });
+    });
+  }
+
+  function leerOpcionesPreguntaDelDOM(){
+    opcionesPregunta = Array.from(document.querySelectorAll("#opcionesPreguntaCont .opcion-fila")).map(fila => ({
+      texto: fila.querySelector(".input-opcion-texto").value.trim(),
+      descalifica: fila.querySelector(".chk-opcion-descalifica").checked
+    }));
+  }
+
+  document.getElementById("btnAgregarOpcion").addEventListener("click", () => {
+    leerOpcionesPreguntaDelDOM();
+    opcionesPregunta.push({ texto: "", descalifica: false });
+    renderOpcionesPregunta();
+  });
+
+  function renderPreguntasExtra(){
+    const cont = document.getElementById("preguntasExtraCont");
+    if(preguntasExtra.length === 0){
+      cont.innerHTML = '<p class="hint" style="margin:0 0 12px;">Todavía no agregaste ninguna pregunta adicional.</p>';
+      return;
+    }
+    cont.innerHTML = preguntasExtra.map((p, i) => \`
+      <div class="pregunta-extra-card" data-i="\${i}">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+          <span style="font-family:var(--mono); font-size:12px; color:var(--green);">Pregunta \${i + 1}</span>
+          <button type="button" class="quitar" data-i="\${i}">quitar</button>
+        </div>
+        <label style="margin-top:10px;">Texto de la pregunta</label>
+        <input type="text" class="input-pe-texto" value="\${(p.texto || "").replace(/"/g,"&quot;")}">
+        <div class="fila-tipo">
+          <div>
+            <label>Tipo de respuesta</label>
+            <select class="input-pe-tipo">
+              <option value="texto" \${p.tipo === "texto" ? "selected" : ""}>Texto libre</option>
+              <option value="opciones" \${p.tipo === "opciones" ? "selected" : ""}>Opción múltiple</option>
+            </select>
+          </div>
+        </div>
+        <div class="opciones-sub \${p.tipo === "opciones" ? "" : "oculto"}">
+          <label>Opciones (una por línea)</label>
+          <textarea class="input-pe-opciones" style="min-height:70px;">\${(p.opciones || []).join("\\n")}</textarea>
+        </div>
+        <label class="chk"><input type="checkbox" class="chk-pe-obligatoria" \${p.obligatoria ? "checked" : ""}> Obligatoria (no deja agendar si no se responde)</label>
+      </div>
+    \`).join("");
+
+    cont.querySelectorAll(".quitar").forEach(btn => {
+      btn.addEventListener("click", () => {
+        leerPreguntasExtraDelDOM();
+        preguntasExtra.splice(Number(btn.dataset.i), 1);
+        renderPreguntasExtra();
+      });
+    });
+    cont.querySelectorAll(".input-pe-tipo").forEach(sel => {
+      sel.addEventListener("change", () => {
+        const subOpciones = sel.closest(".pregunta-extra-card").querySelector(".opciones-sub");
+        subOpciones.classList.toggle("oculto", sel.value !== "opciones");
+      });
+    });
+  }
+
+  function leerPreguntasExtraDelDOM(){
+    preguntasExtra = Array.from(document.querySelectorAll("#preguntasExtraCont .pregunta-extra-card")).map((card, i) => {
+      const existente = preguntasExtra[Number(card.dataset.i)] || {};
+      return {
+        id: existente.id || ("extra_" + Date.now() + "_" + i),
+        texto: card.querySelector(".input-pe-texto").value.trim(),
+        tipo: card.querySelector(".input-pe-tipo").value,
+        opciones: card.querySelector(".input-pe-opciones").value.split("\\n").map(s => s.trim()).filter(Boolean),
+        obligatoria: card.querySelector(".chk-pe-obligatoria").checked
+      };
+    });
+  }
+
+  document.getElementById("btnAgregarPreguntaExtra").addEventListener("click", () => {
+    leerPreguntasExtraDelDOM();
+    preguntasExtra.push({ id: "extra_" + Date.now(), texto: "", tipo: "texto", opciones: [], obligatoria: false });
+    renderPreguntasExtra();
+  });
+
+  async function cargarConfigAgenda(){
+    const cfg = await llamarGET("/config");
+    if(!cfg) return;
+
+    horarioSemanal = cfg.agenda_horario_semanal || {};
+    renderHorarioSemanal();
+
+    document.getElementById("inputDuracion").value = cfg.agenda_duracion_minutos || 30;
+    document.getElementById("inputDiasAdelante").value = cfg.agenda_dias_hacia_adelante || 14;
+    document.getElementById("inputAvisoMinimo").value = cfg.agenda_aviso_minimo_horas ?? 2;
+    document.getElementById("inputZonaNegocio").value = cfg.agenda_zona_horaria || "America/Mexico_City";
+
+    document.getElementById("inputAgendaNombre").value = cfg.agenda_nombre || "";
+    document.getElementById("inputAgendaTitulo").value = cfg.agenda_titulo || "";
+    document.getElementById("inputAgendaFoto").value = cfg.agenda_foto_url || "";
+    document.getElementById("inputAgendaTituloEvento").value = cfg.agenda_titulo_evento || "";
+    document.getElementById("inputAgendaOferta").value = cfg.agenda_texto_oferta || "";
+    document.getElementById("inputAgendaWhatsapp").value = cfg.agenda_whatsapp_link || "";
+
+    const p = cfg.agenda_pregunta_presupuesto || { texto: "", opciones: [] };
+    document.getElementById("inputPreguntaTexto").value = p.texto || "";
+    opcionesPregunta = Array.isArray(p.opciones) ? p.opciones : [];
+    renderOpcionesPregunta();
+
+    document.getElementById("inputMensajeNoCalifica").value = cfg.agenda_mensaje_no_califica || "";
+    document.getElementById("inputEnlaceNoCalifica").value = cfg.agenda_enlace_no_califica || "";
+
+    preguntasExtra = Array.isArray(cfg.agenda_preguntas_extra) ? cfg.agenda_preguntas_extra : [];
+    renderPreguntasExtra();
+  }
+
+  document.getElementById("btnGuardarAgenda").addEventListener("click", async () => {
+    leerOpcionesPreguntaDelDOM();
+    leerPreguntasExtraDelDOM();
+    const btn = document.getElementById("btnGuardarAgenda");
+    const msg = document.getElementById("mensajeGuardado");
+    btn.disabled = true;
+    btn.textContent = "Guardando...";
+
+    const data = await llamarPOST("/config", {
+      agenda_horario_semanal: leerHorarioSemanalDelDOM(),
+      agenda_duracion_minutos: Number(document.getElementById("inputDuracion").value) || 30,
+      agenda_dias_hacia_adelante: Number(document.getElementById("inputDiasAdelante").value) || 14,
+      agenda_aviso_minimo_horas: Number(document.getElementById("inputAvisoMinimo").value) || 0,
+      agenda_zona_horaria: document.getElementById("inputZonaNegocio").value.trim() || "America/Mexico_City",
+      agenda_nombre: document.getElementById("inputAgendaNombre").value.trim(),
+      agenda_titulo: document.getElementById("inputAgendaTitulo").value.trim(),
+      agenda_foto_url: document.getElementById("inputAgendaFoto").value.trim(),
+      agenda_titulo_evento: document.getElementById("inputAgendaTituloEvento").value.trim(),
+      agenda_texto_oferta: document.getElementById("inputAgendaOferta").value.trim(),
+      agenda_whatsapp_link: document.getElementById("inputAgendaWhatsapp").value.trim(),
+      agenda_pregunta_presupuesto: {
+        texto: document.getElementById("inputPreguntaTexto").value.trim(),
+        opciones: opcionesPregunta
+      },
+      agenda_mensaje_no_califica: document.getElementById("inputMensajeNoCalifica").value.trim(),
+      agenda_enlace_no_califica: document.getElementById("inputEnlaceNoCalifica").value.trim(),
+      agenda_preguntas_extra: preguntasExtra
+    });
+
+    btn.disabled = false;
+    btn.textContent = "Guardar cambios";
+    if(data && data.mensaje){
+      msg.textContent = "✅ Cambios guardados correctamente.";
+      msg.style.color = "var(--green)";
+    } else {
+      msg.textContent = "❌ " + (data?.error || "No se pudo guardar, intenta de nuevo.");
+      msg.style.color = "var(--red)";
+    }
+  });
+
   cargarCuentaGoogle();
+  cargarConfigAgenda();
 </script>
 </body>
 </html>
