@@ -10615,10 +10615,10 @@ ${estilosBase()}
       ? conversacionesFiltradas().length
       : totalSeguimiento;
     // Mismo criterio para Enlace Enviado: si el checkbox de "excluir
-    // quienes ya agendaron" está activo, el número de la pestaña también
-    // debe reflejar esa exclusión, no el total sin filtrar.
+    // quienes ya agendaron" o el filtro de días está activo, el número de
+    // la pestaña también debe reflejar esa exclusión, no el total sin filtrar.
     const excluirAgendoActivo = document.getElementById("filtroExcluirAgendo").checked;
-    const totalEnlaceMostrado = (filtroActual === "enlace" && excluirAgendoActivo)
+    const totalEnlaceMostrado = (filtroActual === "enlace" && (excluirAgendoActivo || diasSeguimientoActivo))
       ? conversacionesFiltradas().length
       : totalEnlace;
     document.getElementById("countTodas").textContent = conversaciones.length;
@@ -10659,11 +10659,11 @@ ${estilosBase()}
     wrap.style.display = "inline-block";
 
     let href = "/exportar/leads.csv?filtro=" + encodeURIComponent(filtroActual);
-    // Si estás en Seguimiento y elegiste un umbral de antigüedad (ej. "hace
-    // 3+ días"), se manda también aquí — así el Excel/CSV descargado
-    // respeta exactamente la misma selección que estás viendo en pantalla,
-    // no todo el listado de seguimiento completo.
-    if(filtroActual === "seguimiento"){
+    // Si estás en Seguimiento o en Enlace Enviado y elegiste un umbral de
+    // antigüedad (ej. "hace 3+ días"), se manda también aquí — así el
+    // Excel/CSV descargado respeta exactamente la misma selección que
+    // estás viendo en pantalla.
+    if(filtroActual === "seguimiento" || filtroActual === "enlace"){
       const dias = document.getElementById("filtroDiasSeguimiento").value;
       if(dias) href += "&dias=" + encodeURIComponent(dias);
     }
@@ -10687,6 +10687,17 @@ ${estilosBase()}
     if(filtroActual === "enlace") {
       let base = conversaciones.filter(c => c.enlace_enviado);
       if(document.getElementById("filtroExcluirAgendo").checked) base = base.filter(c => !c.agendo);
+
+      // Mismo filtro opcional de antigüedad que en Seguimiento: solo
+      // mostrar a quienes el ÚLTIMO mensaje que les mandó EL BOT tiene al
+      // menos esta antigüedad — para no repetirle un seguimiento a
+      // alguien al que ya le escribiste hace poco.
+      const diasMinimos = document.getElementById("filtroDiasSeguimiento").value;
+      if(diasMinimos){
+        const limiteMs = Date.now() - (Number(diasMinimos) * 24 * 60 * 60 * 1000);
+        base = base.filter(c => c.ultimo_mensaje_bot_en && new Date(c.ultimo_mensaje_bot_en).getTime() <= limiteMs);
+      }
+
       return base;
     }
     // "Seguimiento pendiente": todos los que salieron de la ventana de 24h
@@ -11535,12 +11546,13 @@ ${estilosBase()}
     else detenerYEnviarGrabacion();
   });
 
-  // El selector de "antigüedad del último mensaje del bot" solo tiene
-  // sentido dentro de la pestaña de Seguimiento — se muestra solo ahí.
+  // El selector de "antigüedad del último mensaje del bot" tiene sentido
+  // tanto en Seguimiento como en Enlace Enviado (para decidir a quién
+  // seguirle, según hace cuánto no se le escribe) — se muestra en ambas.
   // El checkbox de "excluir quienes ya agendaron" solo tiene sentido
   // dentro de la pestaña de Enlace Enviado.
   function actualizarVisibilidadFiltroDias(){
-    document.getElementById("filtroDiasSeguimiento").style.display = (filtroActual === "seguimiento") ? "" : "none";
+    document.getElementById("filtroDiasSeguimiento").style.display = (filtroActual === "seguimiento" || filtroActual === "enlace") ? "" : "none";
     document.getElementById("filtroExcluirAgendoWrap").style.display = (filtroActual === "enlace") ? "flex" : "none";
   }
 
@@ -12192,6 +12204,14 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
       // (para hacer seguimiento solo a quienes aún no han agendado su
       // llamada), se aplica aquí también.
       if (excluirAgendo) filtradas = filtradas.filter(c => !c.agendo);
+
+      // Mismo filtro opcional de antigüedad que en Seguimiento: solo
+      // exportar a quienes el último mensaje que les mandó el bot tiene
+      // al menos esta antigüedad.
+      if (Number.isFinite(diasMinimos) && diasMinimos > 0) {
+        const limiteMs = Date.now() - (diasMinimos * 24 * 60 * 60 * 1000);
+        filtradas = filtradas.filter(c => c.ultimo_mensaje_bot_en && new Date(c.ultimo_mensaje_bot_en).getTime() <= limiteMs);
+      }
     }
     else if (filtro === "handoff") filtradas = filtradas.filter(c => !c.en_ventana_24h);
     else if (filtro === "seguimiento") {
@@ -12261,7 +12281,8 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
       todas: "todos_los_leads", califica: "califican", nocalifica: "no_califican",
       agendo: "agendaron", enlace: "enlace_enviado", handoff: "handoff", seguimiento: "seguimiento_pendiente"
     };
-    const nombreArchivo = (nombresArchivo[filtro] || "leads") + (excluirAgendo ? "_sin_agendar" : "");
+    const sufijoDias = (Number.isFinite(diasMinimos) && diasMinimos > 0) ? `_hace_${diasMinimos}d` : "";
+    const nombreArchivo = (nombresArchivo[filtro] || "leads") + (excluirAgendo ? "_sin_agendar" : "") + sufijoDias;
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}_${fechaArchivo}.csv"`);
