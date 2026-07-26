@@ -4572,6 +4572,7 @@ app.get("/agendar", (req, res) => {
     background:var(--accent); color:#fff; border:none; border-radius:9px;
     padding:13px 18px; font-size:14.5px; font-weight:700; cursor:pointer; margin-top:10px;
   }
+  #contenedorPreguntas{ margin-bottom:30px; }
   button:disabled{ opacity:.5; cursor:not-allowed; }
   button.secundario{ background:transparent; color:var(--text); border:1px solid var(--border); }
   button.ancho{ width:100%; }
@@ -4970,7 +4971,7 @@ app.get("/agendar", (req, res) => {
     document.getElementById("perfilTitulo").textContent = perfil.titulo || "";
     document.getElementById("perfilTituloEvento").textContent = perfil.titulo_evento || "Agenda tu llamada";
     document.getElementById("perfilDuracion").textContent = (perfil.duracion_minutos || 30) + " min";
-    document.getElementById("perfilOferta").textContent = perfil.texto_oferta || "";
+    document.getElementById("perfilOferta").innerHTML = perfil.texto_oferta || "";
     if(perfil.foto_url){
       document.getElementById("perfilFoto").outerHTML = \`<img class="perfil-foto" id="perfilFoto" src="\${perfil.foto_url}" alt="">\`;
     } else {
@@ -5263,7 +5264,7 @@ app.get("/agendar", (req, res) => {
     });
     if(preguntaDescalificante){
       document.getElementById("pasoFormulario").classList.add("oculto");
-      document.getElementById("textoNoCalifica").textContent = datosFormulario.mensaje_no_califica;
+      document.getElementById("textoNoCalifica").innerHTML = datosFormulario.mensaje_no_califica;
       if(datosFormulario.enlace_no_califica){
         const boton = document.getElementById("botonRecursoNoCalifica");
         boton.href = datosFormulario.enlace_no_califica;
@@ -6729,6 +6730,52 @@ app.post("/fotos/eliminar", requireAdminKey, async (req, res) => {
   }
 });
 
+// Foto de perfil que se muestra en el panel izquierdo de /agendar — sube
+// directo el archivo (en vez de tener que pegar una URL externa),
+// reutilizando el mismo bucket "fotos" de Supabase Storage.
+app.post("/calendario/foto", requireAdminKey, async (req, res) => {
+  try {
+    const { base64, tipo } = req.body || {};
+    if (!base64) return res.status(400).json({ error: "Falta el archivo de imagen." });
+
+    const extension = (tipo && tipo.includes("/")) ? tipo.split("/")[1].split(";")[0] : "jpg";
+    const rutaArchivo = `agenda_perfil_${Date.now()}.${extension}`;
+    const buffer = Buffer.from(base64, "base64");
+
+    if (buffer.length > 15 * 1024 * 1024) {
+      return res.status(400).json({ error: "La imagen pesa más de 15MB, prueba con un archivo más liviano." });
+    }
+
+    const { error: errorSubida } = await supabase.storage
+      .from("fotos")
+      .upload(rutaArchivo, buffer, { contentType: tipo || "image/jpeg", upsert: true });
+
+    if (errorSubida) {
+      console.error("❌ Error subiendo foto de perfil de agenda:", errorSubida.message);
+      return res.status(500).json({ error: "No se pudo subir la foto: " + errorSubida.message });
+    }
+
+    const { data: urlData } = supabase.storage.from("fotos").getPublicUrl(rutaArchivo);
+
+    // Se borra la foto de perfil anterior del storage, si había una y era
+    // de este mismo mecanismo (para no dejar basura acumulada) — se
+    // reconoce por el prefijo del nombre de archivo.
+    const fotoAnteriorUrl = configActual.agenda_foto_url || "";
+    const coincideAnterior = fotoAnteriorUrl.match(/agenda_perfil_\d+\.\w+$/);
+    if (coincideAnterior) {
+      await supabase.storage.from("fotos").remove([coincideAnterior[0]]);
+    }
+
+    await guardarConfigDB({ agenda_foto_url: urlData.publicUrl });
+
+    res.json({ mensaje: "✅ Foto subida", url: urlData.publicUrl });
+  } catch (err) {
+    console.error("❌ Error inesperado subiendo foto de perfil de agenda:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // ---------------------------------------------------------------
 // /cuentas — conectar cuentas de Instagram y ver estado del token
 // ---------------------------------------------------------------
@@ -7091,6 +7138,43 @@ ${estilosBase()}
   .pregunta-card .opciones-editor{ margin-top:12px; }
   .add-opcion-mini{ padding:9px !important; font-size:13px !important; }
 
+  .foto-perfil-cont{ display:flex; align-items:center; gap:16px; }
+  .foto-perfil-preview{
+    width:64px; height:64px; border-radius:50%; object-fit:cover; background:var(--surface-3);
+    border:1px solid var(--border); display:flex; align-items:center; justify-content:center;
+    font-size:22px; color:var(--muted); flex-shrink:0;
+  }
+  .foto-perfil-botones{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .btn-subir-foto{
+    background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:9px; padding:9px 14px; font-size:13.5px; font-weight:600; cursor:pointer;
+  }
+  .btn-subir-foto:hover{ background:var(--surface-2); }
+  .foto-perfil-estado{ font-size:12.5px; color:var(--muted); }
+
+  .rte-shell{ border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+  .rte-toolbar{
+    display:flex; align-items:center; gap:4px; padding:7px 8px; background:var(--surface-3);
+    border-bottom:1px solid var(--border); flex-wrap:wrap;
+  }
+  .rte-btn{
+    background:transparent; border:1px solid transparent; color:var(--text); border-radius:6px;
+    width:30px; height:30px; padding:0; margin:0; font-size:14px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .rte-btn:hover{ background:var(--surface-2); border-color:var(--border); }
+  .rte-btn.activo{ background:rgba(49,217,124,.15); border-color:rgba(49,217,124,.35); color:var(--green); }
+  .rte-sep{ width:1px; height:20px; background:var(--border); margin:0 4px; }
+  .rte-toolbar select{
+    background:var(--surface-2); border:1px solid var(--border); color:var(--text); border-radius:6px;
+    padding:5px 6px; font-size:12.5px; font-family:inherit; height:30px;
+  }
+  .rte-editable{
+    min-height:90px; padding:12px 13px; font-size:14.5px; color:var(--text); outline:none; line-height:1.5;
+  }
+  .rte-editable a{ color:var(--green); }
+  .rte-editable:empty::before{ content: attr(data-placeholder); color:var(--muted); }
+
   .btn-guardar-agenda{
     font-family:var(--display); font-weight:600; font-size:15px; border:none; border-radius:11px;
     padding:14px 22px; cursor:pointer; color:#04140D; background:linear-gradient(90deg, #31D97C, #34C9E8);
@@ -7148,12 +7232,19 @@ ${estilosBase()}
         <div><label>Tu nombre</label><input type="text" id="inputAgendaNombre"></div>
         <div><label>Tu título</label><input type="text" id="inputAgendaTitulo"></div>
       </div>
-      <label style="margin-top:14px;">URL de tu foto (opcional — si la dejas vacía, se muestra tu inicial)</label>
-      <input type="text" id="inputAgendaFoto" placeholder="https://...">
+      <label style="margin-top:14px;">Tu foto (opcional — si no subes ninguna, se muestra tu inicial)</label>
+      <div class="foto-perfil-cont">
+        <div class="foto-perfil-preview" id="fotoPerfilPreview">?</div>
+        <div class="foto-perfil-botones">
+          <input type="file" id="inputFotoPerfilArchivo" accept="image/*" style="display:none;">
+          <button type="button" class="btn-subir-foto" id="btnSubirFotoPerfil">Subir foto</button>
+          <span class="foto-perfil-estado" id="fotoPerfilEstado"></span>
+        </div>
+      </div>
       <label style="margin-top:14px;">Título del evento</label>
       <input type="text" id="inputAgendaTituloEvento">
       <label style="margin-top:14px;">Frase de oferta (al final del panel izquierdo)</label>
-      <input type="text" id="inputAgendaOferta">
+      <div class="rte-shell" id="rteOferta"></div>
       <label style="margin-top:14px;">Enlace de WhatsApp (opcional — si lo llenas, aparece el aviso "si no encuentras un horario libre")</label>
       <input type="text" id="inputAgendaWhatsapp" placeholder="https://wa.me/...">
     </div>
@@ -7174,7 +7265,8 @@ ${estilosBase()}
           <button type="button" class="add-paso" id="btnAgregarPregunta">+ Agregar pregunta</button>
 
           <label style="margin-top:22px;">Mensaje para quien NO califica</label>
-          <textarea id="inputMensajeNoCalifica"></textarea>
+          <div class="rte-shell" id="rteNoCalifica"></div>
+          <p class="hint" style="margin:6px 0 0;">Puedes agregar un enlace real aquí (por ejemplo, a tu comunidad de WhatsApp) con el botón 🔗 — va a funcionar como un enlace de verdad en la página pública.</p>
           <label style="margin-top:14px;">Enlace de un recurso para quien no califica (opcional — aparece como botón)</label>
           <input type="text" id="inputEnlaceNoCalifica">
         </div>
@@ -7397,6 +7489,119 @@ ${estilosBase()}
   ];
   const PAIS_POR_DEFECTO = CODIGOS_PAIS.find(p => p.n === "México") || CODIGOS_PAIS[0];
   let horarioSemanal = {};
+  let fotoPerfilUrlActual = "";
+
+  // --- Editor de texto enriquecido reutilizable (negrita, tipografía,
+  // tamaño de letra, enlaces) — sin depender de ninguna librería externa,
+  // usando el mismo mecanismo que usa cualquier campo "contenteditable"
+  // de un navegador. Se guarda como HTML.
+  function crearEditorRico(idContenedor, placeholder){
+    const shell = document.getElementById(idContenedor);
+    shell.innerHTML = \`
+      <div class="rte-toolbar">
+        <button type="button" class="rte-btn" data-cmd="bold" title="Negrita"><b>N</b></button>
+        <div class="rte-sep"></div>
+        <select class="rte-fuente" title="Tipografía">
+          <option value="Arial">Arial</option>
+          <option value="Georgia">Georgia</option>
+          <option value="'Courier New'">Courier New</option>
+          <option value="Verdana">Verdana</option>
+          <option value="'Times New Roman'">Times New Roman</option>
+          <option value="'Trebuchet MS'">Trebuchet MS</option>
+        </select>
+        <select class="rte-tamano" title="Tamaño de letra">
+          <option value="2">Pequeño</option>
+          <option value="3" selected>Normal</option>
+          <option value="4">Mediano</option>
+          <option value="5">Grande</option>
+          <option value="6">Muy grande</option>
+        </select>
+        <div class="rte-sep"></div>
+        <button type="button" class="rte-btn" data-cmd="createlink" title="Insertar enlace">🔗</button>
+        <button type="button" class="rte-btn" data-cmd="unlink" title="Quitar enlace">🔗✕</button>
+      </div>
+      <div class="rte-editable" contenteditable="true" data-placeholder="\${placeholder || ""}"></div>
+    \`;
+
+    const editable = shell.querySelector(".rte-editable");
+
+    // Los botones de formato usan document.execCommand — sigue siendo el
+    // mecanismo estándar de los navegadores para editores "contenteditable"
+    // simples como este.
+    shell.querySelectorAll(".rte-btn[data-cmd]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        editable.focus();
+        const cmd = btn.dataset.cmd;
+        if(cmd === "createlink"){
+          const url = prompt("Pega aquí el enlace (por ejemplo, la invitación a tu comunidad de WhatsApp):", "https://");
+          if(url) document.execCommand("createLink", false, url);
+        } else {
+          document.execCommand(cmd, false, null);
+        }
+        actualizarEstadoBotones();
+      });
+    });
+    shell.querySelector(".rte-fuente").addEventListener("change", (e) => {
+      editable.focus();
+      document.execCommand("fontName", false, e.target.value);
+    });
+    shell.querySelector(".rte-tamano").addEventListener("change", (e) => {
+      editable.focus();
+      document.execCommand("fontSize", false, e.target.value);
+    });
+
+    function actualizarEstadoBotones(){
+      const btnNegrita = shell.querySelector('[data-cmd="bold"]');
+      try { btnNegrita.classList.toggle("activo", document.queryCommandState("bold")); } catch(err){}
+    }
+    editable.addEventListener("keyup", actualizarEstadoBotones);
+    editable.addEventListener("mouseup", actualizarEstadoBotones);
+
+    return {
+      obtenerHTML: () => editable.innerHTML.trim(),
+      establecerHTML: (html) => { editable.innerHTML = html || ""; }
+    };
+  }
+
+  const editorOferta = crearEditorRico("rteOferta", "Ej: Pierde de 10 a 20 kg en solo 3 a 6 meses");
+  const editorNoCalifica = crearEditorRico("rteNoCalifica", "Ej: Por ahora este programa no es para ti, pero aquí tienes un recurso gratis...");
+
+  // --- Subida de la foto de perfil ---
+  function actualizarPreviewFoto(url){
+    const cont = document.getElementById("fotoPerfilPreview");
+    if(url){
+      cont.innerHTML = \`<img src="\${url}" style="width:100%; height:100%; object-fit:cover; border-radius:50%;">\`;
+    } else {
+      cont.textContent = "?";
+    }
+  }
+
+  document.getElementById("btnSubirFotoPerfil").addEventListener("click", () => {
+    document.getElementById("inputFotoPerfilArchivo").click();
+  });
+
+  document.getElementById("inputFotoPerfilArchivo").addEventListener("change", async (e) => {
+    const archivo = e.target.files[0];
+    if(!archivo) return;
+    const estado = document.getElementById("fotoPerfilEstado");
+    estado.textContent = "Subiendo...";
+
+    const lector = new FileReader();
+    lector.onload = async () => {
+      const base64 = lector.result.split(",")[1];
+      const data = await llamarPOST("/calendario/foto", { base64, tipo: archivo.type });
+      if(data && data.url){
+        fotoPerfilUrlActual = data.url;
+        actualizarPreviewFoto(data.url);
+        estado.textContent = "✅ Foto actualizada";
+      } else {
+        estado.textContent = "❌ " + (data?.error || "No se pudo subir");
+      }
+      setTimeout(() => { estado.textContent = ""; }, 4000);
+    };
+    lector.readAsDataURL(archivo);
+  });
+
   // Estado ÚNICO de todas las preguntas del formulario — cada una:
   // { id, texto, tipo: "texto"|"opciones", estilo_visual: "radios"|"desplegable",
   //   opciones: [{texto, descalifica}], obligatoria }.
@@ -7707,12 +7912,13 @@ ${estilosBase()}
 
     document.getElementById("inputAgendaNombre").value = cfg.agenda_nombre || "";
     document.getElementById("inputAgendaTitulo").value = cfg.agenda_titulo || "";
-    document.getElementById("inputAgendaFoto").value = cfg.agenda_foto_url || "";
+    fotoPerfilUrlActual = cfg.agenda_foto_url || "";
+    actualizarPreviewFoto(fotoPerfilUrlActual);
     document.getElementById("inputAgendaTituloEvento").value = cfg.agenda_titulo_evento || "";
-    document.getElementById("inputAgendaOferta").value = cfg.agenda_texto_oferta || "";
+    editorOferta.establecerHTML(cfg.agenda_texto_oferta || "");
     document.getElementById("inputAgendaWhatsapp").value = cfg.agenda_whatsapp_link || "";
 
-    document.getElementById("inputMensajeNoCalifica").value = cfg.agenda_mensaje_no_califica || "";
+    editorNoCalifica.establecerHTML(cfg.agenda_mensaje_no_califica || "");
     document.getElementById("inputEnlaceNoCalifica").value = cfg.agenda_enlace_no_califica || "";
 
     preguntas = Array.isArray(cfg.agenda_preguntas) ? cfg.agenda_preguntas : [];
@@ -7733,11 +7939,11 @@ ${estilosBase()}
       agenda_zona_horaria: document.getElementById("inputZonaNegocio").value.trim() || "America/Mexico_City",
       agenda_nombre: document.getElementById("inputAgendaNombre").value.trim(),
       agenda_titulo: document.getElementById("inputAgendaTitulo").value.trim(),
-      agenda_foto_url: document.getElementById("inputAgendaFoto").value.trim(),
+      agenda_foto_url: fotoPerfilUrlActual,
       agenda_titulo_evento: document.getElementById("inputAgendaTituloEvento").value.trim(),
-      agenda_texto_oferta: document.getElementById("inputAgendaOferta").value.trim(),
+      agenda_texto_oferta: editorOferta.obtenerHTML(),
       agenda_whatsapp_link: document.getElementById("inputAgendaWhatsapp").value.trim(),
-      agenda_mensaje_no_califica: document.getElementById("inputMensajeNoCalifica").value.trim(),
+      agenda_mensaje_no_califica: editorNoCalifica.obtenerHTML(),
       agenda_enlace_no_califica: document.getElementById("inputEnlaceNoCalifica").value.trim(),
       agenda_preguntas: preguntas
     });
