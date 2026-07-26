@@ -4857,6 +4857,19 @@ app.get("/agendar", (req, res) => {
           </div>
         \`;
       }
+      if(p.tipo === "casillas"){
+        return \`
+          <label>\${p.texto}\${marcaObligatoria}</label>
+          <div class="grupo-casillas" data-id="\${p.id}" data-tipo="casillas" data-obligatoria="\${p.obligatoria ? "1" : ""}">
+            \${(p.opciones || []).map((op) => \`
+              <label class="opcion">
+                <input type="checkbox" value="\${op.texto.replace(/"/g,"&quot;")}">
+                <span>\${op.texto}</span>
+              </label>
+            \`).join("")}
+          </div>
+        \`;
+      }
       return \`
         <label>\${p.texto}\${marcaObligatoria}</label>
         <input type="text" class="input-respuesta" data-id="\${p.id}" data-tipo="texto" data-obligatoria="\${p.obligatoria ? "1" : ""}">
@@ -5045,6 +5058,13 @@ app.get("/agendar", (req, res) => {
         faltaObligatoria = (grupo.previousElementSibling?.textContent || "un campo obligatorio").replace(/\\s*\\*$/, "");
       }
     });
+    document.querySelectorAll("#contenedorPreguntas .grupo-casillas").forEach(grupo => {
+      const marcadas = Array.from(grupo.querySelectorAll("input:checked")).map(el => el.value);
+      if(marcadas.length > 0) respuestas[grupo.dataset.id] = marcadas;
+      else if(grupo.dataset.obligatoria === "1" && !faltaObligatoria){
+        faltaObligatoria = (grupo.previousElementSibling?.textContent || "un campo obligatorio").replace(/\\s*\\*$/, "");
+      }
+    });
     if(faltaObligatoria){
       errorEl.textContent = "Por favor completa: " + faltaObligatoria;
       errorEl.classList.remove("oculto");
@@ -5052,13 +5072,18 @@ app.get("/agendar", (req, res) => {
     }
 
     // Revisa si la respuesta elegida en CUALQUIER pregunta de opción
-    // múltiple corresponde a una opción marcada "descalifica" — si es así,
-    // nunca se llega a llamar a /agendar/confirmar, se manda directo a la
-    // pantalla de "no califica".
+    // múltiple o casillas corresponde a una opción marcada "descalifica" —
+    // si es así, nunca se llega a llamar a /agendar/confirmar, se manda
+    // directo a la pantalla de "no califica".
     const preguntasCargadas = datosFormulario.preguntas || [];
-    const preguntaDescalificante = preguntasCargadas.find(p =>
-      p.tipo === "opciones" && (p.opciones || []).some(op => op.texto === respuestas[p.id] && op.descalifica)
-    );
+    const preguntaDescalificante = preguntasCargadas.find(p => {
+      if(p.tipo === "opciones") return (p.opciones || []).some(op => op.texto === respuestas[p.id] && op.descalifica);
+      if(p.tipo === "casillas") {
+        const marcadas = Array.isArray(respuestas[p.id]) ? respuestas[p.id] : [];
+        return (p.opciones || []).some(op => op.descalifica && marcadas.includes(op.texto));
+      }
+      return false;
+    });
     if(preguntaDescalificante){
       document.getElementById("pasoFormulario").classList.add("oculto");
       document.getElementById("textoNoCalifica").textContent = datosFormulario.mensaje_no_califica;
@@ -5154,22 +5179,33 @@ app.post("/agendar/confirmar", async (req, res) => {
     const respuestasRecibidas = (respuestas && typeof respuestas === "object") ? respuestas : {};
 
     // Valida que las preguntas OBLIGATORIAS sí tengan respuesta — nunca
-    // confiar solo en la validación del navegador.
+    // confiar solo en la validación del navegador. Para "casillas" la
+    // respuesta es un ARREGLO (puede marcar varias a la vez), para las
+    // demás es un texto simple.
     for (const p of preguntas) {
-      if (p.obligatoria && !String(respuestasRecibidas[p.id] || "").trim()) {
-        return res.status(400).json({ error: `Falta responder: ${p.texto}` });
-      }
+      if (!p.obligatoria) continue;
+      const r = respuestasRecibidas[p.id];
+      const vacia = p.tipo === "casillas" ? !Array.isArray(r) || r.length === 0 : !String(r || "").trim();
+      if (vacia) return res.status(400).json({ error: `Falta responder: ${p.texto}` });
     }
 
     // Red de seguridad: vuelve a revisar aquí mismo si alguna respuesta
-    // elegida corresponde a una opción marcada "descalifica" — el
-    // navegador ya debería haber bloqueado esto antes de llegar aquí, pero
-    // nunca se confía solo en esa validación del lado del cliente.
+    // elegida (o, en "casillas", CUALQUIERA de las marcadas) corresponde a
+    // una opción marcada "descalifica" — el navegador ya debería haber
+    // bloqueado esto antes de llegar aquí, pero nunca se confía solo en
+    // esa validación del lado del cliente.
     for (const p of preguntas) {
-      if (p.tipo !== "opciones") continue;
-      const opcionElegida = (p.opciones || []).find(o => o.texto === respuestasRecibidas[p.id]);
-      if (opcionElegida?.descalifica) {
-        return res.status(403).json({ error: "No calificas según tus respuestas.", descalifica: true });
+      if (p.tipo === "opciones") {
+        const opcionElegida = (p.opciones || []).find(o => o.texto === respuestasRecibidas[p.id]);
+        if (opcionElegida?.descalifica) {
+          return res.status(403).json({ error: "No calificas según tus respuestas.", descalifica: true });
+        }
+      } else if (p.tipo === "casillas") {
+        const marcadas = Array.isArray(respuestasRecibidas[p.id]) ? respuestasRecibidas[p.id] : [];
+        const algunaDescalifica = (p.opciones || []).some(o => o.descalifica && marcadas.includes(o.texto));
+        if (algunaDescalifica) {
+          return res.status(403).json({ error: "No calificas según tus respuestas.", descalifica: true });
+        }
       }
     }
 
@@ -5183,10 +5219,15 @@ app.post("/agendar/confirmar", async (req, res) => {
 
     // Todas las respuestas se agregan a las notas del evento de Google
     // Calendar, para que queden visibles ahí mismo sin tener que entrar a
-    // Supabase a buscarlas.
+    // Supabase a buscarlas. Las de "casillas" son un arreglo (puede haber
+    // marcado varias) — se muestran unidas por comas.
     const notasCompletas = [
       `Instagram: @${instagram_username || "no especificado"}`,
-      ...preguntas.map(p => respuestasRecibidas[p.id] ? `${p.texto}: ${respuestasRecibidas[p.id]}` : null).filter(Boolean)
+      ...preguntas.map(p => {
+        const r = respuestasRecibidas[p.id];
+        const texto = Array.isArray(r) ? r.join(", ") : r;
+        return texto ? `${p.texto}: ${texto}` : null;
+      }).filter(Boolean)
     ].join("\n");
 
     const eventoCreado = await crearEventoGoogleCalendar({
@@ -6281,7 +6322,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (Array.isArray(agenda_preguntas)) {
       nuevaConfig.agenda_preguntas = agenda_preguntas
         .map((p, i) => {
-          const tipo = p?.tipo === "opciones" ? "opciones" : "texto";
+          const tipo = (p?.tipo === "opciones" || p?.tipo === "casillas") ? p.tipo : "texto";
           const base = {
             id: String(p?.id || `pregunta_${i}`),
             texto: String(p?.texto || "").trim(),
@@ -6290,6 +6331,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
           };
           if (tipo === "opciones") {
             base.estilo_visual = p?.estilo_visual === "desplegable" ? "desplegable" : "radios";
+          }
+          if (tipo === "opciones" || tipo === "casillas") {
             base.opciones = Array.isArray(p?.opciones)
               ? p.opciones.map(o => ({ texto: String(o?.texto || "").trim(), descalifica: Boolean(o?.descalifica) })).filter(o => o.texto)
               : [];
@@ -6843,14 +6886,26 @@ ${estilosBase()}
     border-radius:9px; padding:10px 12px; margin-bottom:7px; font-size:13px; color:#1A2028;
   }
   .pv-opcion .circulo{ width:15px; height:15px; border-radius:50%; border:1.5px solid #C7CCD4; flex-shrink:0; }
+  .pv-opcion .cuadro{ width:15px; height:15px; border-radius:4px; border:1.5px solid #C7CCD4; flex-shrink:0; }
   .pv-select, .pv-texto{
     width:100%; background:#fff; border:1px solid #E3E6EB; border-radius:8px; padding:10px 12px;
     font-size:13px; color:#1A2028; box-sizing:border-box;
   }
   .pv-vacio{ color:#9AA2AF; font-size:13px; text-align:center; padding:20px 0; }
 
+  .drag-handle{
+    cursor:grab; color:var(--muted); font-size:16px; line-height:1; flex-shrink:0;
+    padding:2px 6px; border-radius:6px; user-select:none; margin-right:6px;
+  }
+  .drag-handle:hover{ color:var(--green); background:rgba(49,217,124,.1); }
+  .drag-handle:active{ cursor:grabbing; }
+  .pregunta-card.arrastrando, .opcion-fila.arrastrando{ opacity:.4; }
+  .pregunta-card.arrastrando-sobre{ border-color:var(--green); background:rgba(49,217,124,.06); }
+  .opcion-fila.arrastrando-sobre{ outline:2px solid var(--green); outline-offset:2px; border-radius:8px; }
+
   .pregunta-card{
     border:1px solid var(--border); border-radius:11px; padding:16px; margin-bottom:12px; background:rgba(255,255,255,.015);
+    transition:opacity .12s, border-color .12s, background .12s;
   }
   .pregunta-card .fila-tipo{ display:flex; gap:10px; margin-top:12px; }
   .pregunta-card .fila-tipo > div{ flex:1; }
@@ -7107,6 +7162,16 @@ ${estilosBase()}
           </div>
         \`;
       }
+      if(p.tipo === "casillas"){
+        return \`
+          <div class="pv-pregunta">
+            <label class="pv-label">\${p.texto || "(sin texto todavía)"}\${marcaObligatoria}</label>
+            \${(p.opciones || []).map(op => \`
+              <div class="pv-opcion"><span class="cuadro"></span> \${op.texto || "(sin texto)"}</div>
+            \`).join("") || '<div class="pv-vacio" style="padding:8px 0;">Agrega opciones abajo</div>'}
+          </div>
+        \`;
+      }
       return \`
         <div class="pv-pregunta">
           <label class="pv-label">\${p.texto || "(sin texto todavía)"}\${marcaObligatoria}</label>
@@ -7116,12 +7181,57 @@ ${estilosBase()}
     }).join("");
   }
 
+  // Arrastrar-y-soltar genérico (reordenar preguntas, y reordenar opciones
+  // dentro de una pregunta) — cada llamado es independiente entre sí.
+  let arrastreCalendario = null;
+
+  function habilitarArrastre(cont, claseFila, claseHandle, lista, renderDeNuevo){
+    cont.querySelectorAll(claseHandle).forEach(handle => {
+      handle.addEventListener("dragstart", () => {
+        const fila = handle.closest(claseFila);
+        const indice = Array.from(cont.children).indexOf(fila);
+        arrastreCalendario = { cont, indice };
+        fila.classList.add("arrastrando");
+      });
+      handle.addEventListener("dragend", () => {
+        cont.querySelectorAll(claseFila).forEach(f => f.classList.remove("arrastrando", "arrastrando-sobre"));
+        arrastreCalendario = null;
+      });
+    });
+
+    cont.querySelectorAll(claseFila).forEach(fila => {
+      fila.addEventListener("dragover", (e) => {
+        if(!arrastreCalendario || arrastreCalendario.cont !== cont) return;
+        e.preventDefault();
+        fila.classList.add("arrastrando-sobre");
+      });
+      fila.addEventListener("dragleave", () => fila.classList.remove("arrastrando-sobre"));
+      fila.addEventListener("drop", (e) => {
+        e.preventDefault();
+        fila.classList.remove("arrastrando-sobre");
+        if(!arrastreCalendario || arrastreCalendario.cont !== cont) return;
+
+        const indiceDestino = Array.from(cont.children).indexOf(fila);
+        const indiceOrigen = arrastreCalendario.indice;
+        arrastreCalendario = null;
+        if(indiceDestino === indiceOrigen) return;
+
+        const [movido] = lista.splice(indiceOrigen, 1);
+        let nuevaPosicion = indiceDestino;
+        if(indiceOrigen < indiceDestino) nuevaPosicion -= 1;
+        lista.splice(nuevaPosicion, 0, movido);
+        renderDeNuevo();
+      });
+    });
+  }
+
   function renderOpcionesDePregunta(indicePregunta){
     const card = document.querySelector(\`.pregunta-card[data-i="\${indicePregunta}"]\`);
     const cont = card.querySelector(".opciones-lista");
     const p = preguntas[indicePregunta];
     cont.innerHTML = (p.opciones || []).map((op, i) => \`
       <div class="opcion-fila" data-i="\${i}">
+        <span class="drag-handle drag-handle-opcion" draggable="true" title="Arrastra para reordenar">⠿</span>
         <input type="text" class="input-opcion-texto" value="\${(op.texto || "").replace(/"/g,"&quot;")}" placeholder="Texto de la opción">
         <label class="chk-mini"><input type="checkbox" class="chk-opcion-descalifica" \${op.descalifica ? "checked" : ""}> Descalifica</label>
         <button type="button" class="quitar-x" title="Quitar esta opción">✕</button>
@@ -7147,6 +7257,11 @@ ${estilosBase()}
         renderPreview();
       });
     });
+
+    habilitarArrastre(cont, ".opcion-fila", ".drag-handle-opcion", p.opciones, () => {
+      renderOpcionesDePregunta(indicePregunta);
+      renderPreview();
+    });
   }
 
   function renderPreguntas(){
@@ -7159,7 +7274,10 @@ ${estilosBase()}
     cont.innerHTML = preguntas.map((p, i) => \`
       <div class="pregunta-card" data-i="\${i}">
         <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
-          <span style="font-family:var(--mono); font-size:12px; color:var(--green);">Pregunta \${i + 1}</span>
+          <div style="display:flex; align-items:center; min-width:0;">
+            <span class="drag-handle drag-handle-pregunta" draggable="true" title="Arrastra para reordenar">⠿</span>
+            <span style="font-family:var(--mono); font-size:12px; color:var(--green);">Pregunta \${i + 1}</span>
+          </div>
           <button type="button" class="quitar" data-i="\${i}">quitar</button>
         </div>
         <label style="margin-top:10px;">Texto de la pregunta</label>
@@ -7169,7 +7287,8 @@ ${estilosBase()}
             <label>Tipo de respuesta</label>
             <select class="input-p-tipo">
               <option value="texto" \${p.tipo === "texto" ? "selected" : ""}>Texto libre</option>
-              <option value="opciones" \${p.tipo === "opciones" ? "selected" : ""}>Opción múltiple</option>
+              <option value="opciones" \${p.tipo === "opciones" ? "selected" : ""}>Opción múltiple (una sola respuesta)</option>
+              <option value="casillas" \${p.tipo === "casillas" ? "selected" : ""}>Selección múltiple (casillas, varias a la vez)</option>
             </select>
           </div>
           <div class="input-p-estilo-wrap \${p.tipo === "opciones" ? "" : "oculto"}">
@@ -7180,8 +7299,8 @@ ${estilosBase()}
             </select>
           </div>
         </div>
-        <div class="opciones-editor \${p.tipo === "opciones" ? "" : "oculto"}">
-          <label>Opciones</label>
+        <div class="opciones-editor \${(p.tipo === "opciones" || p.tipo === "casillas") ? "" : "oculto"}">
+          <label>Opciones \${p.tipo === "casillas" ? "(arrastra ⠿ para reordenar; marca cuál(es) descalifican)" : ""}</label>
           <div class="opciones-lista"></div>
           <button type="button" class="add-paso add-opcion-mini">+ Agregar opción</button>
         </div>
@@ -7190,7 +7309,7 @@ ${estilosBase()}
     \`).join("");
 
     preguntas.forEach((p, i) => {
-      if(p.tipo === "opciones") renderOpcionesDePregunta(i);
+      if(p.tipo === "opciones" || p.tipo === "casillas") renderOpcionesDePregunta(i);
     });
 
     cont.querySelectorAll(".quitar").forEach(btn => {
@@ -7214,9 +7333,11 @@ ${estilosBase()}
     cont.querySelectorAll(".input-p-tipo").forEach((sel, i) => {
       sel.addEventListener("change", () => {
         preguntas[i].tipo = sel.value;
-        if(sel.value === "opciones" && !preguntas[i].opciones){
+        if((sel.value === "opciones" || sel.value === "casillas") && !preguntas[i].opciones){
           preguntas[i].opciones = [];
-          preguntas[i].estilo_visual = preguntas[i].estilo_visual || "radios";
+        }
+        if(sel.value === "opciones" && !preguntas[i].estilo_visual){
+          preguntas[i].estilo_visual = "radios";
         }
         renderPreguntas(); // cambio estructural (aparece/desaparece el editor de opciones) — sí se re-renderiza completo
       });
@@ -7235,6 +7356,8 @@ ${estilosBase()}
         renderPreview();
       });
     });
+
+    habilitarArrastre(cont, ".pregunta-card", ".drag-handle-pregunta", preguntas, renderPreguntas);
 
     renderPreview();
   }
