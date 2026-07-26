@@ -751,7 +751,10 @@ async function obtenerHorariosDisponibles() {
     }
   }
 
-  if (candidatos.length === 0) return [];
+  if (candidatos.length === 0) {
+    console.log(`⚠️ obtenerHorariosDisponibles: 0 horarios candidatos generados ANTES de consultar a Google — revisa "agenda_horario_semanal" (¿algún día marcado "activo: true"?). Configuración actual: ${JSON.stringify(horarioSemanal)}`);
+    return [];
+  }
 
   // 2) Se consulta a Google, en UNA sola llamada, qué periodos están
   // ocupados en todo el rango — mucho más eficiente que consultar horario
@@ -784,9 +787,13 @@ async function obtenerHorariosDisponibles() {
     return inicio.getTime() < ocupadoFin && fin.getTime() > ocupadoInicio;
   };
 
-  return candidatos
+  const disponibles = candidatos
     .filter(c => !periodosOcupados.some(ocupado => seCruza(c.inicio, c.fin, ocupado)))
     .map(c => c.inicio.toISOString());
+
+  console.log(`🗓️ obtenerHorariosDisponibles: ${candidatos.length} candidato(s) generado(s), ${periodosOcupados.length} periodo(s) ocupado(s) según Google, ${disponibles.length} horario(s) libre(s) resultante(s).`);
+
+  return disponibles;
 }
 
 // Crea el evento real en tu Google Calendar cuando alguien confirma un
