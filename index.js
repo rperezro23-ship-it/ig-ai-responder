@@ -4542,6 +4542,38 @@ app.get("/agendar", (req, res) => {
   .zona-item.elegida .hora{ color:#fff; }
   .zona-item .nombre{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .zona-sin-resultados{ padding:14px 13px; font-size:12.5px; color:var(--muted); text-align:center; }
+
+  .tel-pais-widget{ position:relative; flex:0 0 auto; }
+  .tel-pais-boton{
+    background:#fff; border:1px solid var(--border); border-radius:8px; padding:9px 10px;
+    color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;
+    display:flex; align-items:center; gap:6px; height:100%; white-space:nowrap;
+  }
+  .tel-pais-boton .flecha{ color:var(--muted); font-size:10px; margin-left:2px; }
+  .tel-pais-panel{
+    position:absolute; top:calc(100% + 6px); left:0; width:300px; background:#fff;
+    border:1px solid var(--border); border-radius:10px; box-shadow:0 10px 30px rgba(20,25,35,.15);
+    z-index:30; overflow:hidden;
+  }
+  .tel-pais-titulo{ font-size:15px; font-weight:700; color:#1A2028; padding:14px 16px 10px; }
+  .tel-pais-buscador{
+    width:100%; border:none; border-bottom:1px solid var(--border); padding:10px 16px;
+    font-size:13.5px; font-family:inherit; color:#1A2028; box-sizing:border-box;
+  }
+  .tel-pais-buscador:focus{ outline:none; }
+  .tel-pais-lista{ max-height:280px; overflow-y:auto; }
+  .tel-pais-item{
+    display:flex; align-items:center; gap:10px; padding:9px 16px; font-size:13.5px;
+    color:#1A2028; cursor:pointer;
+  }
+  .tel-pais-item .bandera{ font-size:17px; flex-shrink:0; }
+  .tel-pais-item .nombre{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tel-pais-item .codigo{ color:#68707E; flex-shrink:0; }
+  .tel-pais-item:nth-child(even){ background:#F7F8FA; }
+  .tel-pais-item:hover{ background:var(--accent-soft); }
+  .tel-pais-item.elegido{ background:var(--accent); color:#fff; }
+  .tel-pais-item.elegido .codigo{ color:#fff; }
+  .tel-pais-sin-resultados{ padding:16px; font-size:13px; color:#68707E; text-align:center; }
   .opcion{
     display:flex; align-items:center; gap:10px; background:#fff; border:1.5px solid var(--border);
     border-radius:10px; padding:13px 14px; margin-bottom:8px; cursor:pointer; transition:border-color .15s;
@@ -4702,16 +4734,140 @@ app.get("/agendar", (req, res) => {
   const usernamePrellenado = ${JSON.stringify(usernamePrellenado)};
   // Misma lista que en /calendario, para el tipo de pregunta "teléfono".
   const CODIGOS_PAIS = [
-    { c: "+52", n: "México" }, { c: "+34", n: "España" }, { c: "+1", n: "Estados Unidos / Canadá" },
-    { c: "+54", n: "Argentina" }, { c: "+57", n: "Colombia" }, { c: "+56", n: "Chile" },
-    { c: "+51", n: "Perú" }, { c: "+593", n: "Ecuador" }, { c: "+58", n: "Venezuela" },
-    { c: "+502", n: "Guatemala" }, { c: "+53", n: "Cuba" }, { c: "+591", n: "Bolivia" },
-    { c: "+1", n: "República Dominicana" }, { c: "+504", n: "Honduras" }, { c: "+595", n: "Paraguay" },
-    { c: "+503", n: "El Salvador" }, { c: "+505", n: "Nicaragua" }, { c: "+506", n: "Costa Rica" },
-    { c: "+507", n: "Panamá" }, { c: "+598", n: "Uruguay" }, { c: "+1", n: "Puerto Rico" },
-    { c: "+55", n: "Brasil" }, { c: "+44", n: "Reino Unido" }, { c: "+33", n: "Francia" },
-    { c: "+49", n: "Alemania" }, { c: "+39", n: "Italia" }, { c: "+351", n: "Portugal" }
+    { c: "+93", n: "Afganistán", f: "🇦🇫" },
+    { c: "+355", n: "Albania", f: "🇦🇱" },
+    { c: "+49", n: "Alemania", f: "🇩🇪" },
+    { c: "+244", n: "Angola", f: "🇦🇴" },
+    { c: "+966", n: "Arabia Saudita", f: "🇸🇦" },
+    { c: "+213", n: "Argelia", f: "🇩🇿" },
+    { c: "+54", n: "Argentina", f: "🇦🇷" },
+    { c: "+374", n: "Armenia", f: "🇦🇲" },
+    { c: "+61", n: "Australia", f: "🇦🇺" },
+    { c: "+43", n: "Austria", f: "🇦🇹" },
+    { c: "+994", n: "Azerbaiyán", f: "🇦🇿" },
+    { c: "+1", n: "Bahamas", f: "🇧🇸" },
+    { c: "+880", n: "Bangladés", f: "🇧🇩" },
+    { c: "+1", n: "Barbados", f: "🇧🇧" },
+    { c: "+973", n: "Baréin", f: "🇧🇭" },
+    { c: "+501", n: "Belice", f: "🇧🇿" },
+    { c: "+95", n: "Birmania", f: "🇲🇲" },
+    { c: "+591", n: "Bolivia", f: "🇧🇴" },
+    { c: "+387", n: "Bosnia y Herzegovina", f: "🇧🇦" },
+    { c: "+267", n: "Botsuana", f: "🇧🇼" },
+    { c: "+55", n: "Brasil", f: "🇧🇷" },
+    { c: "+673", n: "Brunéi", f: "🇧🇳" },
+    { c: "+359", n: "Bulgaria", f: "🇧🇬" },
+    { c: "+32", n: "Bélgica", f: "🇧🇪" },
+    { c: "+855", n: "Camboya", f: "🇰🇭" },
+    { c: "+237", n: "Camerún", f: "🇨🇲" },
+    { c: "+1", n: "Canadá", f: "🇨🇦" },
+    { c: "+974", n: "Catar", f: "🇶🇦" },
+    { c: "+420", n: "Chequia", f: "🇨🇿" },
+    { c: "+56", n: "Chile", f: "🇨🇱" },
+    { c: "+86", n: "China", f: "🇨🇳" },
+    { c: "+357", n: "Chipre", f: "🇨🇾" },
+    { c: "+57", n: "Colombia", f: "🇨🇴" },
+    { c: "+82", n: "Corea del Sur", f: "🇰🇷" },
+    { c: "+506", n: "Costa Rica", f: "🇨🇷" },
+    { c: "+225", n: "Costa de Marfil", f: "🇨🇮" },
+    { c: "+385", n: "Croacia", f: "🇭🇷" },
+    { c: "+53", n: "Cuba", f: "🇨🇺" },
+    { c: "+45", n: "Dinamarca", f: "🇩🇰" },
+    { c: "+593", n: "Ecuador", f: "🇪🇨" },
+    { c: "+20", n: "Egipto", f: "🇪🇬" },
+    { c: "+503", n: "El Salvador", f: "🇸🇻" },
+    { c: "+971", n: "Emiratos Árabes Unidos", f: "🇦🇪" },
+    { c: "+421", n: "Eslovaquia", f: "🇸🇰" },
+    { c: "+386", n: "Eslovenia", f: "🇸🇮" },
+    { c: "+34", n: "España", f: "🇪🇸" },
+    { c: "+1", n: "Estados Unidos", f: "🇺🇸" },
+    { c: "+372", n: "Estonia", f: "🇪🇪" },
+    { c: "+251", n: "Etiopía", f: "🇪🇹" },
+    { c: "+63", n: "Filipinas", f: "🇵🇭" },
+    { c: "+358", n: "Finlandia", f: "🇫🇮" },
+    { c: "+33", n: "Francia", f: "🇫🇷" },
+    { c: "+995", n: "Georgia", f: "🇬🇪" },
+    { c: "+233", n: "Ghana", f: "🇬🇭" },
+    { c: "+30", n: "Grecia", f: "🇬🇷" },
+    { c: "+502", n: "Guatemala", f: "🇬🇹" },
+    { c: "+592", n: "Guyana", f: "🇬🇾" },
+    { c: "+509", n: "Haití", f: "🇭🇹" },
+    { c: "+504", n: "Honduras", f: "🇭🇳" },
+    { c: "+852", n: "Hong Kong", f: "🇭🇰" },
+    { c: "+36", n: "Hungría", f: "🇭🇺" },
+    { c: "+91", n: "India", f: "🇮🇳" },
+    { c: "+62", n: "Indonesia", f: "🇮🇩" },
+    { c: "+964", n: "Irak", f: "🇮🇶" },
+    { c: "+353", n: "Irlanda", f: "🇮🇪" },
+    { c: "+98", n: "Irán", f: "🇮🇷" },
+    { c: "+354", n: "Islandia", f: "🇮🇸" },
+    { c: "+972", n: "Israel", f: "🇮🇱" },
+    { c: "+39", n: "Italia", f: "🇮🇹" },
+    { c: "+1", n: "Jamaica", f: "🇯🇲" },
+    { c: "+81", n: "Japón", f: "🇯🇵" },
+    { c: "+962", n: "Jordania", f: "🇯🇴" },
+    { c: "+7", n: "Kazajistán", f: "🇰🇿" },
+    { c: "+254", n: "Kenia", f: "🇰🇪" },
+    { c: "+965", n: "Kuwait", f: "🇰🇼" },
+    { c: "+856", n: "Laos", f: "🇱🇦" },
+    { c: "+371", n: "Letonia", f: "🇱🇻" },
+    { c: "+218", n: "Libia", f: "🇱🇾" },
+    { c: "+370", n: "Lituania", f: "🇱🇹" },
+    { c: "+352", n: "Luxemburgo", f: "🇱🇺" },
+    { c: "+961", n: "Líbano", f: "🇱🇧" },
+    { c: "+389", n: "Macedonia del Norte", f: "🇲🇰" },
+    { c: "+60", n: "Malasia", f: "🇲🇾" },
+    { c: "+356", n: "Malta", f: "🇲🇹" },
+    { c: "+212", n: "Marruecos", f: "🇲🇦" },
+    { c: "+976", n: "Mongolia", f: "🇲🇳" },
+    { c: "+258", n: "Mozambique", f: "🇲🇿" },
+    { c: "+52", n: "México", f: "🇲🇽" },
+    { c: "+264", n: "Namibia", f: "🇳🇦" },
+    { c: "+977", n: "Nepal", f: "🇳🇵" },
+    { c: "+505", n: "Nicaragua", f: "🇳🇮" },
+    { c: "+234", n: "Nigeria", f: "🇳🇬" },
+    { c: "+47", n: "Noruega", f: "🇳🇴" },
+    { c: "+64", n: "Nueva Zelanda", f: "🇳🇿" },
+    { c: "+968", n: "Omán", f: "🇴🇲" },
+    { c: "+92", n: "Pakistán", f: "🇵🇰" },
+    { c: "+507", n: "Panamá", f: "🇵🇦" },
+    { c: "+595", n: "Paraguay", f: "🇵🇾" },
+    { c: "+31", n: "Países Bajos", f: "🇳🇱" },
+    { c: "+51", n: "Perú", f: "🇵🇪" },
+    { c: "+48", n: "Polonia", f: "🇵🇱" },
+    { c: "+351", n: "Portugal", f: "🇵🇹" },
+    { c: "+1", n: "Puerto Rico", f: "🇵🇷" },
+    { c: "+44", n: "Reino Unido", f: "🇬🇧" },
+    { c: "+1", n: "República Dominicana", f: "🇩🇴" },
+    { c: "+40", n: "Rumania", f: "🇷🇴" },
+    { c: "+7", n: "Rusia", f: "🇷🇺" },
+    { c: "+221", n: "Senegal", f: "🇸🇳" },
+    { c: "+381", n: "Serbia", f: "🇷🇸" },
+    { c: "+65", n: "Singapur", f: "🇸🇬" },
+    { c: "+94", n: "Sri Lanka", f: "🇱🇰" },
+    { c: "+27", n: "Sudáfrica", f: "🇿🇦" },
+    { c: "+249", n: "Sudán", f: "🇸🇩" },
+    { c: "+46", n: "Suecia", f: "🇸🇪" },
+    { c: "+41", n: "Suiza", f: "🇨🇭" },
+    { c: "+597", n: "Surinam", f: "🇸🇷" },
+    { c: "+66", n: "Tailandia", f: "🇹🇭" },
+    { c: "+886", n: "Taiwán", f: "🇹🇼" },
+    { c: "+255", n: "Tanzania", f: "🇹🇿" },
+    { c: "+1", n: "Trinidad y Tobago", f: "🇹🇹" },
+    { c: "+90", n: "Turquía", f: "🇹🇷" },
+    { c: "+216", n: "Túnez", f: "🇹🇳" },
+    { c: "+380", n: "Ucrania", f: "🇺🇦" },
+    { c: "+256", n: "Uganda", f: "🇺🇬" },
+    { c: "+598", n: "Uruguay", f: "🇺🇾" },
+    { c: "+998", n: "Uzbekistán", f: "🇺🇿" },
+    { c: "+58", n: "Venezuela", f: "🇻🇪" },
+    { c: "+84", n: "Vietnam", f: "🇻🇳" },
+    { c: "+263", n: "Zimbabue", f: "🇿🇼" }
   ];
+  // País que sale seleccionado por defecto (México) — la lista en sí queda
+  // en orden alfabético, pero el default no tiene por qué ser "el primero
+  // alfabéticamente" (que terminaría siendo Afganistán).
+  const PAIS_POR_DEFECTO = CODIGOS_PAIS.find(p => p.n === "México") || CODIGOS_PAIS[0];
   let datosFormulario = null;
   let horarioElegido = null;
   let horariosPorDia = {};   // clave "YYYY-MM-DD" (en la zona horaria MOSTRADA) -> [iso, iso, ...]
@@ -4886,9 +5042,18 @@ app.get("/agendar", (req, res) => {
         return \`
           <label>\${p.texto}\${marcaObligatoria}</label>
           <div class="grupo-telefono" data-id="\${p.id}" data-tipo="telefono" data-obligatoria="\${p.obligatoria ? "1" : ""}" style="display:flex; gap:8px;">
-            <select class="input-tel-codigo" style="flex:0 0 auto; width:auto; min-width:96px;">
-              \${CODIGOS_PAIS.map(cp => \`<option value="\${cp.c}">\${cp.c} \${cp.n}</option>\`).join("")}
-            </select>
+            <div class="tel-pais-widget">
+              <button type="button" class="tel-pais-boton">
+                <span class="tel-pais-bandera">\${PAIS_POR_DEFECTO.f}</span>
+                <span class="tel-pais-codigo-actual">\${PAIS_POR_DEFECTO.c}</span>
+                <span class="flecha">▾</span>
+              </button>
+              <div class="tel-pais-panel oculto">
+                <div class="tel-pais-titulo">Seleccionar el código de país</div>
+                <input type="text" class="tel-pais-buscador" placeholder="Buscar país...">
+                <div class="tel-pais-lista"></div>
+              </div>
+            </div>
             <input type="tel" class="input-tel-numero" placeholder="Número de WhatsApp" style="flex:1;" inputmode="numeric">
           </div>
         \`;
@@ -4906,6 +5071,61 @@ app.get("/agendar", (req, res) => {
           el.classList.add("elegida");
           el.querySelector("input").checked = true;
         });
+      });
+    });
+
+    // Widget de código de país (con banderas y buscador) para cada
+    // pregunta de tipo "teléfono" — se inicializa una instancia
+    // independiente por cada una, por si hubiera más de una en el mismo
+    // formulario.
+    cont.querySelectorAll(".tel-pais-widget").forEach(widget => {
+      let paisElegido = PAIS_POR_DEFECTO;
+      const boton = widget.querySelector(".tel-pais-boton");
+      const panel = widget.querySelector(".tel-pais-panel");
+      const buscador = widget.querySelector(".tel-pais-buscador");
+      const lista = widget.querySelector(".tel-pais-lista");
+
+      function renderListaPaises(filtro){
+        const filtroNorm = filtro.trim().toLowerCase();
+        const filtrados = CODIGOS_PAIS.filter(p => p.n.toLowerCase().includes(filtroNorm) || p.c.includes(filtroNorm));
+        if(filtrados.length === 0){
+          lista.innerHTML = '<div class="tel-pais-sin-resultados">Sin resultados</div>';
+          return;
+        }
+        lista.innerHTML = filtrados.map(p => \`
+          <div class="tel-pais-item \${p.c === paisElegido.c && p.n === paisElegido.n ? "elegido" : ""}" data-codigo="\${p.c}" data-nombre="\${p.n.replace(/"/g,"&quot;")}">
+            <span class="bandera">\${p.f}</span>
+            <span class="nombre">\${p.n}</span>
+            <span class="codigo">\${p.c}</span>
+          </div>
+        \`).join("");
+        lista.querySelectorAll(".tel-pais-item").forEach(item => {
+          item.addEventListener("click", () => {
+            paisElegido = { c: item.dataset.codigo, n: item.dataset.nombre };
+            widget.querySelector(".tel-pais-bandera").textContent = CODIGOS_PAIS.find(p => p.c === paisElegido.c && p.n === paisElegido.n)?.f || "🏳️";
+            widget.querySelector(".tel-pais-codigo-actual").textContent = paisElegido.c;
+            widget.dataset.codigoElegido = paisElegido.c;
+            panel.classList.add("oculto");
+          });
+        });
+      }
+
+      widget.dataset.codigoElegido = paisElegido.c;
+      renderListaPaises("");
+
+      boton.addEventListener("click", () => {
+        const abriendo = panel.classList.contains("oculto");
+        document.querySelectorAll(".tel-pais-panel").forEach(p => p.classList.add("oculto"));
+        panel.classList.toggle("oculto", !abriendo);
+        if(abriendo){
+          buscador.value = "";
+          renderListaPaises("");
+          buscador.focus();
+        }
+      });
+      buscador.addEventListener("input", () => renderListaPaises(buscador.value));
+      document.addEventListener("click", (e) => {
+        if(!widget.contains(e.target)) panel.classList.add("oculto");
       });
     });
   }
@@ -5089,7 +5309,7 @@ app.get("/agendar", (req, res) => {
       }
     });
     document.querySelectorAll("#contenedorPreguntas .grupo-telefono").forEach(grupo => {
-      const codigo = grupo.querySelector(".input-tel-codigo").value;
+      const codigo = grupo.querySelector(".tel-pais-widget")?.dataset.codigoElegido || PAIS_POR_DEFECTO.c;
       const numero = grupo.querySelector(".input-tel-numero").value.replace(/\\D/g, "").trim();
       if(numero) respuestas[grupo.dataset.id] = codigo + " " + numero;
       else if(grupo.dataset.obligatoria === "1" && !faltaObligatoria){
@@ -7119,16 +7339,137 @@ ${estilosBase()}
   // Lista de códigos de país para el tipo de pregunta "teléfono" — se usa
   // tanto aquí (vista previa) como en la página pública real de /agendar.
   const CODIGOS_PAIS = [
-    { c: "+52", n: "México" }, { c: "+34", n: "España" }, { c: "+1", n: "Estados Unidos / Canadá" },
-    { c: "+54", n: "Argentina" }, { c: "+57", n: "Colombia" }, { c: "+56", n: "Chile" },
-    { c: "+51", n: "Perú" }, { c: "+593", n: "Ecuador" }, { c: "+58", n: "Venezuela" },
-    { c: "+502", n: "Guatemala" }, { c: "+53", n: "Cuba" }, { c: "+591", n: "Bolivia" },
-    { c: "+1", n: "República Dominicana" }, { c: "+504", n: "Honduras" }, { c: "+595", n: "Paraguay" },
-    { c: "+503", n: "El Salvador" }, { c: "+505", n: "Nicaragua" }, { c: "+506", n: "Costa Rica" },
-    { c: "+507", n: "Panamá" }, { c: "+598", n: "Uruguay" }, { c: "+1", n: "Puerto Rico" },
-    { c: "+55", n: "Brasil" }, { c: "+44", n: "Reino Unido" }, { c: "+33", n: "Francia" },
-    { c: "+49", n: "Alemania" }, { c: "+39", n: "Italia" }, { c: "+351", n: "Portugal" }
+    { c: "+93", n: "Afganistán", f: "🇦🇫" },
+    { c: "+355", n: "Albania", f: "🇦🇱" },
+    { c: "+49", n: "Alemania", f: "🇩🇪" },
+    { c: "+244", n: "Angola", f: "🇦🇴" },
+    { c: "+966", n: "Arabia Saudita", f: "🇸🇦" },
+    { c: "+213", n: "Argelia", f: "🇩🇿" },
+    { c: "+54", n: "Argentina", f: "🇦🇷" },
+    { c: "+374", n: "Armenia", f: "🇦🇲" },
+    { c: "+61", n: "Australia", f: "🇦🇺" },
+    { c: "+43", n: "Austria", f: "🇦🇹" },
+    { c: "+994", n: "Azerbaiyán", f: "🇦🇿" },
+    { c: "+1", n: "Bahamas", f: "🇧🇸" },
+    { c: "+880", n: "Bangladés", f: "🇧🇩" },
+    { c: "+1", n: "Barbados", f: "🇧🇧" },
+    { c: "+973", n: "Baréin", f: "🇧🇭" },
+    { c: "+501", n: "Belice", f: "🇧🇿" },
+    { c: "+95", n: "Birmania", f: "🇲🇲" },
+    { c: "+591", n: "Bolivia", f: "🇧🇴" },
+    { c: "+387", n: "Bosnia y Herzegovina", f: "🇧🇦" },
+    { c: "+267", n: "Botsuana", f: "🇧🇼" },
+    { c: "+55", n: "Brasil", f: "🇧🇷" },
+    { c: "+673", n: "Brunéi", f: "🇧🇳" },
+    { c: "+359", n: "Bulgaria", f: "🇧🇬" },
+    { c: "+32", n: "Bélgica", f: "🇧🇪" },
+    { c: "+855", n: "Camboya", f: "🇰🇭" },
+    { c: "+237", n: "Camerún", f: "🇨🇲" },
+    { c: "+1", n: "Canadá", f: "🇨🇦" },
+    { c: "+974", n: "Catar", f: "🇶🇦" },
+    { c: "+420", n: "Chequia", f: "🇨🇿" },
+    { c: "+56", n: "Chile", f: "🇨🇱" },
+    { c: "+86", n: "China", f: "🇨🇳" },
+    { c: "+357", n: "Chipre", f: "🇨🇾" },
+    { c: "+57", n: "Colombia", f: "🇨🇴" },
+    { c: "+82", n: "Corea del Sur", f: "🇰🇷" },
+    { c: "+506", n: "Costa Rica", f: "🇨🇷" },
+    { c: "+225", n: "Costa de Marfil", f: "🇨🇮" },
+    { c: "+385", n: "Croacia", f: "🇭🇷" },
+    { c: "+53", n: "Cuba", f: "🇨🇺" },
+    { c: "+45", n: "Dinamarca", f: "🇩🇰" },
+    { c: "+593", n: "Ecuador", f: "🇪🇨" },
+    { c: "+20", n: "Egipto", f: "🇪🇬" },
+    { c: "+503", n: "El Salvador", f: "🇸🇻" },
+    { c: "+971", n: "Emiratos Árabes Unidos", f: "🇦🇪" },
+    { c: "+421", n: "Eslovaquia", f: "🇸🇰" },
+    { c: "+386", n: "Eslovenia", f: "🇸🇮" },
+    { c: "+34", n: "España", f: "🇪🇸" },
+    { c: "+1", n: "Estados Unidos", f: "🇺🇸" },
+    { c: "+372", n: "Estonia", f: "🇪🇪" },
+    { c: "+251", n: "Etiopía", f: "🇪🇹" },
+    { c: "+63", n: "Filipinas", f: "🇵🇭" },
+    { c: "+358", n: "Finlandia", f: "🇫🇮" },
+    { c: "+33", n: "Francia", f: "🇫🇷" },
+    { c: "+995", n: "Georgia", f: "🇬🇪" },
+    { c: "+233", n: "Ghana", f: "🇬🇭" },
+    { c: "+30", n: "Grecia", f: "🇬🇷" },
+    { c: "+502", n: "Guatemala", f: "🇬🇹" },
+    { c: "+592", n: "Guyana", f: "🇬🇾" },
+    { c: "+509", n: "Haití", f: "🇭🇹" },
+    { c: "+504", n: "Honduras", f: "🇭🇳" },
+    { c: "+852", n: "Hong Kong", f: "🇭🇰" },
+    { c: "+36", n: "Hungría", f: "🇭🇺" },
+    { c: "+91", n: "India", f: "🇮🇳" },
+    { c: "+62", n: "Indonesia", f: "🇮🇩" },
+    { c: "+964", n: "Irak", f: "🇮🇶" },
+    { c: "+353", n: "Irlanda", f: "🇮🇪" },
+    { c: "+98", n: "Irán", f: "🇮🇷" },
+    { c: "+354", n: "Islandia", f: "🇮🇸" },
+    { c: "+972", n: "Israel", f: "🇮🇱" },
+    { c: "+39", n: "Italia", f: "🇮🇹" },
+    { c: "+1", n: "Jamaica", f: "🇯🇲" },
+    { c: "+81", n: "Japón", f: "🇯🇵" },
+    { c: "+962", n: "Jordania", f: "🇯🇴" },
+    { c: "+7", n: "Kazajistán", f: "🇰🇿" },
+    { c: "+254", n: "Kenia", f: "🇰🇪" },
+    { c: "+965", n: "Kuwait", f: "🇰🇼" },
+    { c: "+856", n: "Laos", f: "🇱🇦" },
+    { c: "+371", n: "Letonia", f: "🇱🇻" },
+    { c: "+218", n: "Libia", f: "🇱🇾" },
+    { c: "+370", n: "Lituania", f: "🇱🇹" },
+    { c: "+352", n: "Luxemburgo", f: "🇱🇺" },
+    { c: "+961", n: "Líbano", f: "🇱🇧" },
+    { c: "+389", n: "Macedonia del Norte", f: "🇲🇰" },
+    { c: "+60", n: "Malasia", f: "🇲🇾" },
+    { c: "+356", n: "Malta", f: "🇲🇹" },
+    { c: "+212", n: "Marruecos", f: "🇲🇦" },
+    { c: "+976", n: "Mongolia", f: "🇲🇳" },
+    { c: "+258", n: "Mozambique", f: "🇲🇿" },
+    { c: "+52", n: "México", f: "🇲🇽" },
+    { c: "+264", n: "Namibia", f: "🇳🇦" },
+    { c: "+977", n: "Nepal", f: "🇳🇵" },
+    { c: "+505", n: "Nicaragua", f: "🇳🇮" },
+    { c: "+234", n: "Nigeria", f: "🇳🇬" },
+    { c: "+47", n: "Noruega", f: "🇳🇴" },
+    { c: "+64", n: "Nueva Zelanda", f: "🇳🇿" },
+    { c: "+968", n: "Omán", f: "🇴🇲" },
+    { c: "+92", n: "Pakistán", f: "🇵🇰" },
+    { c: "+507", n: "Panamá", f: "🇵🇦" },
+    { c: "+595", n: "Paraguay", f: "🇵🇾" },
+    { c: "+31", n: "Países Bajos", f: "🇳🇱" },
+    { c: "+51", n: "Perú", f: "🇵🇪" },
+    { c: "+48", n: "Polonia", f: "🇵🇱" },
+    { c: "+351", n: "Portugal", f: "🇵🇹" },
+    { c: "+1", n: "Puerto Rico", f: "🇵🇷" },
+    { c: "+44", n: "Reino Unido", f: "🇬🇧" },
+    { c: "+1", n: "República Dominicana", f: "🇩🇴" },
+    { c: "+40", n: "Rumania", f: "🇷🇴" },
+    { c: "+7", n: "Rusia", f: "🇷🇺" },
+    { c: "+221", n: "Senegal", f: "🇸🇳" },
+    { c: "+381", n: "Serbia", f: "🇷🇸" },
+    { c: "+65", n: "Singapur", f: "🇸🇬" },
+    { c: "+94", n: "Sri Lanka", f: "🇱🇰" },
+    { c: "+27", n: "Sudáfrica", f: "🇿🇦" },
+    { c: "+249", n: "Sudán", f: "🇸🇩" },
+    { c: "+46", n: "Suecia", f: "🇸🇪" },
+    { c: "+41", n: "Suiza", f: "🇨🇭" },
+    { c: "+597", n: "Surinam", f: "🇸🇷" },
+    { c: "+66", n: "Tailandia", f: "🇹🇭" },
+    { c: "+886", n: "Taiwán", f: "🇹🇼" },
+    { c: "+255", n: "Tanzania", f: "🇹🇿" },
+    { c: "+1", n: "Trinidad y Tobago", f: "🇹🇹" },
+    { c: "+90", n: "Turquía", f: "🇹🇷" },
+    { c: "+216", n: "Túnez", f: "🇹🇳" },
+    { c: "+380", n: "Ucrania", f: "🇺🇦" },
+    { c: "+256", n: "Uganda", f: "🇺🇬" },
+    { c: "+598", n: "Uruguay", f: "🇺🇾" },
+    { c: "+998", n: "Uzbekistán", f: "🇺🇿" },
+    { c: "+58", n: "Venezuela", f: "🇻🇪" },
+    { c: "+84", n: "Vietnam", f: "🇻🇳" },
+    { c: "+263", n: "Zimbabue", f: "🇿🇼" }
   ];
+  const PAIS_POR_DEFECTO = CODIGOS_PAIS.find(p => p.n === "México") || CODIGOS_PAIS[0];
   let horarioSemanal = {};
   // Estado ÚNICO de todas las preguntas del formulario — cada una:
   // { id, texto, tipo: "texto"|"opciones", estilo_visual: "radios"|"desplegable",
@@ -7221,9 +7562,9 @@ ${estilosBase()}
           <div class="pv-pregunta">
             <label class="pv-label">\${p.texto || "(sin texto todavía)"}\${marcaObligatoria}</label>
             <div style="display:flex; gap:6px;">
-              <select class="pv-select" style="flex:0 0 92px;" disabled>
-                <option>\${CODIGOS_PAIS[0].c}</option>
-              </select>
+              <div style="flex:0 0 auto; background:#fff; border:1px solid #E3E6EB; border-radius:8px; padding:9px 10px; font-size:13px; display:flex; align-items:center; gap:5px; white-space:nowrap;">
+                <span>\${PAIS_POR_DEFECTO.f}</span> <span>\${PAIS_POR_DEFECTO.c}</span> <span style="color:#9AA2AF; font-size:10px;">▾</span>
+              </div>
               <input type="text" class="pv-texto" disabled placeholder="Número de WhatsApp">
             </div>
           </div>
