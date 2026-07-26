@@ -4469,7 +4469,7 @@ app.get("/agendar", (req, res) => {
     box-shadow:0 8px 40px rgba(20,25,35,.06); transition:width .25s ease;
   }
   .contenedor.expandido{ width:1150px; }
-  .contenedor.expandido-form{ width:1090px; }
+  .contenedor.expandido-form{ width:1090px; height:auto; min-height:700px; }
   .panel-izq{
     width:400px; flex:none; padding:32px 28px; border-right:1px solid var(--border); overflow-y:auto;
   }
