@@ -4586,9 +4586,10 @@ app.get("/agendar", (req, res) => {
   }
   .input-tel-numero:focus{ outline:none; }
   .opcion{
-    display:flex; align-items:center; gap:10px; padding:7px 0; cursor:pointer;
+    display:flex; align-items:center; gap:10px; padding:0; margin-bottom:15px; cursor:pointer;
   }
-  .opcion span{ color:var(--accent); font-size:14px; }
+  .opcion:last-child{ margin-bottom:0; }
+  .opcion span{ color:var(--text); font-size:14px; }
   .opcion input{ accent-color:var(--accent); width:17px; height:17px; flex-shrink:0; }
   button{
     background:var(--accent); color:#fff; border:none; border-radius:9px;
@@ -7145,10 +7146,11 @@ ${estilosBase()}
   .pv-label{ display:block; font-size:13px; font-weight:600; color:#1A2028; margin-bottom:8px; }
   .pv-label .req{ color:#E0432B; }
   .pv-opcion{
-    display:flex; align-items:center; gap:9px; padding:6px 0; font-size:14px; color:#0A6CFF;
+    display:flex; align-items:center; gap:9px; margin-bottom:15px; font-size:14px; color:#1A2028;
   }
-  .pv-opcion .circulo{ width:15px; height:15px; border-radius:50%; border:1.5px solid #0A6CFF; flex-shrink:0; }
-  .pv-opcion .cuadro{ width:15px; height:15px; border-radius:4px; border:1.5px solid #0A6CFF; flex-shrink:0; }
+  .pv-opcion:last-child{ margin-bottom:0; }
+  .pv-opcion .circulo{ width:15px; height:15px; border-radius:50%; border:1.5px solid #C7CCD4; flex-shrink:0; }
+  .pv-opcion .cuadro{ width:15px; height:15px; border-radius:4px; border:1.5px solid #C7CCD4; flex-shrink:0; }
   .pv-select, .pv-texto{
     width:100%; background:#fff; border:1px solid #E3E6EB; border-radius:8px; padding:10px 12px;
     font-size:13px; color:#1A2028; box-sizing:border-box;
