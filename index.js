@@ -4434,90 +4434,190 @@ app.get("/agendar", (req, res) => {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agenda tu llamada</title>
 <style>
-  :root{ --bg:#0B0E14; --surface:#12161F; --surface-2:#1A1F2B; --border:#232937; --text:#F4F6FA; --muted:#9CA5B5; --green:#31D97C; --red:#FF5D5D; }
+  :root{
+    --bg:#F7F8FA; --card:#FFFFFF; --border:#E3E6EB; --text:#1A2028; --muted:#68707E;
+    --accent:#0A6CFF; --accent-soft:#EAF2FF; --green:#22B573; --red:#E0432B;
+  }
   *{ box-sizing:border-box; }
-  body{ margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; padding:24px; }
-  .tarjeta{ background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:32px; max-width:460px; width:100%; }
-  h1{ font-size:22px; margin:0 0 8px; }
-  p.sub{ color:var(--muted); font-size:14.5px; margin:0 0 24px; line-height:1.5; }
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    display:flex; align-items:center; justify-content:center; min-height:100vh; padding:24px;
+  }
+  .contenedor{
+    background:var(--card); border:1px solid var(--border); border-radius:20px;
+    max-width:920px; width:100%; display:flex; overflow:hidden; box-shadow:0 8px 40px rgba(20,25,35,.06);
+  }
+  .panel-izq{
+    width:300px; flex-shrink:0; padding:32px 28px; border-right:1px solid var(--border);
+  }
+  .panel-der{ flex:1; min-width:0; padding:32px 30px; }
+  .perfil-foto{
+    width:64px; height:64px; border-radius:50%; object-fit:cover; background:var(--accent-soft);
+    display:flex; align-items:center; justify-content:center; font-size:26px; font-weight:700;
+    color:var(--accent); margin-bottom:14px;
+  }
+  .perfil-nombre{ font-weight:700; font-size:16px; }
+  .perfil-titulo{ color:var(--muted); font-size:13.5px; margin-top:2px; }
+  .divisor{ height:1px; background:var(--border); margin:20px 0; }
+  .evento-nombre{ color:var(--muted); font-size:13px; margin-bottom:4px; }
+  .evento-titulo{ font-size:19px; font-weight:700; margin:0 0 16px; line-height:1.3; }
+  .evento-detalle{ display:flex; align-items:center; gap:9px; font-size:13.5px; margin-bottom:10px; color:var(--text); }
+  .evento-detalle .icono{ width:17px; text-align:center; flex-shrink:0; }
+  .instrucciones{ font-size:13px; color:var(--muted); line-height:1.6; margin:16px 0; }
+  .instrucciones b{ color:var(--text); }
+  .advertencia{
+    background:#FFF6E9; border:1px solid #F5DCA8; border-radius:10px; padding:12px 14px;
+    font-size:12.5px; line-height:1.55; margin:16px 0; color:#7A5B12;
+  }
+  .advertencia a{ color:var(--accent); font-weight:600; }
+  .oferta{ font-size:13.5px; font-weight:600; margin-top:16px; }
+
+  h1.titulo-paso{ font-size:19px; margin:0 0 6px; }
+  p.sub{ color:var(--muted); font-size:14px; margin:0 0 22px; line-height:1.5; }
   label{ display:block; font-size:13.5px; font-weight:600; margin:16px 0 6px; }
   input[type=text], input[type=email]{
-    width:100%; background:var(--surface-2); border:1px solid var(--border); border-radius:8px;
+    width:100%; background:#fff; border:1px solid var(--border); border-radius:8px;
     padding:11px 13px; color:var(--text); font-size:14.5px; font-family:inherit;
   }
+  input[type=text]:focus, input[type=email]:focus{ outline:none; border-color:var(--accent); }
   .opcion{
-    display:flex; align-items:center; gap:10px; background:var(--surface-2); border:1px solid var(--border);
+    display:flex; align-items:center; gap:10px; background:#fff; border:1.5px solid var(--border);
     border-radius:10px; padding:13px 14px; margin-bottom:8px; cursor:pointer; transition:border-color .15s;
   }
-  .opcion:hover{ border-color:var(--green); }
-  .opcion.elegida{ border-color:var(--green); background:rgba(49,217,124,.08); }
-  .opcion input{ accent-color:var(--green); width:17px; height:17px; }
+  .opcion:hover{ border-color:var(--accent); }
+  .opcion.elegida{ border-color:var(--accent); background:var(--accent-soft); }
+  .opcion input{ accent-color:var(--accent); width:17px; height:17px; }
   button{
-    width:100%; background:var(--green); color:#04140D; border:none; border-radius:10px;
-    padding:14px; font-size:15px; font-weight:700; cursor:pointer; margin-top:22px;
+    background:var(--accent); color:#fff; border:none; border-radius:9px;
+    padding:13px 18px; font-size:14.5px; font-weight:700; cursor:pointer; margin-top:10px;
   }
   button:disabled{ opacity:.5; cursor:not-allowed; }
-  button.secundario{ background:var(--surface-2); color:var(--text); border:1px solid var(--border); }
-  .dia-grupo{ margin-bottom:18px; }
-  .dia-titulo{ font-size:13px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.03em; margin-bottom:8px; }
-  .horarios-grid{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
-  .horario-btn{
-    background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:10px 6px;
-    color:var(--text); font-size:13.5px; cursor:pointer; text-align:center;
-  }
-  .horario-btn:hover, .horario-btn.elegido{ border-color:var(--green); background:rgba(49,217,124,.1); }
-  .oculto{ display:none; }
-  .cargando{ text-align:center; color:var(--muted); padding:30px 0; }
+  button.secundario{ background:transparent; color:var(--text); border:1px solid var(--border); }
+  button.ancho{ width:100%; }
+  .oculto{ display:none !important; }
+  .cargando{ text-align:center; color:var(--muted); padding:30px 0; font-size:14px; }
   .error{ color:var(--red); font-size:13.5px; margin-top:10px; }
   .exito{ text-align:center; }
   .exito .icono{ font-size:44px; margin-bottom:10px; }
+
+  .cal-shell{ display:flex; gap:26px; flex-wrap:wrap; }
+  .cal-lado{ flex:1; min-width:260px; }
+  .cal-cabecera{ display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+  .cal-cabecera button{
+    background:transparent; color:var(--text); border:1px solid var(--border); border-radius:8px;
+    width:30px; height:30px; padding:0; margin:0; font-size:15px; display:flex; align-items:center; justify-content:center;
+  }
+  .cal-cabecera button:disabled{ opacity:.3; }
+  .cal-mes{ font-weight:700; font-size:14.5px; }
+  .cal-grid{ display:grid; grid-template-columns:repeat(7, 1fr); gap:2px; text-align:center; }
+  .cal-diasemana{ font-size:11px; color:var(--muted); font-weight:600; padding-bottom:8px; }
+  .cal-dia{
+    position:relative; aspect-ratio:1; display:flex; align-items:center; justify-content:center;
+    font-size:13.5px; border-radius:50%; cursor:pointer; color:var(--text);
+  }
+  .cal-dia.vacio{ cursor:default; }
+  .cal-dia.sin-horarios{ color:#C7CCD4; cursor:not-allowed; }
+  .cal-dia.con-horarios:hover{ background:var(--accent-soft); }
+  .cal-dia.con-horarios::after{
+    content:""; position:absolute; bottom:3px; width:4px; height:4px; border-radius:50%; background:var(--accent);
+  }
+  .cal-dia.elegido{ background:var(--accent); color:#fff; }
+  .cal-dia.elegido::after{ background:#fff; }
+  .cal-zona{ font-size:12px; color:var(--muted); margin-top:16px; }
+  .lista-horarios{ display:flex; flex-direction:column; gap:8px; max-height:340px; overflow-y:auto; padding-right:4px; }
+  .lista-horarios-titulo{ font-size:13px; font-weight:600; margin-bottom:10px; }
+  .horario-btn{
+    background:#fff; border:1.5px solid var(--accent); border-radius:8px; padding:11px 10px;
+    color:var(--accent); font-size:13.5px; cursor:pointer; text-align:center; font-weight:600;
+  }
+  .horario-btn:hover{ background:var(--accent); color:#fff; }
+
+  @media (max-width: 680px){
+    .contenedor{ flex-direction:column; }
+    .panel-izq{ width:100%; border-right:none; border-bottom:1px solid var(--border); }
+  }
 </style>
 </head>
 <body>
-  <div class="tarjeta">
+  <div class="contenedor">
 
-    <div id="pasoFormulario">
-      <h1>Agenda tu llamada</h1>
-      <p class="sub">Cuéntanos un poco de tu situación para poder ayudarte mejor.</p>
-      <label>Tu nombre</label>
-      <input type="text" id="inputNombre" placeholder="Ej: Juan Pérez">
-      <label id="labelPregunta"></label>
-      <div id="contenedorOpciones"></div>
-      <div class="error oculto" id="errorFormulario"></div>
-      <button id="btnContinuar">Continuar</button>
+    <div class="panel-izq">
+      <div id="perfilFoto" class="perfil-foto">?</div>
+      <div class="perfil-nombre" id="perfilNombre"></div>
+      <div class="perfil-titulo" id="perfilTitulo"></div>
+      <div class="divisor"></div>
+      <div class="evento-nombre" id="perfilNombreCompleto"></div>
+      <h1 class="evento-titulo" id="perfilTituloEvento"></h1>
+      <div class="evento-detalle"><span class="icono">🕐</span><span id="perfilDuracion"></span></div>
+      <div class="evento-detalle"><span class="icono">📹</span><span>Los detalles de la videollamada se envían al confirmar.</span></div>
+      <p class="instrucciones">Selecciona un <b>día y hora</b> de tu preferencia para la sesión (las horas se muestran en tu horario local).</p>
+      <div class="advertencia oculto" id="bloqueAdvertencia">
+        ⚠️ Si no encuentras un horario en el que tengas libre, escríbenos por WhatsApp <a id="enlaceWhatsapp" href="#" target="_blank">tocando aquí</a>.
+      </div>
+      <p class="oferta" id="perfilOferta"></p>
     </div>
 
-    <div id="pasoNoCalifica" class="oculto">
-      <h1>Gracias por tu interés</h1>
-      <p class="sub" id="textoNoCalifica"></p>
-      <a id="botonRecursoNoCalifica" class="oculto" href="#" target="_blank" style="text-decoration:none;">
-        <button type="button">Ver recurso gratis</button>
-      </a>
-    </div>
+    <div class="panel-der">
 
-    <div id="pasoHorarios" class="oculto">
-      <h1>Elige un horario</h1>
-      <p class="sub">Estos son los horarios disponibles — elige el que mejor te quede.</p>
-      <div id="contenedorHorarios"><div class="cargando">Cargando horarios disponibles...</div></div>
-      <button id="btnVolverFormulario" class="secundario oculto">← Volver</button>
-    </div>
+      <div id="pasoFormulario">
+        <h1 class="titulo-paso">Antes de agendar</h1>
+        <p class="sub">Cuéntanos un poco de tu situación para poder ayudarte mejor.</p>
+        <label>Tu nombre</label>
+        <input type="text" id="inputNombre" placeholder="Ej: Juan Pérez">
+        <label id="labelPregunta"></label>
+        <div id="contenedorOpciones"></div>
+        <div class="error oculto" id="errorFormulario"></div>
+        <button class="ancho" id="btnContinuar">Continuar</button>
+      </div>
 
-    <div id="pasoConfirmar" class="oculto">
-      <h1>Confirma tu llamada</h1>
-      <p class="sub" id="resumenHorarioElegido"></p>
-      <label>Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
-      <input type="email" id="inputEmail" placeholder="tucorreo@ejemplo.com">
-      <div class="error oculto" id="errorConfirmar"></div>
-      <button id="btnConfirmarReserva">Confirmar</button>
-      <button id="btnVolverHorarios" class="secundario">← Elegir otro horario</button>
-    </div>
+      <div id="pasoNoCalifica" class="oculto">
+        <h1 class="titulo-paso">Gracias por tu interés</h1>
+        <p class="sub" id="textoNoCalifica"></p>
+        <a id="botonRecursoNoCalifica" class="oculto" href="#" target="_blank" style="text-decoration:none;">
+          <button type="button">Ver recurso gratis</button>
+        </a>
+      </div>
 
-    <div id="pasoExito" class="oculto exito">
-      <div class="icono">✅</div>
-      <h1>Listo, tu llamada quedó agendada</h1>
-      <p class="sub" id="resumenExito"></p>
-    </div>
+      <div id="pasoCalendario" class="oculto">
+        <h1 class="titulo-paso">Selecciona una fecha y hora</h1>
+        <div id="cargandoHorarios" class="cargando">Cargando horarios disponibles...</div>
+        <div id="sinHorarios" class="sub oculto">No hay horarios disponibles por ahora — escríbenos directamente y te ayudamos a coordinar.</div>
+        <div id="calShell" class="cal-shell oculto">
+          <div class="cal-lado">
+            <div class="cal-cabecera">
+              <button type="button" id="btnMesAnterior">‹</button>
+              <span class="cal-mes" id="calMesTitulo"></span>
+              <button type="button" id="btnMesSiguiente">›</button>
+            </div>
+            <div class="cal-grid" id="calGridDiasSemana"></div>
+            <div class="cal-grid" id="calGridDias"></div>
+            <div class="cal-zona" id="calZonaHoraria"></div>
+          </div>
+          <div class="cal-lado">
+            <div class="lista-horarios-titulo" id="tituloListaHorarios">Elige un día en el calendario</div>
+            <div class="lista-horarios" id="listaHorariosDia"></div>
+          </div>
+        </div>
+      </div>
 
+      <div id="pasoConfirmar" class="oculto">
+        <h1 class="titulo-paso">Confirma tu llamada</h1>
+        <p class="sub" id="resumenHorarioElegido"></p>
+        <label>Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
+        <input type="email" id="inputEmail" placeholder="tucorreo@ejemplo.com">
+        <div class="error oculto" id="errorConfirmar"></div>
+        <button class="ancho" id="btnConfirmarReserva">Confirmar</button>
+        <button class="secundario ancho" id="btnVolverHorarios">← Elegir otro horario</button>
+      </div>
+
+      <div id="pasoExito" class="oculto exito">
+        <div class="icono">✅</div>
+        <h1 class="titulo-paso">Listo, tu llamada quedó agendada</h1>
+        <p class="sub" id="resumenExito"></p>
+      </div>
+
+    </div>
   </div>
 
 <script>
@@ -4525,10 +4625,43 @@ app.get("/agendar", (req, res) => {
   let pregunta = null;
   let opcionElegida = null;
   let horarioElegido = null;
+  let horariosPorDia = {};   // clave "YYYY-MM-DD" (en la zona horaria configurada) -> [iso, iso, ...]
+  let zonaHorariaAgenda = "America/Mexico_City";
+  let anioCalendario = null;  // año que se muestra en el calendario (número simple, sin Date)
+  let mesCalendario = null;   // mes que se muestra, 1-12 (número simple, sin Date) — se evita
+                               // guardar esto como un objeto Date reinterpretado entre la zona
+                               // horaria local del navegador y la zona horaria configurada del
+                               // negocio, porque eso puede "correr" la medianoche al día (y hasta
+                               // al mes) anterior según la diferencia entre ambas zonas.
+  let diaElegidoClave = null;
+
+  function clavePorDia(iso, zona){
+    const partes = new Intl.DateTimeFormat("en-CA", { timeZone: zona, year:"numeric", month:"2-digit", day:"2-digit" }).formatToParts(new Date(iso));
+    const obj = {}; for(const p of partes) obj[p.type] = p.value;
+    return \`\${obj.year}-\${obj.month}-\${obj.day}\`;
+  }
 
   async function cargarPregunta(){
     const res = await fetch("/agendar/pregunta");
     pregunta = await res.json();
+
+    const perfil = pregunta.perfil || {};
+    document.getElementById("perfilNombre").textContent = perfil.nombre || "";
+    document.getElementById("perfilNombreCompleto").textContent = perfil.nombre || "";
+    document.getElementById("perfilTitulo").textContent = perfil.titulo || "";
+    document.getElementById("perfilTituloEvento").textContent = perfil.titulo_evento || "Agenda tu llamada";
+    document.getElementById("perfilDuracion").textContent = (perfil.duracion_minutos || 30) + " min";
+    document.getElementById("perfilOferta").textContent = perfil.texto_oferta || "";
+    if(perfil.foto_url){
+      document.getElementById("perfilFoto").outerHTML = \`<img class="perfil-foto" id="perfilFoto" src="\${perfil.foto_url}" alt="">\`;
+    } else {
+      document.getElementById("perfilFoto").textContent = (perfil.nombre || "?").trim().charAt(0).toUpperCase();
+    }
+    if(perfil.whatsapp_link){
+      document.getElementById("enlaceWhatsapp").href = perfil.whatsapp_link;
+      document.getElementById("bloqueAdvertencia").classList.remove("oculto");
+    }
+
     document.getElementById("labelPregunta").textContent = pregunta.texto;
     const cont = document.getElementById("contenedorOpciones");
     cont.innerHTML = pregunta.opciones.map((op, i) => \`
@@ -4569,52 +4702,126 @@ app.get("/agendar", (req, res) => {
     }
 
     document.getElementById("pasoFormulario").classList.add("oculto");
-    document.getElementById("pasoHorarios").classList.remove("oculto");
+    document.getElementById("pasoCalendario").classList.remove("oculto");
     cargarHorarios();
   });
 
   async function cargarHorarios(){
-    const cont = document.getElementById("contenedorHorarios");
-    cont.innerHTML = '<div class="cargando">Cargando horarios disponibles...</div>';
+    document.getElementById("cargandoHorarios").classList.remove("oculto");
+    document.getElementById("sinHorarios").classList.add("oculto");
+    document.getElementById("calShell").classList.add("oculto");
     try {
       const res = await fetch("/agendar/horarios");
       const data = await res.json();
+      document.getElementById("cargandoHorarios").classList.add("oculto");
+
       if(!data.horarios || data.horarios.length === 0){
-        cont.innerHTML = '<p class="sub">No hay horarios disponibles por ahora — escríbenos directamente y te ayudamos a coordinar.</p>';
+        document.getElementById("sinHorarios").classList.remove("oculto");
         return;
       }
-      const porDia = {};
-      data.horarios.forEach(h => {
-        const fecha = new Date(h);
-        const clave = fecha.toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long", timeZone: data.zona_horaria });
-        if(!porDia[clave]) porDia[clave] = [];
-        porDia[clave].push(h);
+
+      zonaHorariaAgenda = data.zona_horaria || "America/Mexico_City";
+      horariosPorDia = {};
+      data.horarios.forEach(iso => {
+        const clave = clavePorDia(iso, zonaHorariaAgenda);
+        if(!horariosPorDia[clave]) horariosPorDia[clave] = [];
+        horariosPorDia[clave].push(iso);
       });
-      cont.innerHTML = Object.entries(porDia).map(([dia, horarios]) => \`
-        <div class="dia-grupo">
-          <div class="dia-titulo">\${dia}</div>
-          <div class="horarios-grid">
-            \${horarios.map(h => \`<button type="button" class="horario-btn" data-iso="\${h}">\${new Date(h).toLocaleTimeString("es-MX", { hour: "numeric", minute: "2-digit", timeZone: data.zona_horaria })}</button>\`).join("")}
-          </div>
-        </div>
-      \`).join("");
-      cont.querySelectorAll(".horario-btn").forEach(btn => {
-        btn.addEventListener("click", () => {
-          horarioElegido = btn.dataset.iso;
-          document.getElementById("pasoHorarios").classList.add("oculto");
-          document.getElementById("pasoConfirmar").classList.remove("oculto");
-          document.getElementById("resumenHorarioElegido").textContent =
-            new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZone: data.zona_horaria });
-        });
-      });
+
+      // Arranca mostrando el mes del PRIMER horario disponible (no
+      // necesariamente el mes calendario de hoy, por si hoy ya no queda
+      // ningún horario libre) — se extrae el año/mes UNA sola vez aquí,
+      // ya en la zona horaria correcta, y de ahí en adelante se navega
+      // con números simples (ver más abajo) para no volver a mezclar
+      // zonas horarias.
+      const clavePrimerHorario = clavePorDia(data.horarios[0], zonaHorariaAgenda);
+      const [anioInicial, mesInicial] = clavePrimerHorario.split("-").map(Number);
+      anioCalendario = anioInicial;
+      mesCalendario = mesInicial;
+      document.getElementById("calZonaHoraria").textContent = "Zona horaria: " + zonaHorariaAgenda.replace(/_/g, " ");
+      document.getElementById("calShell").classList.remove("oculto");
+      renderCalendario();
     } catch (err) {
-      cont.innerHTML = '<p class="error">No se pudieron cargar los horarios. Intenta de nuevo en un momento.</p>';
+      document.getElementById("cargandoHorarios").classList.add("oculto");
+      document.getElementById("sinHorarios").textContent = "No se pudieron cargar los horarios. Intenta de nuevo en un momento.";
+      document.getElementById("sinHorarios").classList.remove("oculto");
     }
   }
 
+  function renderCalendario(){
+    const nombresDia = ["dom","lun","mar","mié","jue","vie","sáb"];
+    document.getElementById("calGridDiasSemana").innerHTML = nombresDia.map(d => \`<div class="cal-diasemana">\${d}</div>\`).join("");
+
+    const anio = anioCalendario, mes = mesCalendario; // mes: 1-12 — ya son números simples, sin Date de por medio
+
+    document.getElementById("calMesTitulo").textContent =
+      new Date(anio, mes - 1, 1).toLocaleDateString("es-MX", { month: "long", year: "numeric" });
+
+    const primerDiaSemana = new Date(anio, mes - 1, 1).getDay(); // 0 = domingo
+    const diasEnMes = new Date(anio, mes, 0).getDate();
+
+    let celdas = "";
+    for(let i = 0; i < primerDiaSemana; i++) celdas += '<div class="cal-dia vacio"></div>';
+    for(let dia = 1; dia <= diasEnMes; dia++){
+      const clave = \`\${anio}-\${String(mes).padStart(2,"0")}-\${String(dia).padStart(2,"0")}\`;
+      const tieneHorarios = Boolean(horariosPorDia[clave]);
+      const esElegido = clave === diaElegidoClave;
+      celdas += \`<div class="cal-dia \${tieneHorarios ? "con-horarios" : "sin-horarios"} \${esElegido ? "elegido" : ""}" data-clave="\${clave}">\${dia}</div>\`;
+    }
+    document.getElementById("calGridDias").innerHTML = celdas;
+
+    document.querySelectorAll(".cal-dia.con-horarios").forEach(el => {
+      el.addEventListener("click", () => {
+        diaElegidoClave = el.dataset.clave;
+        renderCalendario();
+        renderHorariosDelDia(diaElegidoClave);
+      });
+    });
+
+    // No se deja retroceder antes del mes de hoy (calculado en la zona
+    // horaria del negocio, no en la del navegador).
+    const claveHoy = clavePorDia(new Date().toISOString(), zonaHorariaAgenda);
+    const [anioHoy, mesHoy] = claveHoy.split("-").map(Number);
+    const esMesActualOAnterior = anio === anioHoy && mes === mesHoy;
+    document.getElementById("btnMesAnterior").disabled = esMesActualOAnterior;
+  }
+
+  function renderHorariosDelDia(clave){
+    const horarios = horariosPorDia[clave] || [];
+    const fechaTitulo = new Date(clave + "T12:00:00").toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long" });
+    document.getElementById("tituloListaHorarios").textContent = fechaTitulo;
+    document.getElementById("listaHorariosDia").innerHTML = horarios.map(iso => \`
+      <button type="button" class="horario-btn" data-iso="\${iso}">\${new Date(iso).toLocaleTimeString("es-MX", { hour:"numeric", minute:"2-digit", timeZone: zonaHorariaAgenda })}</button>
+    \`).join("");
+    document.querySelectorAll(".horario-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        horarioElegido = btn.dataset.iso;
+        document.getElementById("pasoCalendario").classList.add("oculto");
+        document.getElementById("pasoConfirmar").classList.remove("oculto");
+        document.getElementById("resumenHorarioElegido").textContent =
+          new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZone: zonaHorariaAgenda });
+      });
+    });
+  }
+
+  // Navegación de mes con año/mes NUMÉRICOS simples (nunca un objeto Date
+  // reinterpretado entre zonas horarias) — evita el bug donde la
+  // medianoche se "corre" un día (y a veces hasta un mes) al mezclar la
+  // zona horaria local del navegador con la del negocio.
+  document.getElementById("btnMesAnterior").addEventListener("click", () => {
+    mesCalendario--;
+    if(mesCalendario < 1){ mesCalendario = 12; anioCalendario--; }
+    renderCalendario();
+  });
+  document.getElementById("btnMesSiguiente").addEventListener("click", () => {
+    mesCalendario++;
+    if(mesCalendario > 12){ mesCalendario = 1; anioCalendario++; }
+    renderCalendario();
+  });
+
   document.getElementById("btnVolverHorarios").addEventListener("click", () => {
     document.getElementById("pasoConfirmar").classList.add("oculto");
-    document.getElementById("pasoHorarios").classList.remove("oculto");
+    document.getElementById("pasoCalendario").classList.remove("oculto");
   });
 
   document.getElementById("btnConfirmarReserva").addEventListener("click", async () => {
@@ -4667,7 +4874,16 @@ app.get("/agendar/pregunta", (req, res) => {
     texto: p.texto,
     opciones: p.opciones,
     mensaje_no_califica: configActual.agenda_mensaje_no_califica || "",
-    enlace_no_califica: configActual.agenda_enlace_no_califica || ""
+    enlace_no_califica: configActual.agenda_enlace_no_califica || "",
+    perfil: {
+      nombre: configActual.agenda_nombre || "",
+      titulo: configActual.agenda_titulo || "",
+      foto_url: configActual.agenda_foto_url || "",
+      titulo_evento: configActual.agenda_titulo_evento || "",
+      texto_oferta: configActual.agenda_texto_oferta || "",
+      whatsapp_link: configActual.agenda_whatsapp_link || "",
+      duracion_minutos: configActual.agenda_duracion_minutos || 30
+    }
   });
 });
 
@@ -4865,6 +5081,16 @@ let configActual = {
   // arriba, en vez del calendario.
   agenda_mensaje_no_califica: "Por ahora este programa no es para ti, pero aquí tienes un recurso gratis que te puede ayudar igual.",
   agenda_enlace_no_califica: "", // ej. un lead magnet — se muestra como botón si se llena
+
+  // Contenido del panel de perfil que se muestra en /agendar (columna
+  // izquierda) — puramente informativo/visual, se puede personalizar sin
+  // tocar código.
+  agenda_nombre: "Roberto Pérez",
+  agenda_titulo: "Coach de Hombres con SOBREPESO",
+  agenda_foto_url: "",
+  agenda_titulo_evento: "Agenda una llamada de Consultoría acá👇",
+  agenda_texto_oferta: "Pierde de 10 a 20 kg en solo 3 a 6 meses",
+  agenda_whatsapp_link: "",
 
   dashboard_etiqueta_asistio: "", // nombre exacto de la etiqueta manual que representa "asistió a la llamada"
   dashboard_etiqueta_compro: "",  // nombre exacto de la etiqueta manual que representa "compró / se cerró"
