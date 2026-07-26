@@ -4475,6 +4475,7 @@ app.get("/agendar", (req, res) => {
   }
   .panel-der{ width:400px; flex:none; padding:32px 30px; min-width:0; overflow-y:auto; transition:width .25s ease; }
   .panel-der.ancho-form{ width:460px; }
+  .panel-der.ancho-nocalifica{ width:690px; }
   .panel-horas{
     width:0; flex:none; padding:0; overflow:hidden;
     transition:width .25s ease, padding .25s ease; opacity:0; display:flex; flex-direction:column;
@@ -4624,6 +4625,7 @@ app.get("/agendar", (req, res) => {
     .contenedor.expandido, .contenedor.expandido-form{ width:100%; }
     .panel-izq, .panel-der{ width:100%; overflow:visible; }
     .panel-der.ancho-form{ width:100%; }
+    .panel-der.ancho-nocalifica{ width:100%; }
     .panel-izq{ border-right:none; border-bottom:1px solid var(--border); }
     .panel-horas{ width:100%; overflow:visible; }
     .panel-horas.visible{ width:100%; padding:20px 30px; }
@@ -4642,8 +4644,8 @@ app.get("/agendar", (req, res) => {
       <div class="evento-nombre" id="perfilNombreCompleto"></div>
       <h1 class="evento-titulo" id="perfilTituloEvento"></h1>
       <div class="evento-detalle"><span class="icono">🕐</span><span id="perfilDuracion"></span></div>
-      <div class="evento-detalle"><span class="icono">📹</span><span>Los detalles de la videollamada se envían al confirmar.</span></div>
-      <p class="instrucciones">Selecciona un <b>día y hora</b> de tu preferencia para la sesión (las horas se muestran en tu horario local).</p>
+      <div class="evento-detalle"><span class="icono">📹</span><span id="perfilTextoVideo"></span></div>
+      <p class="instrucciones" id="perfilInstrucciones"></p>
       <div class="advertencia oculto" id="bloqueAdvertencia">
         ⚠️ Si no encuentras un horario en el que tengas libre, escríbenos por WhatsApp <a id="enlaceWhatsapp" href="#" target="_blank">tocando aquí</a>.
       </div>
@@ -4696,7 +4698,7 @@ app.get("/agendar", (req, res) => {
       </div>
 
       <div id="pasoNoCalifica" class="oculto">
-        <h1 class="titulo-paso">Gracias por tu interés</h1>
+        <h1 class="titulo-paso" id="tituloNoCalifica">Gracias por tu interés</h1>
         <p class="sub" id="textoNoCalifica"></p>
         <a id="botonRecursoNoCalifica" class="oculto" href="#" target="_blank" style="text-decoration:none;">
           <button type="button">Ver recurso gratis</button>
@@ -4971,6 +4973,8 @@ app.get("/agendar", (req, res) => {
     document.getElementById("perfilTitulo").textContent = perfil.titulo || "";
     document.getElementById("perfilTituloEvento").textContent = perfil.titulo_evento || "Agenda tu llamada";
     document.getElementById("perfilDuracion").textContent = (perfil.duracion_minutos || 30) + " min";
+    document.getElementById("perfilTextoVideo").innerHTML = perfil.texto_video || "";
+    document.getElementById("perfilInstrucciones").innerHTML = perfil.texto_instrucciones || "";
     document.getElementById("perfilOferta").innerHTML = perfil.texto_oferta || "";
     if(perfil.foto_url){
       document.getElementById("perfilFoto").outerHTML = \`<img class="perfil-foto" id="perfilFoto" src="\${perfil.foto_url}" alt="">\`;
@@ -5283,6 +5287,7 @@ app.get("/agendar", (req, res) => {
     });
     if(preguntaDescalificante){
       document.getElementById("pasoFormulario").classList.add("oculto");
+      document.getElementById("tituloNoCalifica").textContent = datosFormulario.titulo_no_califica || "Gracias por tu interés";
       document.getElementById("textoNoCalifica").innerHTML = datosFormulario.mensaje_no_califica;
       if(datosFormulario.enlace_no_califica){
         const boton = document.getElementById("botonRecursoNoCalifica");
@@ -5290,6 +5295,12 @@ app.get("/agendar", (req, res) => {
         boton.classList.remove("oculto");
       }
       document.getElementById("pasoNoCalifica").classList.remove("oculto");
+      // El panel de la derecha (que en el paso del formulario se dejaba
+      // en blanco reservando espacio para volver al calendario) ya no
+      // hace falta aquí — se oculta del todo y el texto de "no califica"
+      // usa ese espacio también, ocupando el ancho completo del cuadro.
+      document.getElementById("panelHoras").classList.remove("visible", "vacio-form");
+      document.querySelector(".panel-der").classList.add("ancho-nocalifica");
       return;
     }
 
@@ -5339,6 +5350,7 @@ app.get("/agendar/pregunta", (req, res) => {
   res.json({
     preguntas: Array.isArray(configActual.agenda_preguntas) ? configActual.agenda_preguntas : [],
     mensaje_no_califica: configActual.agenda_mensaje_no_califica || "",
+    titulo_no_califica: configActual.agenda_titulo_no_califica || "Gracias por tu interés",
     enlace_no_califica: configActual.agenda_enlace_no_califica || "",
     campo_nombre: configActual.agenda_campo_nombre || { texto: "Tu nombre", obligatorio: true },
     campo_correo: configActual.agenda_campo_correo || { texto: "Tu correo", obligatorio: false },
@@ -5347,6 +5359,8 @@ app.get("/agendar/pregunta", (req, res) => {
       titulo: configActual.agenda_titulo || "",
       foto_url: configActual.agenda_foto_url || "",
       titulo_evento: configActual.agenda_titulo_evento || "",
+      texto_video: configActual.agenda_texto_video || "",
+      texto_instrucciones: configActual.agenda_texto_instrucciones || "",
       texto_oferta: configActual.agenda_texto_oferta || "",
       whatsapp_link: configActual.agenda_whatsapp_link || "",
       duracion_minutos: configActual.agenda_duracion_minutos || 30
@@ -5624,6 +5638,7 @@ let configActual = {
   ],
   // Qué se le muestra a quien queda descalificado por cualquiera de las
   // preguntas de arriba, en vez del calendario.
+  agenda_titulo_no_califica: "Gracias por tu interés",
   agenda_mensaje_no_califica: "Por ahora este programa no es para ti, pero aquí tienes un recurso gratis que te puede ayudar igual.",
   agenda_enlace_no_califica: "", // ej. un lead magnet — se muestra como botón si se llena
 
@@ -5634,6 +5649,8 @@ let configActual = {
   agenda_titulo: "Coach de Hombres con SOBREPESO",
   agenda_foto_url: "",
   agenda_titulo_evento: "Agenda una llamada de Consultoría acá👇",
+  agenda_texto_video: "Los detalles de la videollamada se envían al confirmar.",
+  agenda_texto_instrucciones: "Selecciona un día y hora de tu preferencia para la sesión (las horas se muestran en tu horario local).",
   agenda_texto_oferta: "Pierde de 10 a 20 kg en solo 3 a 6 meses",
   agenda_whatsapp_link: "",
 
@@ -6477,8 +6494,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
             transiciones_generales_elegir_mejor, mensajes_error_audio, calendly_token, calendly_pregunta_instagram, calendly_pregunta_instagram_posicion,
             dashboard_etiqueta_asistio, dashboard_etiqueta_compro, franja_horaria_activa, franja_horaria_desde, franja_horaria_hasta,
             agenda_zona_horaria, agenda_duracion_minutos, agenda_dias_hacia_adelante, agenda_aviso_minimo_horas, agenda_horario_semanal,
-            agenda_preguntas, agenda_mensaje_no_califica, agenda_enlace_no_califica, agenda_nombre, agenda_titulo,
-            agenda_foto_url, agenda_titulo_evento, agenda_texto_oferta, agenda_whatsapp_link,
+            agenda_preguntas, agenda_mensaje_no_califica, agenda_titulo_no_califica, agenda_enlace_no_califica, agenda_nombre, agenda_titulo,
+            agenda_foto_url, agenda_titulo_evento, agenda_texto_video, agenda_texto_instrucciones, agenda_texto_oferta, agenda_whatsapp_link,
             agenda_campo_nombre, agenda_campo_correo } = req.body || {};
 
     const nuevaConfig = {};
@@ -6573,11 +6590,14 @@ app.post("/config", requireAdminKey, async (req, res) => {
         .filter(p => p.texto);
     }
     if (typeof agenda_mensaje_no_califica === "string") nuevaConfig.agenda_mensaje_no_califica = agenda_mensaje_no_califica.trim();
+    if (typeof agenda_titulo_no_califica === "string") nuevaConfig.agenda_titulo_no_califica = agenda_titulo_no_califica.trim() || "Gracias por tu interés";
     if (typeof agenda_enlace_no_califica === "string") nuevaConfig.agenda_enlace_no_califica = agenda_enlace_no_califica.trim();
     if (typeof agenda_nombre === "string") nuevaConfig.agenda_nombre = agenda_nombre.trim();
     if (typeof agenda_titulo === "string") nuevaConfig.agenda_titulo = agenda_titulo.trim();
     if (typeof agenda_foto_url === "string") nuevaConfig.agenda_foto_url = agenda_foto_url.trim();
     if (typeof agenda_titulo_evento === "string") nuevaConfig.agenda_titulo_evento = agenda_titulo_evento.trim();
+    if (typeof agenda_texto_video === "string") nuevaConfig.agenda_texto_video = agenda_texto_video.trim();
+    if (typeof agenda_texto_instrucciones === "string") nuevaConfig.agenda_texto_instrucciones = agenda_texto_instrucciones.trim();
     if (typeof agenda_texto_oferta === "string") nuevaConfig.agenda_texto_oferta = agenda_texto_oferta.trim();
     if (typeof agenda_whatsapp_link === "string") nuevaConfig.agenda_whatsapp_link = agenda_whatsapp_link.trim();
 
@@ -7296,6 +7316,10 @@ ${estilosBase()}
       </div>
       <label style="margin-top:14px;">Título del evento</label>
       <input type="text" id="inputAgendaTituloEvento">
+      <label style="margin-top:14px;">Texto junto al ícono 📹 (detalles de la videollamada)</label>
+      <div class="rte-shell" id="rteTextoVideo"></div>
+      <label style="margin-top:14px;">Instrucciones (debajo de la duración y el video)</label>
+      <div class="rte-shell" id="rteInstrucciones"></div>
       <label style="margin-top:14px;">Frase de oferta (al final del panel izquierdo)</label>
       <div class="rte-shell" id="rteOferta"></div>
       <label style="margin-top:14px;">Enlace de WhatsApp (opcional — si lo llenas, aparece el aviso "si no encuentras un horario libre")</label>
@@ -7330,7 +7354,9 @@ ${estilosBase()}
           <div id="preguntasCont"></div>
           <button type="button" class="add-paso" id="btnAgregarPregunta">+ Agregar pregunta</button>
 
-          <label style="margin-top:22px;">Mensaje para quien NO califica</label>
+          <label style="margin-top:22px;">Título de la pantalla de "no califica"</label>
+          <input type="text" id="inputTituloNoCalifica">
+          <label style="margin-top:14px;">Mensaje para quien NO califica</label>
           <div class="rte-shell" id="rteNoCalifica"></div>
           <p class="hint" style="margin:6px 0 0;">Puedes agregar un enlace real aquí (por ejemplo, a tu comunidad de WhatsApp) con el botón 🔗 — va a funcionar como un enlace de verdad en la página pública.</p>
           <label style="margin-top:14px;">Enlace de un recurso para quien no califica (opcional — aparece como botón)</label>
@@ -7631,6 +7657,8 @@ ${estilosBase()}
 
   const editorOferta = crearEditorRico("rteOferta", "Ej: Pierde de 10 a 20 kg en solo 3 a 6 meses");
   const editorNoCalifica = crearEditorRico("rteNoCalifica", "Ej: Por ahora este programa no es para ti, pero aquí tienes un recurso gratis...");
+  const editorTextoVideo = crearEditorRico("rteTextoVideo", "Ej: Los detalles de la videollamada se envían al confirmar.");
+  const editorInstrucciones = crearEditorRico("rteInstrucciones", "Ej: Selecciona un día y hora de tu preferencia...");
 
   // --- Subida de la foto de perfil ---
   function actualizarPreviewFoto(url){
@@ -7981,9 +8009,12 @@ ${estilosBase()}
     fotoPerfilUrlActual = cfg.agenda_foto_url || "";
     actualizarPreviewFoto(fotoPerfilUrlActual);
     document.getElementById("inputAgendaTituloEvento").value = cfg.agenda_titulo_evento || "";
+    editorTextoVideo.establecerHTML(cfg.agenda_texto_video || "");
+    editorInstrucciones.establecerHTML(cfg.agenda_texto_instrucciones || "");
     editorOferta.establecerHTML(cfg.agenda_texto_oferta || "");
     document.getElementById("inputAgendaWhatsapp").value = cfg.agenda_whatsapp_link || "";
 
+    document.getElementById("inputTituloNoCalifica").value = cfg.agenda_titulo_no_califica || "Gracias por tu interés";
     editorNoCalifica.establecerHTML(cfg.agenda_mensaje_no_califica || "");
     document.getElementById("inputEnlaceNoCalifica").value = cfg.agenda_enlace_no_califica || "";
 
@@ -8014,8 +8045,11 @@ ${estilosBase()}
       agenda_titulo: document.getElementById("inputAgendaTitulo").value.trim(),
       agenda_foto_url: fotoPerfilUrlActual,
       agenda_titulo_evento: document.getElementById("inputAgendaTituloEvento").value.trim(),
+      agenda_texto_video: editorTextoVideo.obtenerHTML(),
+      agenda_texto_instrucciones: editorInstrucciones.obtenerHTML(),
       agenda_texto_oferta: editorOferta.obtenerHTML(),
       agenda_whatsapp_link: document.getElementById("inputAgendaWhatsapp").value.trim(),
+      agenda_titulo_no_califica: document.getElementById("inputTituloNoCalifica").value.trim() || "Gracias por tu interés",
       agenda_mensaje_no_califica: editorNoCalifica.obtenerHTML(),
       agenda_enlace_no_califica: document.getElementById("inputEnlaceNoCalifica").value.trim(),
       agenda_campo_nombre: {
