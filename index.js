@@ -4505,6 +4505,9 @@ app.get("/agendar", (req, res) => {
   h1.titulo-paso{ font-size:19px; margin:0 0 6px; }
   p.sub{ color:var(--muted); font-size:14px; margin:0 0 22px; line-height:1.5; }
   label{ display:block; font-size:13.5px; font-weight:600; margin:16px 0 10px; }
+  .bloque-pregunta{ margin-bottom:25px; }
+  .bloque-pregunta:last-child{ margin-bottom:0; }
+  .bloque-pregunta label{ margin-top:0; margin-bottom:10px; }
   input[type=text], input[type=email]{
     width:100%; background:#fff; border:1px solid var(--border); border-radius:8px;
     padding:11px 13px; color:var(--text); font-size:14.5px; font-family:inherit;
@@ -5040,7 +5043,7 @@ app.get("/agendar", (req, res) => {
         <label>\${p.texto}\${marcaObligatoria}</label>
         <input type="text" class="input-respuesta" data-id="\${p.id}" data-tipo="texto" data-obligatoria="\${p.obligatoria ? "1" : ""}">
       \`;
-    }).join("");
+    }).map(html => \`<div class="bloque-pregunta">\${html}</div>\`).join("");
 
     cont.querySelectorAll(".grupo-radios").forEach(grupo => {
       grupo.querySelectorAll(".opcion").forEach(el => {
