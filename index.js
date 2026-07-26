@@ -4543,11 +4543,16 @@ app.get("/agendar", (req, res) => {
   .zona-item .nombre{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .zona-sin-resultados{ padding:14px 13px; font-size:12.5px; color:var(--muted); text-align:center; }
 
+  .tel-caja{
+    display:flex; align-items:center; background:#fff; border:1px solid var(--border);
+    border-radius:8px; overflow:hidden;
+  }
+  .tel-caja:focus-within{ border-color:var(--accent); }
   .tel-pais-widget{ position:relative; flex:0 0 auto; }
   .tel-pais-boton{
-    background:#fff; border:1px solid var(--border); border-radius:8px; padding:9px 10px;
+    background:transparent; border:none; padding:11px 10px 11px 13px;
     color:var(--text); font-size:13px; font-family:inherit; cursor:pointer;
-    display:flex; align-items:center; gap:6px; height:100%; white-space:nowrap;
+    display:flex; align-items:center; gap:6px; white-space:nowrap;
   }
   .tel-pais-boton .flecha{ color:var(--muted); font-size:10px; margin-left:2px; }
   .tel-pais-panel{
@@ -4574,6 +4579,12 @@ app.get("/agendar", (req, res) => {
   .tel-pais-item.elegido{ background:var(--accent); color:#fff; }
   .tel-pais-item.elegido .codigo{ color:#fff; }
   .tel-pais-sin-resultados{ padding:16px; font-size:13px; color:#68707E; text-align:center; }
+  .tel-divisor{ width:1px; align-self:stretch; background:var(--border); margin:8px 0; flex-shrink:0; }
+  .input-tel-numero{
+    border:none !important; background:transparent !important; flex:1; min-width:0;
+    padding:11px 13px 11px 10px !important;
+  }
+  .input-tel-numero:focus{ outline:none; }
   .opcion{
     display:flex; align-items:center; gap:10px; background:#fff; border:1.5px solid var(--border);
     border-radius:10px; padding:13px 14px; margin-bottom:8px; cursor:pointer; transition:border-color .15s;
@@ -5041,20 +5052,23 @@ app.get("/agendar", (req, res) => {
       if(p.tipo === "telefono"){
         return \`
           <label>\${p.texto}\${marcaObligatoria}</label>
-          <div class="grupo-telefono" data-id="\${p.id}" data-tipo="telefono" data-obligatoria="\${p.obligatoria ? "1" : ""}" style="display:flex; gap:8px;">
-            <div class="tel-pais-widget">
-              <button type="button" class="tel-pais-boton">
-                <span class="tel-pais-bandera">\${PAIS_POR_DEFECTO.f}</span>
-                <span class="tel-pais-codigo-actual">\${PAIS_POR_DEFECTO.c}</span>
-                <span class="flecha">▾</span>
-              </button>
-              <div class="tel-pais-panel oculto">
-                <div class="tel-pais-titulo">Seleccionar el código de país</div>
-                <input type="text" class="tel-pais-buscador" placeholder="Buscar país...">
-                <div class="tel-pais-lista"></div>
+          <div class="grupo-telefono" data-id="\${p.id}" data-tipo="telefono" data-obligatoria="\${p.obligatoria ? "1" : ""}">
+            <div class="tel-caja">
+              <div class="tel-pais-widget">
+                <button type="button" class="tel-pais-boton">
+                  <span class="tel-pais-bandera">\${PAIS_POR_DEFECTO.f}</span>
+                  <span class="tel-pais-codigo-actual">\${PAIS_POR_DEFECTO.c}</span>
+                  <span class="flecha">▾</span>
+                </button>
+                <div class="tel-pais-panel oculto">
+                  <div class="tel-pais-titulo">Seleccionar el código de país</div>
+                  <input type="text" class="tel-pais-buscador" placeholder="Buscar país...">
+                  <div class="tel-pais-lista"></div>
+                </div>
               </div>
+              <div class="tel-divisor"></div>
+              <input type="tel" class="input-tel-numero" placeholder="Número de WhatsApp" inputmode="numeric">
             </div>
-            <input type="tel" class="input-tel-numero" placeholder="Número de WhatsApp" style="flex:1;" inputmode="numeric">
           </div>
         \`;
       }
@@ -7561,11 +7575,12 @@ ${estilosBase()}
         return \`
           <div class="pv-pregunta">
             <label class="pv-label">\${p.texto || "(sin texto todavía)"}\${marcaObligatoria}</label>
-            <div style="display:flex; gap:6px;">
-              <div style="flex:0 0 auto; background:#fff; border:1px solid #E3E6EB; border-radius:8px; padding:9px 10px; font-size:13px; display:flex; align-items:center; gap:5px; white-space:nowrap;">
+            <div style="display:flex; align-items:center; background:#fff; border:1px solid #E3E6EB; border-radius:8px; overflow:hidden;">
+              <div style="flex:0 0 auto; padding:10px 10px 10px 13px; font-size:13px; display:flex; align-items:center; gap:5px; white-space:nowrap;">
                 <span>\${PAIS_POR_DEFECTO.f}</span> <span>\${PAIS_POR_DEFECTO.c}</span> <span style="color:#9AA2AF; font-size:10px;">▾</span>
               </div>
-              <input type="text" class="pv-texto" disabled placeholder="Número de WhatsApp">
+              <div style="width:1px; align-self:stretch; background:#E3E6EB; margin:7px 0;"></div>
+              <input type="text" class="pv-texto" disabled placeholder="Número de WhatsApp" style="border:none; padding:10px 13px 10px 10px;">
             </div>
           </div>
         \`;
