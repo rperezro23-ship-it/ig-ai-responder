@@ -4670,9 +4670,7 @@ app.get("/agendar", (req, res) => {
         <input type="text" id="inputNombre" placeholder="Ej: Juan Pérez">
         <label>Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
         <input type="email" id="inputEmail" placeholder="tucorreo@ejemplo.com">
-        <label id="labelPregunta"></label>
-        <div id="contenedorOpciones"></div>
-        <div id="contenedorPreguntasExtra"></div>
+        <div id="contenedorPreguntas"></div>
         <div class="error oculto" id="errorFormulario"></div>
         <button class="ancho" id="btnAgendar">Agendar</button>
       </div>
@@ -4702,8 +4700,7 @@ app.get("/agendar", (req, res) => {
 
 <script>
   const usernamePrellenado = ${JSON.stringify(usernamePrellenado)};
-  let pregunta = null;
-  let opcionElegida = null;
+  let datosFormulario = null;
   let horarioElegido = null;
   let horariosPorDia = {};   // clave "YYYY-MM-DD" (en la zona horaria MOSTRADA) -> [iso, iso, ...]
   let zonaHorariaMostrada = Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Mexico_City";
@@ -4810,9 +4807,9 @@ app.get("/agendar", (req, res) => {
 
   async function cargarPregunta(){
     const res = await fetch("/agendar/pregunta");
-    pregunta = await res.json();
+    datosFormulario = await res.json();
 
-    const perfil = pregunta.perfil || {};
+    const perfil = datosFormulario.perfil || {};
     document.getElementById("perfilNombre").textContent = perfil.nombre || "";
     document.getElementById("perfilNombreCompleto").textContent = perfil.nombre || "";
     document.getElementById("perfilTitulo").textContent = perfil.titulo || "";
@@ -4829,43 +4826,52 @@ app.get("/agendar", (req, res) => {
       document.getElementById("bloqueAdvertencia").classList.remove("oculto");
     }
 
-    document.getElementById("labelPregunta").textContent = pregunta.texto;
-    const cont = document.getElementById("contenedorOpciones");
-    cont.innerHTML = pregunta.opciones.map((op, i) => \`
-      <label class="opcion" data-i="\${i}">
-        <input type="radio" name="opcionPresupuesto" value="\${i}">
-        <span>\${op.texto}</span>
-      </label>
-    \`).join("");
-    cont.querySelectorAll(".opcion").forEach(el => {
-      el.addEventListener("click", () => {
-        cont.querySelectorAll(".opcion").forEach(o => o.classList.remove("elegida"));
-        el.classList.add("elegida");
-        el.querySelector("input").checked = true;
-        opcionElegida = Number(el.dataset.i);
-      });
-    });
-
-    // Preguntas ADICIONALES del formulario (aparte de la de presupuesto)
-    // — nunca descalifican, solo se recolectan como información extra.
-    const contExtra = document.getElementById("contenedorPreguntasExtra");
-    const preguntasExtra = pregunta.preguntas_extra || [];
-    contExtra.innerHTML = preguntasExtra.map(p => {
+    // TODAS las preguntas se renderizan aquí, cada una con su propio
+    // estilo — "opciones"+"radios" se ve como círculos ya desplegados,
+    // "opciones"+"desplegable" como un <select>, y "texto" como un campo
+    // simple. Cualquiera de ellas puede marcar como respondida una opción
+    // que descalifique (eso se revisa al dar clic en "Agendar", más abajo).
+    const preguntasCargadas = datosFormulario.preguntas || [];
+    const cont = document.getElementById("contenedorPreguntas");
+    cont.innerHTML = preguntasCargadas.map(p => {
       const marcaObligatoria = p.obligatoria ? " *" : "";
+      if(p.tipo === "opciones" && p.estilo_visual === "desplegable"){
+        return \`
+          <label>\${p.texto}\${marcaObligatoria}</label>
+          <select class="input-respuesta" data-id="\${p.id}" data-tipo="opciones" data-obligatoria="\${p.obligatoria ? "1" : ""}">
+            <option value="">Elige una opción...</option>
+            \${(p.opciones || []).map(op => \`<option value="\${op.texto}">\${op.texto}</option>\`).join("")}
+          </select>
+        \`;
+      }
       if(p.tipo === "opciones"){
         return \`
           <label>\${p.texto}\${marcaObligatoria}</label>
-          <select class="input-pregunta-extra" data-id="\${p.id}" data-obligatoria="\${p.obligatoria ? "1" : ""}">
-            <option value="">Elige una opción...</option>
-            \${p.opciones.map(op => \`<option value="\${op}">\${op}</option>\`).join("")}
-          </select>
+          <div class="grupo-radios" data-id="\${p.id}" data-tipo="opciones" data-obligatoria="\${p.obligatoria ? "1" : ""}">
+            \${(p.opciones || []).map((op, i) => \`
+              <label class="opcion" data-valor="\${op.texto.replace(/"/g,"&quot;")}">
+                <input type="radio" name="preg_\${p.id}" value="\${op.texto.replace(/"/g,"&quot;")}">
+                <span>\${op.texto}</span>
+              </label>
+            \`).join("")}
+          </div>
         \`;
       }
       return \`
         <label>\${p.texto}\${marcaObligatoria}</label>
-        <input type="text" class="input-pregunta-extra" data-id="\${p.id}" data-obligatoria="\${p.obligatoria ? "1" : ""}">
+        <input type="text" class="input-respuesta" data-id="\${p.id}" data-tipo="texto" data-obligatoria="\${p.obligatoria ? "1" : ""}">
       \`;
     }).join("");
+
+    cont.querySelectorAll(".grupo-radios").forEach(grupo => {
+      grupo.querySelectorAll(".opcion").forEach(el => {
+        el.addEventListener("click", () => {
+          grupo.querySelectorAll(".opcion").forEach(o => o.classList.remove("elegida"));
+          el.classList.add("elegida");
+          el.querySelector("input").checked = true;
+        });
+      });
+    });
   }
 
   async function cargarHorarios(){
@@ -5020,17 +5026,23 @@ app.get("/agendar", (req, res) => {
     errorEl.classList.add("oculto");
 
     if(!nombre){ errorEl.textContent = "Por favor escribe tu nombre."; errorEl.classList.remove("oculto"); return; }
-    if(opcionElegida === null){ errorEl.textContent = "Por favor elige una opción."; errorEl.classList.remove("oculto"); return; }
 
-    // Recolecta las respuestas a las preguntas extra, validando que las
-    // marcadas como obligatorias sí tengan respuesta.
-    const respuestasExtra = {};
+    // Recolecta la respuesta de CADA pregunta (sea de texto, radios, o
+    // desplegable), validando que las obligatorias sí tengan respuesta.
+    const respuestas = {};
     let faltaObligatoria = null;
-    document.querySelectorAll(".input-pregunta-extra").forEach(el => {
+    document.querySelectorAll("#contenedorPreguntas .input-respuesta").forEach(el => {
       const valor = el.value.trim();
-      if(valor) respuestasExtra[el.dataset.id] = valor;
+      if(valor) respuestas[el.dataset.id] = valor;
       else if(el.dataset.obligatoria === "1" && !faltaObligatoria){
-        faltaObligatoria = el.previousElementSibling?.textContent || "un campo obligatorio";
+        faltaObligatoria = (el.previousElementSibling?.textContent || "un campo obligatorio").replace(/\s*\*$/, "");
+      }
+    });
+    document.querySelectorAll("#contenedorPreguntas .grupo-radios").forEach(grupo => {
+      const elegida = grupo.querySelector("input:checked");
+      if(elegida) respuestas[grupo.dataset.id] = elegida.value;
+      else if(grupo.dataset.obligatoria === "1" && !faltaObligatoria){
+        faltaObligatoria = (grupo.previousElementSibling?.textContent || "un campo obligatorio").replace(/\s*\*$/, "");
       }
     });
     if(faltaObligatoria){
@@ -5039,13 +5051,20 @@ app.get("/agendar", (req, res) => {
       return;
     }
 
-    const opcion = pregunta.opciones[opcionElegida];
-    if(opcion.descalifica){
+    // Revisa si la respuesta elegida en CUALQUIER pregunta de opción
+    // múltiple corresponde a una opción marcada "descalifica" — si es así,
+    // nunca se llega a llamar a /agendar/confirmar, se manda directo a la
+    // pantalla de "no califica".
+    const preguntasCargadas = datosFormulario.preguntas || [];
+    const preguntaDescalificante = preguntasCargadas.find(p =>
+      p.tipo === "opciones" && (p.opciones || []).some(op => op.texto === respuestas[p.id] && op.descalifica)
+    );
+    if(preguntaDescalificante){
       document.getElementById("pasoFormulario").classList.add("oculto");
-      document.getElementById("textoNoCalifica").textContent = pregunta.mensaje_no_califica;
-      if(pregunta.enlace_no_califica){
+      document.getElementById("textoNoCalifica").textContent = datosFormulario.mensaje_no_califica;
+      if(datosFormulario.enlace_no_califica){
         const boton = document.getElementById("botonRecursoNoCalifica");
-        boton.href = pregunta.enlace_no_califica;
+        boton.href = datosFormulario.enlace_no_califica;
         boton.classList.remove("oculto");
       }
       document.getElementById("pasoNoCalifica").classList.remove("oculto");
@@ -5062,9 +5081,8 @@ app.get("/agendar", (req, res) => {
           nombre,
           email: document.getElementById("inputEmail").value.trim(),
           instagram_username: usernamePrellenado,
-          presupuesto: opcion.texto,
           inicio_iso: horarioElegido,
-          respuestas_extra: respuestasExtra
+          respuestas
         })
       });
       const data = await res.json();
@@ -5096,13 +5114,10 @@ app.get("/agendar", (req, res) => {
 
 // Datos de la pregunta de presupuesto (público, sin datos sensibles).
 app.get("/agendar/pregunta", (req, res) => {
-  const p = configActual.agenda_pregunta_presupuesto || { texto: "", opciones: [] };
   res.json({
-    texto: p.texto,
-    opciones: p.opciones,
+    preguntas: Array.isArray(configActual.agenda_preguntas) ? configActual.agenda_preguntas : [],
     mensaje_no_califica: configActual.agenda_mensaje_no_califica || "",
     enlace_no_califica: configActual.agenda_enlace_no_califica || "",
-    preguntas_extra: Array.isArray(configActual.agenda_preguntas_extra) ? configActual.agenda_preguntas_extra : [],
     perfil: {
       nombre: configActual.agenda_nombre || "",
       titulo: configActual.agenda_titulo || "",
@@ -5132,16 +5147,29 @@ app.get("/agendar/horarios", async (req, res) => {
 // si un lead agendó, sin depender de ninguna API externa.
 app.post("/agendar/confirmar", async (req, res) => {
   try {
-    const { nombre, email, instagram_username, presupuesto, inicio_iso, respuestas_extra } = req.body || {};
+    const { nombre, email, instagram_username, inicio_iso, respuestas } = req.body || {};
     if (!inicio_iso) return res.status(400).json({ error: "Falta el horario elegido." });
 
-    // Valida que las preguntas extra marcadas como OBLIGATORIAS sí tengan
-    // respuesta — nunca confiar solo en la validación del navegador.
-    const preguntasExtra = Array.isArray(configActual.agenda_preguntas_extra) ? configActual.agenda_preguntas_extra : [];
-    const respuestasRecibidas = (respuestas_extra && typeof respuestas_extra === "object") ? respuestas_extra : {};
-    for (const p of preguntasExtra) {
+    const preguntas = Array.isArray(configActual.agenda_preguntas) ? configActual.agenda_preguntas : [];
+    const respuestasRecibidas = (respuestas && typeof respuestas === "object") ? respuestas : {};
+
+    // Valida que las preguntas OBLIGATORIAS sí tengan respuesta — nunca
+    // confiar solo en la validación del navegador.
+    for (const p of preguntas) {
       if (p.obligatoria && !String(respuestasRecibidas[p.id] || "").trim()) {
         return res.status(400).json({ error: `Falta responder: ${p.texto}` });
+      }
+    }
+
+    // Red de seguridad: vuelve a revisar aquí mismo si alguna respuesta
+    // elegida corresponde a una opción marcada "descalifica" — el
+    // navegador ya debería haber bloqueado esto antes de llegar aquí, pero
+    // nunca se confía solo en esa validación del lado del cliente.
+    for (const p of preguntas) {
+      if (p.tipo !== "opciones") continue;
+      const opcionElegida = (p.opciones || []).find(o => o.texto === respuestasRecibidas[p.id]);
+      if (opcionElegida?.descalifica) {
+        return res.status(403).json({ error: "No calificas según tus respuestas.", descalifica: true });
       }
     }
 
@@ -5153,16 +5181,12 @@ app.post("/agendar/confirmar", async (req, res) => {
       return res.status(409).json({ error: "Ese horario ya no está disponible, por favor elige otro." });
     }
 
-    // Las respuestas extra se agregan a las notas del evento de Google
+    // Todas las respuestas se agregan a las notas del evento de Google
     // Calendar, para que queden visibles ahí mismo sin tener que entrar a
     // Supabase a buscarlas.
-    const lineasExtra = preguntasExtra
-      .map(p => respuestasRecibidas[p.id] ? `${p.texto}: ${respuestasRecibidas[p.id]}` : null)
-      .filter(Boolean);
     const notasCompletas = [
-      `Presupuesto: ${presupuesto || "no especificado"}`,
       `Instagram: @${instagram_username || "no especificado"}`,
-      ...lineasExtra
+      ...preguntas.map(p => respuestasRecibidas[p.id] ? `${p.texto}: ${respuestasRecibidas[p.id]}` : null).filter(Boolean)
     ].join("\n");
 
     const eventoCreado = await crearEventoGoogleCalendar({
@@ -5180,8 +5204,7 @@ app.post("/agendar/confirmar", async (req, res) => {
       nombre: nombre || null,
       instagram_username: (instagram_username || "").trim().replace(/^@/, "").toLowerCase() || null,
       email: email || null,
-      presupuesto: presupuesto || null,
-      respuestas_extra: Object.keys(respuestasRecibidas).length > 0 ? respuestasRecibidas : null,
+      respuestas: Object.keys(respuestasRecibidas).length > 0 ? respuestasRecibidas : null,
       inicio: inicio.toISOString(),
       fin: fin.toISOString(),
       google_event_id: eventoCreado.id,
@@ -5317,19 +5340,32 @@ let configActual = {
     sabado:    { activo: false, desde: "09:00", hasta: "13:00" },
     domingo:   { activo: false, desde: "09:00", hasta: "13:00" }
   },
-  // Pregunta de presupuesto que filtra el acceso al calendario — se
-  // muestra ANTES del calendario, y si el lead elige la opción marcada
-  // como "descalifica", nunca llega a ver los horarios.
-  agenda_pregunta_presupuesto: {
-    texto: "¿Cuánto capital dispones para tu cambio?",
-    opciones: [
-      { texto: "Menos de 100 USD", descalifica: true },
-      { texto: "De 100 a 300 USD", descalifica: false },
-      { texto: "De 300 a 500 USD", descalifica: false }
-    ]
-  },
-  // Qué se le muestra a quien queda descalificado por la pregunta de
-  // arriba, en vez del calendario.
+  // TODAS las preguntas del formulario, en un solo lugar — cada una puede
+  // ser de texto libre, o de opción múltiple (con estilo "radios",
+  // mostrando todas las opciones ya desplegadas, o "desplegable", como un
+  // <select>). En las de opción múltiple, CUALQUIER opción de CUALQUIER
+  // pregunta puede marcarse como "descalifica" — si el lead elige una así,
+  // nunca llega a ver el calendario. Formato de cada una:
+  // { id, texto, tipo: "texto" | "opciones", estilo_visual: "radios" |
+  // "desplegable" (solo aplica si tipo="opciones"),
+  // opciones: [{ texto, descalifica }] (solo si tipo="opciones"),
+  // obligatoria: boolean }.
+  agenda_preguntas: [
+    {
+      id: "presupuesto",
+      texto: "¿Cuánto capital dispones para tu cambio?",
+      tipo: "opciones",
+      estilo_visual: "radios",
+      opciones: [
+        { texto: "Menos de 100 USD", descalifica: true },
+        { texto: "De 100 a 300 USD", descalifica: false },
+        { texto: "De 300 a 500 USD", descalifica: false }
+      ],
+      obligatoria: true
+    }
+  ],
+  // Qué se le muestra a quien queda descalificado por cualquiera de las
+  // preguntas de arriba, en vez del calendario.
   agenda_mensaje_no_califica: "Por ahora este programa no es para ti, pero aquí tienes un recurso gratis que te puede ayudar igual.",
   agenda_enlace_no_califica: "", // ej. un lead magnet — se muestra como botón si se llena
 
@@ -5342,12 +5378,6 @@ let configActual = {
   agenda_titulo_evento: "Agenda una llamada de Consultoría acá👇",
   agenda_texto_oferta: "Pierde de 10 a 20 kg en solo 3 a 6 meses",
   agenda_whatsapp_link: "",
-  // Preguntas ADICIONALES del formulario, aparte de la de presupuesto —
-  // no filtran el acceso al calendario (esa sigue siendo únicamente la de
-  // presupuesto), solo recogen información extra del lead. Cada una:
-  // { id, texto, tipo: "texto" | "opciones", opciones: [string,...] (si
-  // tipo="opciones"), obligatoria: boolean }.
-  agenda_preguntas_extra: [],
 
   dashboard_etiqueta_asistio: "", // nombre exacto de la etiqueta manual que representa "asistió a la llamada"
   dashboard_etiqueta_compro: "",  // nombre exacto de la etiqueta manual que representa "compró / se cerró"
@@ -6189,8 +6219,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
             transiciones_generales_elegir_mejor, mensajes_error_audio, calendly_token, calendly_pregunta_instagram, calendly_pregunta_instagram_posicion,
             dashboard_etiqueta_asistio, dashboard_etiqueta_compro, franja_horaria_activa, franja_horaria_desde, franja_horaria_hasta,
             agenda_zona_horaria, agenda_duracion_minutos, agenda_dias_hacia_adelante, agenda_aviso_minimo_horas, agenda_horario_semanal,
-            agenda_pregunta_presupuesto, agenda_mensaje_no_califica, agenda_enlace_no_califica, agenda_nombre, agenda_titulo,
-            agenda_foto_url, agenda_titulo_evento, agenda_texto_oferta, agenda_whatsapp_link, agenda_preguntas_extra } = req.body || {};
+            agenda_preguntas, agenda_mensaje_no_califica, agenda_enlace_no_califica, agenda_nombre, agenda_titulo,
+            agenda_foto_url, agenda_titulo_evento, agenda_texto_oferta, agenda_whatsapp_link } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -6248,13 +6278,25 @@ app.post("/config", requireAdminKey, async (req, res) => {
       if (Object.keys(horarioValido).length === DIAS_SEMANA_CLAVE.length) nuevaConfig.agenda_horario_semanal = horarioValido;
     }
 
-    if (agenda_pregunta_presupuesto && typeof agenda_pregunta_presupuesto === "object" && Array.isArray(agenda_pregunta_presupuesto.opciones)) {
-      nuevaConfig.agenda_pregunta_presupuesto = {
-        texto: String(agenda_pregunta_presupuesto.texto || "").trim(),
-        opciones: agenda_pregunta_presupuesto.opciones
-          .map(o => ({ texto: String(o?.texto || "").trim(), descalifica: Boolean(o?.descalifica) }))
-          .filter(o => o.texto)
-      };
+    if (Array.isArray(agenda_preguntas)) {
+      nuevaConfig.agenda_preguntas = agenda_preguntas
+        .map((p, i) => {
+          const tipo = p?.tipo === "opciones" ? "opciones" : "texto";
+          const base = {
+            id: String(p?.id || `pregunta_${i}`),
+            texto: String(p?.texto || "").trim(),
+            tipo,
+            obligatoria: Boolean(p?.obligatoria)
+          };
+          if (tipo === "opciones") {
+            base.estilo_visual = p?.estilo_visual === "desplegable" ? "desplegable" : "radios";
+            base.opciones = Array.isArray(p?.opciones)
+              ? p.opciones.map(o => ({ texto: String(o?.texto || "").trim(), descalifica: Boolean(o?.descalifica) })).filter(o => o.texto)
+              : [];
+          }
+          return base;
+        })
+        .filter(p => p.texto);
     }
     if (typeof agenda_mensaje_no_califica === "string") nuevaConfig.agenda_mensaje_no_califica = agenda_mensaje_no_califica.trim();
     if (typeof agenda_enlace_no_califica === "string") nuevaConfig.agenda_enlace_no_califica = agenda_enlace_no_califica.trim();
@@ -6264,18 +6306,6 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof agenda_titulo_evento === "string") nuevaConfig.agenda_titulo_evento = agenda_titulo_evento.trim();
     if (typeof agenda_texto_oferta === "string") nuevaConfig.agenda_texto_oferta = agenda_texto_oferta.trim();
     if (typeof agenda_whatsapp_link === "string") nuevaConfig.agenda_whatsapp_link = agenda_whatsapp_link.trim();
-
-    if (Array.isArray(agenda_preguntas_extra)) {
-      nuevaConfig.agenda_preguntas_extra = agenda_preguntas_extra
-        .map((p, i) => ({
-          id: String(p?.id || `extra_${i}`),
-          texto: String(p?.texto || "").trim(),
-          tipo: p?.tipo === "opciones" ? "opciones" : "texto",
-          opciones: Array.isArray(p?.opciones) ? p.opciones.map(o => String(o || "").trim()).filter(Boolean) : [],
-          obligatoria: Boolean(p?.obligatoria)
-        }))
-        .filter(p => p.texto);
-    }
 
     // Descarta transiciones (generales o por etapa) que apunten a una etapa
     // que ya no existe en el guardado actual.
@@ -6790,6 +6820,45 @@ ${estilosBase()}
   .pregunta-extra-card input[type=checkbox]{ width:16px; height:16px; accent-color:var(--green); cursor:pointer; }
   .pregunta-extra-card .opciones-sub{ margin-top:12px; padding-left:2px; }
 
+  .btn-ver-formulario{
+    font-size:13.5px; font-weight:600; color:var(--text); background:var(--surface-3);
+    border:1px solid var(--border); border-radius:9px; padding:9px 14px; text-decoration:none;
+    flex-shrink:0; transition:background .12s;
+  }
+  .btn-ver-formulario:hover{ background:var(--surface-2); }
+
+  .preguntas-editor-shell{ display:grid; grid-template-columns:1fr 340px; gap:24px; align-items:start; margin-top:16px; }
+  @media (max-width:980px){ .preguntas-editor-shell{ grid-template-columns:1fr; } }
+  .preview-etiqueta{ font-size:12.5px; color:var(--muted); font-weight:600; margin-bottom:10px; display:flex; align-items:center; gap:6px; }
+  .preview-caja{
+    background:#F7F8FA; border:1px solid #E3E6EB; border-radius:14px; padding:22px 20px;
+    position:sticky; top:20px; max-height:80vh; overflow-y:auto;
+  }
+  .pv-pregunta{ margin-bottom:18px; }
+  .pv-pregunta:last-child{ margin-bottom:0; }
+  .pv-label{ display:block; font-size:13px; font-weight:600; color:#1A2028; margin-bottom:8px; }
+  .pv-label .req{ color:#E0432B; }
+  .pv-opcion{
+    display:flex; align-items:center; gap:9px; background:#fff; border:1.5px solid #E3E6EB;
+    border-radius:9px; padding:10px 12px; margin-bottom:7px; font-size:13px; color:#1A2028;
+  }
+  .pv-opcion .circulo{ width:15px; height:15px; border-radius:50%; border:1.5px solid #C7CCD4; flex-shrink:0; }
+  .pv-select, .pv-texto{
+    width:100%; background:#fff; border:1px solid #E3E6EB; border-radius:8px; padding:10px 12px;
+    font-size:13px; color:#1A2028; box-sizing:border-box;
+  }
+  .pv-vacio{ color:#9AA2AF; font-size:13px; text-align:center; padding:20px 0; }
+
+  .pregunta-card{
+    border:1px solid var(--border); border-radius:11px; padding:16px; margin-bottom:12px; background:rgba(255,255,255,.015);
+  }
+  .pregunta-card .fila-tipo{ display:flex; gap:10px; margin-top:12px; }
+  .pregunta-card .fila-tipo > div{ flex:1; }
+  .pregunta-card label.chk{ display:flex; align-items:center; gap:8px; margin:14px 0 0; color:var(--text); font-weight:500; font-size:14px; cursor:pointer; }
+  .pregunta-card input[type=checkbox]{ width:16px; height:16px; accent-color:var(--green); cursor:pointer; }
+  .pregunta-card .opciones-editor{ margin-top:12px; }
+  .add-opcion-mini{ padding:9px !important; font-size:13px !important; }
+
   .btn-guardar-agenda{
     font-family:var(--display); font-weight:600; font-size:15px; border:none; border-radius:11px;
     padding:14px 22px; cursor:pointer; color:#04140D; background:linear-gradient(90deg, #31D97C, #34C9E8);
@@ -6858,25 +6927,30 @@ ${estilosBase()}
     </div>
 
     <div class="card">
-      <p class="cuentas-titulo">Paso 5</p>
-      <p class="cuentas-subtitulo">Pregunta de calificación</p>
-      <p class="hint" style="margin-top:-8px;">Esta es la pregunta que decide quién ve el calendario y quién no — marca la casilla roja en la opción (u opciones) que deben quedar descalificadas.</p>
-      <label>Texto de la pregunta</label>
-      <input type="text" id="inputPreguntaTexto">
-      <div id="opcionesPreguntaCont" style="margin-top:14px;"></div>
-      <button type="button" class="add-paso" id="btnAgregarOpcion">+ Agregar opción</button>
-      <label style="margin-top:18px;">Mensaje para quien NO califica</label>
-      <textarea id="inputMensajeNoCalifica"></textarea>
-      <label style="margin-top:14px;">Enlace de un recurso para quien no califica (opcional — aparece como botón)</label>
-      <input type="text" id="inputEnlaceNoCalifica">
-    </div>
+      <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+        <div>
+          <p class="cuentas-titulo">Paso 5</p>
+          <p class="cuentas-subtitulo" style="margin-bottom:0;">Preguntas del formulario</p>
+        </div>
+        <a href="/agendar" target="_blank" class="btn-ver-formulario">↗️ Abrir formulario en vivo</a>
+      </div>
+      <p class="hint">Arma todas las preguntas que le vas a hacer al lead antes de mostrarle el calendario. En las de opción múltiple, marca con la casilla roja cuál (o cuáles) opción debe DESCALIFICAR — si el lead elige una así, nunca llega a ver el calendario. La vista previa de la derecha se actualiza mientras vas armando todo.</p>
 
-    <div class="card">
-      <p class="cuentas-titulo">Paso 6</p>
-      <p class="cuentas-subtitulo">Preguntas adicionales del formulario</p>
-      <p class="hint" style="margin-top:-8px;">Aparte de la pregunta de calificación — estas NO bloquean el acceso al calendario, solo recolectan información extra del lead junto con la reserva.</p>
-      <div id="preguntasExtraCont"></div>
-      <button type="button" class="add-paso" id="btnAgregarPreguntaExtra">+ Agregar pregunta</button>
+      <div class="preguntas-editor-shell">
+        <div>
+          <div id="preguntasCont"></div>
+          <button type="button" class="add-paso" id="btnAgregarPregunta">+ Agregar pregunta</button>
+
+          <label style="margin-top:22px;">Mensaje para quien NO califica</label>
+          <textarea id="inputMensajeNoCalifica"></textarea>
+          <label style="margin-top:14px;">Enlace de un recurso para quien no califica (opcional — aparece como botón)</label>
+          <input type="text" id="inputEnlaceNoCalifica">
+        </div>
+        <div>
+          <div class="preview-etiqueta">👁️ Así se ve en el formulario</div>
+          <div class="preview-caja" id="previewFormulario"></div>
+        </div>
+      </div>
     </div>
 
     <button type="button" class="btn-guardar-agenda" id="btnGuardarAgenda">Guardar cambios</button>
@@ -6957,8 +7031,13 @@ ${estilosBase()}
     { clave: "domingo", nombre: "Domingo" }
   ];
   let horarioSemanal = {};
-  let opcionesPregunta = [];
-  let preguntasExtra = [];
+  // Estado ÚNICO de todas las preguntas del formulario — cada una:
+  // { id, texto, tipo: "texto"|"opciones", estilo_visual: "radios"|"desplegable",
+  //   opciones: [{texto, descalifica}], obligatoria }.
+  // Se mantiene actualizado en vivo con cada tecla (no solo al agregar o
+  // quitar), para que la vista previa de la derecha siempre refleje lo que
+  // se está escribiendo ahora mismo.
+  let preguntas = [];
 
   function renderHorarioSemanal(){
     const cont = document.getElementById("horarioSemanalCont");
@@ -6994,100 +7073,175 @@ ${estilosBase()}
     return resultado;
   }
 
-  function renderOpcionesPregunta(){
-    const cont = document.getElementById("opcionesPreguntaCont");
-    cont.innerHTML = opcionesPregunta.map((op, i) => \`
+  // --- Vista previa en vivo: dibuja las preguntas EXACTAMENTE con el
+  // mismo criterio visual que usa la página pública real (/agendar) —
+  // opción múltiple en "radios" se ve como círculos ya desplegados, en
+  // "desplegable" como una lista, y texto libre como un campo simple. Se
+  // llama después de CUALQUIER cambio, sin excepción.
+  function renderPreview(){
+    const cont = document.getElementById("previewFormulario");
+    if(preguntas.length === 0){
+      cont.innerHTML = '<div class="pv-vacio">Agrega una pregunta para ver aquí cómo se vería.</div>';
+      return;
+    }
+    cont.innerHTML = preguntas.map(p => {
+      const marcaObligatoria = p.obligatoria ? ' <span class="req">*</span>' : '';
+      if(p.tipo === "opciones"){
+        if(p.estilo_visual === "desplegable"){
+          return \`
+            <div class="pv-pregunta">
+              <label class="pv-label">\${p.texto || "(sin texto todavía)"}\${marcaObligatoria}</label>
+              <select class="pv-select">
+                <option>Elige una opción...</option>
+                \${(p.opciones || []).map(op => \`<option>\${op.texto || "(sin texto)"}</option>\`).join("")}
+              </select>
+            </div>
+          \`;
+        }
+        return \`
+          <div class="pv-pregunta">
+            <label class="pv-label">\${p.texto || "(sin texto todavía)"}\${marcaObligatoria}</label>
+            \${(p.opciones || []).map(op => \`
+              <div class="pv-opcion"><span class="circulo"></span> \${op.texto || "(sin texto)"}</div>
+            \`).join("") || '<div class="pv-vacio" style="padding:8px 0;">Agrega opciones abajo</div>'}
+          </div>
+        \`;
+      }
+      return \`
+        <div class="pv-pregunta">
+          <label class="pv-label">\${p.texto || "(sin texto todavía)"}\${marcaObligatoria}</label>
+          <input type="text" class="pv-texto" disabled placeholder="Respuesta de texto libre">
+        </div>
+      \`;
+    }).join("");
+  }
+
+  function renderOpcionesDePregunta(indicePregunta){
+    const card = document.querySelector(\`.pregunta-card[data-i="\${indicePregunta}"]\`);
+    const cont = card.querySelector(".opciones-lista");
+    const p = preguntas[indicePregunta];
+    cont.innerHTML = (p.opciones || []).map((op, i) => \`
       <div class="opcion-fila" data-i="\${i}">
         <input type="text" class="input-opcion-texto" value="\${(op.texto || "").replace(/"/g,"&quot;")}" placeholder="Texto de la opción">
         <label class="chk-mini"><input type="checkbox" class="chk-opcion-descalifica" \${op.descalifica ? "checked" : ""}> Descalifica</label>
         <button type="button" class="quitar-x" title="Quitar esta opción">✕</button>
       </div>
     \`).join("");
-    cont.querySelectorAll(".quitar-x").forEach(btn => {
+
+    cont.querySelectorAll(".input-opcion-texto").forEach((input, i) => {
+      input.addEventListener("input", () => {
+        p.opciones[i].texto = input.value;
+        renderPreview();
+      });
+    });
+    cont.querySelectorAll(".chk-opcion-descalifica").forEach((chk, i) => {
+      chk.addEventListener("change", () => {
+        p.opciones[i].descalifica = chk.checked;
+        renderPreview();
+      });
+    });
+    cont.querySelectorAll(".quitar-x").forEach((btn, i) => {
       btn.addEventListener("click", () => {
-        leerOpcionesPreguntaDelDOM();
-        opcionesPregunta.splice(Number(btn.closest(".opcion-fila").dataset.i), 1);
-        renderOpcionesPregunta();
+        p.opciones.splice(i, 1);
+        renderOpcionesDePregunta(indicePregunta);
+        renderPreview();
       });
     });
   }
 
-  function leerOpcionesPreguntaDelDOM(){
-    opcionesPregunta = Array.from(document.querySelectorAll("#opcionesPreguntaCont .opcion-fila")).map(fila => ({
-      texto: fila.querySelector(".input-opcion-texto").value.trim(),
-      descalifica: fila.querySelector(".chk-opcion-descalifica").checked
-    }));
-  }
-
-  document.getElementById("btnAgregarOpcion").addEventListener("click", () => {
-    leerOpcionesPreguntaDelDOM();
-    opcionesPregunta.push({ texto: "", descalifica: false });
-    renderOpcionesPregunta();
-  });
-
-  function renderPreguntasExtra(){
-    const cont = document.getElementById("preguntasExtraCont");
-    if(preguntasExtra.length === 0){
-      cont.innerHTML = '<p class="hint" style="margin:0 0 12px;">Todavía no agregaste ninguna pregunta adicional.</p>';
+  function renderPreguntas(){
+    const cont = document.getElementById("preguntasCont");
+    if(preguntas.length === 0){
+      cont.innerHTML = '<p class="hint" style="margin:0 0 12px;">Todavía no agregaste ninguna pregunta.</p>';
+      renderPreview();
       return;
     }
-    cont.innerHTML = preguntasExtra.map((p, i) => \`
-      <div class="pregunta-extra-card" data-i="\${i}">
+    cont.innerHTML = preguntas.map((p, i) => \`
+      <div class="pregunta-card" data-i="\${i}">
         <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
           <span style="font-family:var(--mono); font-size:12px; color:var(--green);">Pregunta \${i + 1}</span>
           <button type="button" class="quitar" data-i="\${i}">quitar</button>
         </div>
         <label style="margin-top:10px;">Texto de la pregunta</label>
-        <input type="text" class="input-pe-texto" value="\${(p.texto || "").replace(/"/g,"&quot;")}">
+        <input type="text" class="input-p-texto" value="\${(p.texto || "").replace(/"/g,"&quot;")}">
         <div class="fila-tipo">
           <div>
             <label>Tipo de respuesta</label>
-            <select class="input-pe-tipo">
+            <select class="input-p-tipo">
               <option value="texto" \${p.tipo === "texto" ? "selected" : ""}>Texto libre</option>
               <option value="opciones" \${p.tipo === "opciones" ? "selected" : ""}>Opción múltiple</option>
             </select>
           </div>
+          <div class="input-p-estilo-wrap \${p.tipo === "opciones" ? "" : "oculto"}">
+            <label>Cómo se muestra</label>
+            <select class="input-p-estilo">
+              <option value="radios" \${p.estilo_visual !== "desplegable" ? "selected" : ""}>Círculos (ya desplegadas)</option>
+              <option value="desplegable" \${p.estilo_visual === "desplegable" ? "selected" : ""}>Lista desplegable</option>
+            </select>
+          </div>
         </div>
-        <div class="opciones-sub \${p.tipo === "opciones" ? "" : "oculto"}">
-          <label>Opciones (una por línea)</label>
-          <textarea class="input-pe-opciones" style="min-height:70px;">\${(p.opciones || []).join("\\n")}</textarea>
+        <div class="opciones-editor \${p.tipo === "opciones" ? "" : "oculto"}">
+          <label>Opciones</label>
+          <div class="opciones-lista"></div>
+          <button type="button" class="add-paso add-opcion-mini">+ Agregar opción</button>
         </div>
-        <label class="chk"><input type="checkbox" class="chk-pe-obligatoria" \${p.obligatoria ? "checked" : ""}> Obligatoria (no deja agendar si no se responde)</label>
+        <label class="chk"><input type="checkbox" class="chk-p-obligatoria" \${p.obligatoria ? "checked" : ""}> Obligatoria (no deja agendar si no se responde)</label>
       </div>
     \`).join("");
 
+    preguntas.forEach((p, i) => {
+      if(p.tipo === "opciones") renderOpcionesDePregunta(i);
+    });
+
     cont.querySelectorAll(".quitar").forEach(btn => {
       btn.addEventListener("click", () => {
-        leerPreguntasExtraDelDOM();
-        preguntasExtra.splice(Number(btn.dataset.i), 1);
-        renderPreguntasExtra();
+        preguntas.splice(Number(btn.dataset.i), 1);
+        renderPreguntas();
       });
     });
-    cont.querySelectorAll(".input-pe-tipo").forEach(sel => {
+    cont.querySelectorAll(".input-p-texto").forEach((input, i) => {
+      input.addEventListener("input", () => {
+        preguntas[i].texto = input.value;
+        renderPreview();
+      });
+    });
+    cont.querySelectorAll(".chk-p-obligatoria").forEach((chk, i) => {
+      chk.addEventListener("change", () => {
+        preguntas[i].obligatoria = chk.checked;
+        renderPreview();
+      });
+    });
+    cont.querySelectorAll(".input-p-tipo").forEach((sel, i) => {
       sel.addEventListener("change", () => {
-        const subOpciones = sel.closest(".pregunta-extra-card").querySelector(".opciones-sub");
-        subOpciones.classList.toggle("oculto", sel.value !== "opciones");
+        preguntas[i].tipo = sel.value;
+        if(sel.value === "opciones" && !preguntas[i].opciones){
+          preguntas[i].opciones = [];
+          preguntas[i].estilo_visual = preguntas[i].estilo_visual || "radios";
+        }
+        renderPreguntas(); // cambio estructural (aparece/desaparece el editor de opciones) — sí se re-renderiza completo
       });
     });
-  }
-
-  function leerPreguntasExtraDelDOM(){
-    preguntasExtra = Array.from(document.querySelectorAll("#preguntasExtraCont .pregunta-extra-card")).map((card, i) => {
-      const existente = preguntasExtra[Number(card.dataset.i)] || {};
-      return {
-        id: existente.id || ("extra_" + Date.now() + "_" + i),
-        texto: card.querySelector(".input-pe-texto").value.trim(),
-        tipo: card.querySelector(".input-pe-tipo").value,
-        opciones: card.querySelector(".input-pe-opciones").value.split("\\n").map(s => s.trim()).filter(Boolean),
-        obligatoria: card.querySelector(".chk-pe-obligatoria").checked
-      };
+    cont.querySelectorAll(".input-p-estilo").forEach((sel, i) => {
+      sel.addEventListener("change", () => {
+        preguntas[i].estilo_visual = sel.value;
+        renderPreview();
+      });
     });
+    cont.querySelectorAll(".add-opcion-mini").forEach((btn, i) => {
+      btn.addEventListener("click", () => {
+        preguntas[i].opciones = preguntas[i].opciones || [];
+        preguntas[i].opciones.push({ texto: "", descalifica: false });
+        renderOpcionesDePregunta(i);
+        renderPreview();
+      });
+    });
+
+    renderPreview();
   }
 
-  document.getElementById("btnAgregarPreguntaExtra").addEventListener("click", () => {
-    leerPreguntasExtraDelDOM();
-    preguntasExtra.push({ id: "extra_" + Date.now(), texto: "", tipo: "texto", opciones: [], obligatoria: false });
-    renderPreguntasExtra();
+  document.getElementById("btnAgregarPregunta").addEventListener("click", () => {
+    preguntas.push({ id: "p_" + Date.now(), texto: "", tipo: "texto", opciones: [], estilo_visual: "radios", obligatoria: false });
+    renderPreguntas();
   });
 
   async function cargarConfigAgenda(){
@@ -7109,21 +7263,14 @@ ${estilosBase()}
     document.getElementById("inputAgendaOferta").value = cfg.agenda_texto_oferta || "";
     document.getElementById("inputAgendaWhatsapp").value = cfg.agenda_whatsapp_link || "";
 
-    const p = cfg.agenda_pregunta_presupuesto || { texto: "", opciones: [] };
-    document.getElementById("inputPreguntaTexto").value = p.texto || "";
-    opcionesPregunta = Array.isArray(p.opciones) ? p.opciones : [];
-    renderOpcionesPregunta();
-
     document.getElementById("inputMensajeNoCalifica").value = cfg.agenda_mensaje_no_califica || "";
     document.getElementById("inputEnlaceNoCalifica").value = cfg.agenda_enlace_no_califica || "";
 
-    preguntasExtra = Array.isArray(cfg.agenda_preguntas_extra) ? cfg.agenda_preguntas_extra : [];
-    renderPreguntasExtra();
+    preguntas = Array.isArray(cfg.agenda_preguntas) ? cfg.agenda_preguntas : [];
+    renderPreguntas();
   }
 
   document.getElementById("btnGuardarAgenda").addEventListener("click", async () => {
-    leerOpcionesPreguntaDelDOM();
-    leerPreguntasExtraDelDOM();
     const btn = document.getElementById("btnGuardarAgenda");
     const msg = document.getElementById("mensajeGuardado");
     btn.disabled = true;
@@ -7141,13 +7288,9 @@ ${estilosBase()}
       agenda_titulo_evento: document.getElementById("inputAgendaTituloEvento").value.trim(),
       agenda_texto_oferta: document.getElementById("inputAgendaOferta").value.trim(),
       agenda_whatsapp_link: document.getElementById("inputAgendaWhatsapp").value.trim(),
-      agenda_pregunta_presupuesto: {
-        texto: document.getElementById("inputPreguntaTexto").value.trim(),
-        opciones: opcionesPregunta
-      },
       agenda_mensaje_no_califica: document.getElementById("inputMensajeNoCalifica").value.trim(),
       agenda_enlace_no_califica: document.getElementById("inputEnlaceNoCalifica").value.trim(),
-      agenda_preguntas_extra: preguntasExtra
+      agenda_preguntas: preguntas
     });
 
     btn.disabled = false;
