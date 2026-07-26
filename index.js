@@ -4474,8 +4474,8 @@ app.get("/agendar", (req, res) => {
   }
   .panel-der{ width:400px; flex:none; padding:32px 30px; min-width:0; overflow-y:auto; }
   .panel-horas{
-    width:0; flex:none; padding:0; border-left:1px solid var(--border); overflow-y:auto;
-    transition:width .25s ease, padding .25s ease; opacity:0;
+    width:0; flex:none; padding:0; border-left:1px solid var(--border); overflow:hidden;
+    transition:width .25s ease, padding .25s ease; opacity:0; display:flex; flex-direction:column;
   }
   .panel-horas.visible{ width:350px; padding:32px 24px; opacity:1; }
   .perfil-foto{
@@ -4570,12 +4570,12 @@ app.get("/agendar", (req, res) => {
     width:30px; height:30px; padding:0; margin:0; font-size:15px; display:flex; align-items:center; justify-content:center;
   }
   .cal-cabecera button:disabled{ opacity:.3; }
-  .cal-mes{ font-weight:700; font-size:14.5px; }
+  .cal-mes{ font-weight:700; font-size:16px; }
   .cal-grid{ display:grid; grid-template-columns:repeat(7, 1fr); gap:2px; text-align:center; }
-  .cal-diasemana{ font-size:11px; color:var(--muted); font-weight:600; padding-bottom:8px; }
+  .cal-diasemana{ font-size:12.5px; color:var(--muted); font-weight:600; padding-bottom:8px; }
   .cal-dia{
     position:relative; aspect-ratio:1; display:flex; align-items:center; justify-content:center;
-    font-size:13.5px; border-radius:50%; cursor:pointer; color:var(--text);
+    font-size:15.5px; border-radius:50%; cursor:pointer; color:var(--text);
   }
   .cal-dia.vacio{ cursor:default; }
   .cal-dia.sin-horarios{ color:#C7CCD4; cursor:not-allowed; }
@@ -4586,12 +4586,12 @@ app.get("/agendar", (req, res) => {
   .cal-dia.elegido{ background:var(--accent); color:#fff; }
   .cal-dia.elegido::after{ background:#fff; }
   .cal-zona{ margin-top:16px; }
-  .cal-zona-label{ font-size:11px; color:var(--muted); margin-bottom:4px; display:flex; align-items:center; gap:5px; }
-  .lista-horarios{ display:flex; flex-direction:column; gap:8px; max-height:220px; overflow-y:auto; padding-right:4px; margin-top:16px; }
-  .lista-horarios-titulo{ font-size:13px; font-weight:600; margin-bottom:10px; }
+  .cal-zona-label{ font-size:12px; color:var(--muted); margin-bottom:4px; display:flex; align-items:center; gap:5px; }
+  .lista-horarios{ display:flex; flex-direction:column; gap:8px; flex:1; overflow-y:auto; padding-right:4px; margin-top:16px; }
+  .lista-horarios-titulo{ font-size:15px; font-weight:600; margin-bottom:10px; flex-shrink:0; }
   .horario-btn{
-    background:#fff; border:1.5px solid var(--accent); border-radius:8px; padding:11px 10px;
-    color:var(--accent); font-size:13.5px; cursor:pointer; text-align:center; font-weight:600;
+    background:#fff; border:1.5px solid var(--accent); border-radius:8px; padding:12px 10px;
+    color:var(--accent); font-size:14.5px; cursor:pointer; text-align:center; font-weight:600;
   }
   .horario-btn:hover{ background:var(--accent); color:#fff; }
 
