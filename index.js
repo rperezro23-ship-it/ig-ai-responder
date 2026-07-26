@@ -3262,6 +3262,24 @@ app.get("/favicon.svg", (req, res) => {
   `.trim());
 });
 
+// Ícono específico para la página pública de agendar — un calendario, no
+// la burbuja de chat que usa el resto del panel (que no tendría sentido
+// aquí, ya que esta página no es de conversaciones).
+app.get("/favicon-calendario.svg", (req, res) => {
+  res.type("image/svg+xml").send(`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#0A6CFF"/>
+  <rect x="13" y="16" width="38" height="34" rx="5" fill="#FFFFFF"/>
+  <rect x="13" y="16" width="38" height="10" rx="5" fill="#0A6CFF"/>
+  <rect x="13" y="21" width="38" height="5" fill="#0A6CFF"/>
+  <rect x="21" y="11" width="4" height="10" rx="2" fill="#0A6CFF"/>
+  <rect x="39" y="11" width="4" height="10" rx="2" fill="#0A6CFF"/>
+  <circle cx="32" cy="39" r="6.5" fill="#0A6CFF"/>
+  <path d="M29 39l2.2 2.4L36 36.5" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
+  `.trim());
+});
+
 app.get("/cron/seguimientos", async (req, res) => {
   try {
     const resultado = await procesarSeguimientosPendientesDB();
@@ -4433,7 +4451,7 @@ app.get("/agendar", (req, res) => {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agenda tu llamada</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/svg+xml" href="/favicon-calendario.svg">
 <style>
   :root{
     --bg:#F7F8FA; --card:#FFFFFF; --border:#E3E6EB; --text:#1A2028; --muted:#68707E;
@@ -4447,12 +4465,19 @@ app.get("/agendar", (req, res) => {
   }
   .contenedor{
     background:var(--card); border:1px solid var(--border); border-radius:20px;
-    width:800px; max-width:100%; display:flex; overflow:hidden; box-shadow:0 8px 40px rgba(20,25,35,.06);
+    width:800px; max-width:100%; height:700px; display:flex; overflow:hidden;
+    box-shadow:0 8px 40px rgba(20,25,35,.06); transition:width .25s ease;
   }
+  .contenedor.expandido{ width:1000px; }
   .panel-izq{
-    width:400px; flex:none; padding:32px 28px; border-right:1px solid var(--border);
+    width:400px; flex:none; padding:32px 28px; border-right:1px solid var(--border); overflow-y:auto;
   }
-  .panel-der{ width:400px; flex:none; padding:32px 30px; min-width:0; }
+  .panel-der{ width:400px; flex:none; padding:32px 30px; min-width:0; overflow-y:auto; }
+  .panel-horas{
+    width:0; flex:none; padding:0; border-left:1px solid var(--border); overflow-y:auto;
+    transition:width .25s ease, padding .25s ease; opacity:0;
+  }
+  .panel-horas.visible{ width:200px; padding:32px 20px; opacity:1; }
   .perfil-foto{
     width:64px; height:64px; border-radius:50%; object-fit:cover; background:var(--accent-soft);
     display:flex; align-items:center; justify-content:center; font-size:26px; font-weight:700;
@@ -4543,9 +4568,12 @@ app.get("/agendar", (req, res) => {
   .horario-btn:hover{ background:var(--accent); color:#fff; }
 
   @media (max-width: 700px){
-    .contenedor{ width:100%; flex-direction:column; }
+    .contenedor{ width:100%; height:auto; max-height:92vh; flex-direction:column; }
+    .contenedor.expandido{ width:100%; }
     .panel-izq, .panel-der{ width:100%; }
     .panel-izq{ border-right:none; border-bottom:1px solid var(--border); }
+    .panel-horas{ width:100%; border-left:none; border-top:1px solid var(--border); }
+    .panel-horas.visible{ width:100%; padding:20px 30px; }
   }
 </style>
 </head>
@@ -4582,7 +4610,6 @@ app.get("/agendar", (req, res) => {
           </div>
           <div class="cal-grid" id="calGridDiasSemana"></div>
           <div class="cal-grid" id="calGridDias"></div>
-          <div class="lista-horarios oculto" id="listaHorariosDia"></div>
           <div class="cal-zona">
             <div class="cal-zona-label">🌐 Zona horaria</div>
             <select id="selectZonaHoraria"></select>
@@ -4621,6 +4648,12 @@ app.get("/agendar", (req, res) => {
       </div>
 
     </div>
+
+    <div class="panel-horas" id="panelHoras">
+      <div class="lista-horarios-titulo" id="tituloListaHorarios"></div>
+      <div class="lista-horarios" id="listaHorariosDia"></div>
+    </div>
+
   </div>
 
 <script>
@@ -4780,8 +4813,9 @@ app.get("/agendar", (req, res) => {
 
   function renderHorariosDelDia(clave){
     const horarios = horariosPorDia[clave] || [];
+    document.getElementById("tituloListaHorarios").textContent =
+      new Date(clave + "T12:00:00").toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long" });
     const cont = document.getElementById("listaHorariosDia");
-    cont.classList.remove("oculto");
     cont.innerHTML = horarios.map(iso => \`
       <button type="button" class="horario-btn" data-iso="\${iso}">\${new Date(iso).toLocaleTimeString("es-MX", { hour:"numeric", minute:"2-digit", timeZone: zonaHorariaMostrada })}</button>
     \`).join("");
@@ -4791,9 +4825,19 @@ app.get("/agendar", (req, res) => {
         irAlFormulario();
       });
     });
+    // El cuadro entero crece 200px a la derecha para mostrar esta columna
+    // de horarios, en vez de amontonarlos debajo del calendario.
+    document.getElementById("panelHoras").classList.add("visible");
+    document.querySelector(".contenedor").classList.add("expandido");
+  }
+
+  function ocultarPanelHoras(){
+    document.getElementById("panelHoras").classList.remove("visible");
+    document.querySelector(".contenedor").classList.remove("expandido");
   }
 
   function irAlFormulario(){
+    ocultarPanelHoras();
     document.getElementById("pasoCalendario").classList.add("oculto");
     document.getElementById("pasoFormulario").classList.remove("oculto");
     document.getElementById("resumenHorarioTexto").textContent =
@@ -4803,6 +4847,10 @@ app.get("/agendar", (req, res) => {
   document.getElementById("btnCambiarHorario").addEventListener("click", () => {
     document.getElementById("pasoFormulario").classList.add("oculto");
     document.getElementById("pasoCalendario").classList.remove("oculto");
+    // Si ya había un día elegido antes de llegar al formulario, se vuelve
+    // a expandir mostrando sus horarios directamente, en vez de dejarlo
+    // colapsado sin nada que elegir.
+    if(diaElegidoClave) renderHorariosDelDia(diaElegidoClave);
   });
 
   document.getElementById("btnMesAnterior").addEventListener("click", () => {
