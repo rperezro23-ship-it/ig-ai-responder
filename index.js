@@ -4468,7 +4468,7 @@ app.get("/agendar", (req, res) => {
     width:800px; max-width:100%; height:700px; display:flex; overflow:hidden;
     box-shadow:0 8px 40px rgba(20,25,35,.06); transition:width .25s ease;
   }
-  .contenedor.expandido{ width:1000px; }
+  .contenedor.expandido{ width:1150px; }
   .panel-izq{
     width:400px; flex:none; padding:32px 28px; border-right:1px solid var(--border); overflow-y:auto;
   }
@@ -4477,7 +4477,7 @@ app.get("/agendar", (req, res) => {
     width:0; flex:none; padding:0; border-left:1px solid var(--border); overflow-y:auto;
     transition:width .25s ease, padding .25s ease; opacity:0;
   }
-  .panel-horas.visible{ width:200px; padding:32px 20px; opacity:1; }
+  .panel-horas.visible{ width:350px; padding:32px 24px; opacity:1; }
   .perfil-foto{
     width:64px; height:64px; border-radius:50%; object-fit:cover; background:var(--accent-soft);
     display:flex; align-items:center; justify-content:center; font-size:26px; font-weight:700;
@@ -4511,6 +4511,34 @@ app.get("/agendar", (req, res) => {
     width:100%; background:#fff; border:1px solid var(--border); border-radius:8px;
     padding:9px 11px; color:var(--text); font-size:12.5px; font-family:inherit;
   }
+  .zona-widget{ position:relative; }
+  .zona-boton{
+    width:100%; background:#fff; border:1px solid var(--border); border-radius:8px;
+    padding:9px 11px; color:var(--text); font-size:12.5px; font-family:inherit; text-align:left;
+    cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:8px; margin:0;
+  }
+  .zona-boton .hora{ color:var(--muted); font-family:inherit; flex-shrink:0; }
+  .zona-panel{
+    position:absolute; bottom:calc(100% + 6px); left:0; width:280px; background:#fff;
+    border:1px solid var(--border); border-radius:10px; box-shadow:0 6px 24px rgba(20,25,35,.12);
+    z-index:20; overflow:hidden;
+  }
+  .zona-buscador{
+    width:100%; border:none; border-bottom:1px solid var(--border); padding:11px 13px;
+    font-size:13px; font-family:inherit; color:var(--text);
+  }
+  .zona-buscador:focus{ outline:none; }
+  .zona-lista{ max-height:240px; overflow-y:auto; }
+  .zona-item{
+    display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 13px;
+    font-size:12.5px; cursor:pointer;
+  }
+  .zona-item:hover{ background:var(--accent-soft); }
+  .zona-item.elegida{ background:var(--accent); color:#fff; }
+  .zona-item .hora{ color:var(--muted); flex-shrink:0; }
+  .zona-item.elegida .hora{ color:#fff; }
+  .zona-item .nombre{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .zona-sin-resultados{ padding:14px 13px; font-size:12.5px; color:var(--muted); text-align:center; }
   .opcion{
     display:flex; align-items:center; gap:10px; background:#fff; border:1.5px solid var(--border);
     border-radius:10px; padding:13px 14px; margin-bottom:8px; cursor:pointer; transition:border-color .15s;
@@ -4612,7 +4640,16 @@ app.get("/agendar", (req, res) => {
           <div class="cal-grid" id="calGridDias"></div>
           <div class="cal-zona">
             <div class="cal-zona-label">🌐 Zona horaria</div>
-            <select id="selectZonaHoraria"></select>
+            <div class="zona-widget">
+              <button type="button" class="zona-boton" id="zonaBoton">
+                <span class="nombre" id="zonaBotonNombre"></span>
+                <span class="hora" id="zonaBotonHora"></span>
+              </button>
+              <div class="zona-panel oculto" id="zonaPanel">
+                <input type="text" class="zona-buscador" id="zonaBuscador" placeholder="Buscar...">
+                <div class="zona-lista" id="zonaLista"></div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -4674,22 +4711,84 @@ app.get("/agendar", (req, res) => {
     return \`\${obj.year}-\${obj.month}-\${obj.day}\`;
   }
 
-  function poblarSelectorZonaHoraria(){
-    const sel = document.getElementById("selectZonaHoraria");
-    let zonas;
+  let listaZonasCache = [];
+
+  function formatearHoraDeZona(zona){
     try {
-      zonas = Intl.supportedValuesOf("timeZone");
+      return new Date().toLocaleTimeString("es-MX", { hour:"numeric", minute:"2-digit", timeZone: zona });
+    } catch (err) {
+      return "";
+    }
+  }
+
+  function actualizarBotonZona(){
+    document.getElementById("zonaBotonNombre").textContent = zonaHorariaMostrada.replace(/_/g, " ");
+    document.getElementById("zonaBotonHora").textContent = formatearHoraDeZona(zonaHorariaMostrada);
+  }
+
+  function renderListaZonas(filtro){
+    const filtroNorm = filtro.trim().toLowerCase();
+    const zonasFiltradas = listaZonasCache.filter(z => z.toLowerCase().replace(/_/g," ").includes(filtroNorm));
+    const cont = document.getElementById("zonaLista");
+
+    if(zonasFiltradas.length === 0){
+      cont.innerHTML = '<div class="zona-sin-resultados">Sin resultados</div>';
+      return;
+    }
+
+    // Se limita a 200 resultados por rendimiento — en la práctica, con el
+    // buscador es fácil llegar a la zona deseada en un par de letras.
+    cont.innerHTML = zonasFiltradas.slice(0, 200).map(z => \`
+      <div class="zona-item \${z === zonaHorariaMostrada ? "elegida" : ""}" data-zona="\${z}">
+        <span class="nombre">\${z.replace(/_/g," ")}</span>
+        <span class="hora">\${formatearHoraDeZona(z)}</span>
+      </div>
+    \`).join("");
+
+    cont.querySelectorAll(".zona-item").forEach(el => {
+      el.addEventListener("click", () => {
+        zonaHorariaMostrada = el.dataset.zona;
+        actualizarBotonZona();
+        document.getElementById("zonaPanel").classList.add("oculto");
+        reagruparPorDia();
+        renderCalendario();
+        if(diaElegidoClave) renderHorariosDelDia(diaElegidoClave);
+      });
+    });
+  }
+
+  function poblarSelectorZonaHoraria(){
+    try {
+      listaZonasCache = Intl.supportedValuesOf("timeZone");
     } catch (err) {
       // Navegadores viejos que no soportan supportedValuesOf: se deja al
       // menos la zona detectada como única opción, para no romper nada.
-      zonas = [zonaHorariaMostrada];
+      listaZonasCache = [zonaHorariaMostrada];
     }
-    sel.innerHTML = zonas.map(z => \`<option value="\${z}"\${z === zonaHorariaMostrada ? " selected" : ""}>\${z.replace(/_/g," ")}</option>\`).join("");
-    sel.addEventListener("change", () => {
-      zonaHorariaMostrada = sel.value;
-      reagruparPorDia();
-      renderCalendario();
-      if(diaElegidoClave) renderHorariosDelDia(diaElegidoClave);
+    actualizarBotonZona();
+    renderListaZonas("");
+
+    document.getElementById("zonaBoton").addEventListener("click", () => {
+      const panel = document.getElementById("zonaPanel");
+      const abriendo = panel.classList.contains("oculto");
+      panel.classList.toggle("oculto");
+      if(abriendo){
+        document.getElementById("zonaBuscador").value = "";
+        renderListaZonas("");
+        document.getElementById("zonaBuscador").focus();
+      }
+    });
+
+    document.getElementById("zonaBuscador").addEventListener("input", (e) => {
+      renderListaZonas(e.target.value);
+    });
+
+    // Cierra el desplegable si se hace clic fuera de él.
+    document.addEventListener("click", (e) => {
+      const widget = document.querySelector(".zona-widget");
+      if(!widget.contains(e.target)){
+        document.getElementById("zonaPanel").classList.add("oculto");
+      }
     });
   }
 
