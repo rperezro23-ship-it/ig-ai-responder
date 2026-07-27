@@ -4500,7 +4500,7 @@ app.get("/agendar", (req, res) => {
   .perfil-titulo{ color:var(--muted); font-size:13.5px; margin-top:2px; }
   .divisor{ height:1px; background:var(--border); margin:20px 0; }
   .evento-nombre{ color:var(--muted); font-size:13px; margin-bottom:4px; }
-  .evento-titulo{ font-size:19px; font-weight:700; margin:0 0 16px; line-height:1.3; }
+  .evento-titulo{ font-size:28px; font-weight:700; margin:0 0 16px; line-height:1.3; }
   .evento-detalle{ display:flex; align-items:center; gap:9px; font-size:13.5px; margin-bottom:10px; color:var(--text); }
   .evento-detalle .icono{ width:17px; text-align:center; flex-shrink:0; }
   .instrucciones{ font-size:13px; color:var(--muted); line-height:1.6; margin:16px 0; }
