@@ -4721,6 +4721,9 @@ app.get("/agendar", (req, res) => {
         <div class="icono">✅</div>
         <h1 class="titulo-paso">Listo, tu llamada quedó agendada</h1>
         <p class="sub" id="resumenExito"></p>
+        <a id="btnWhatsappConfirmar" class="oculto" href="#" target="_blank" style="text-decoration:none;">
+          <button type="button">📲 Confirmar por WhatsApp</button>
+        </a>
       </div>
 
     </div>
@@ -5400,6 +5403,23 @@ app.get("/agendar", (req, res) => {
       document.getElementById("resumenExito").textContent =
         "Te esperamos el " + new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZone: zonaHorariaMostrada }) + ".";
       document.getElementById("pasoExito").classList.remove("oculto");
+
+      // Si está activada la confirmación por WhatsApp, se arma el enlace
+      // con el mensaje ya escrito (reemplazando {fecha} y {hora}) y se
+      // muestra el botón — un clic manual es más confiable que abrir la
+      // pestaña sola, ya que los navegadores suelen bloquear ventanas
+      // abiertas después de una llamada al servidor.
+      const wc = datosFormulario.whatsapp_confirmar;
+      if(wc && wc.activo && wc.numero){
+        const inicio = new Date(horarioElegido);
+        const fecha = inicio.toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long", timeZone: zonaHorariaMostrada });
+        const hora = inicio.toLocaleTimeString("es-MX", { hour: "numeric", minute: "2-digit", timeZone: zonaHorariaMostrada });
+        const mensaje = (wc.mensaje || "").replace(/\{fecha\}/g, fecha).replace(/\{hora\}/g, hora);
+        const enlaceWa = "https://wa.me/" + wc.numero + "?text=" + encodeURIComponent(mensaje);
+        const botonWa = document.getElementById("btnWhatsappConfirmar");
+        botonWa.href = enlaceWa;
+        botonWa.classList.remove("oculto");
+      }
     } catch (err) {
       errorEl.textContent = "Ocurrió un error, intenta de nuevo.";
       errorEl.classList.remove("oculto");
@@ -5426,6 +5446,11 @@ app.get("/agendar/pregunta", (req, res) => {
     campo_correo: configActual.agenda_campo_correo || { texto: "Tu correo", obligatorio: false },
     titulo_formulario: configActual.agenda_titulo_formulario || "Introduzca los detalles",
     titulo_formulario_tamano: configActual.agenda_titulo_formulario_tamano || 16,
+    whatsapp_confirmar: {
+      activo: Boolean(configActual.agenda_whatsapp_confirmar_activo && configActual.agenda_whatsapp_confirmar_numero),
+      numero: configActual.agenda_whatsapp_confirmar_numero || "",
+      mensaje: configActual.agenda_whatsapp_confirmar_mensaje || "Hola Coach, ya agendé mi llamada para {fecha} a las {hora}."
+    },
     perfil: {
       nombre: configActual.agenda_nombre || "",
       titulo: configActual.agenda_titulo || "",
@@ -5719,6 +5744,14 @@ let configActual = {
   // y tamaño en píxeles, ambos configurables.
   agenda_titulo_formulario: "Introduzca los detalles",
   agenda_titulo_formulario_tamano: 16,
+
+  // Al agendar exitosamente (solo si SÍ calificó), se le puede ofrecer
+  // mandar un mensaje de confirmación por WhatsApp directo al número del
+  // coach, con la fecha y hora ya escritas — el mensaje admite {fecha} y
+  // {hora} como marcadores que se reemplazan automáticamente.
+  agenda_whatsapp_confirmar_activo: false,
+  agenda_whatsapp_confirmar_numero: "", // con código de país, solo dígitos (ej. 5215512345678)
+  agenda_whatsapp_confirmar_mensaje: "Hola Coach, ya agendé mi llamada para {fecha} a las {hora}.",
 
   // Contenido del panel de perfil que se muestra en /agendar (columna
   // izquierda) — puramente informativo/visual, se puede personalizar sin
@@ -6575,7 +6608,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
             agenda_preguntas, agenda_mensaje_no_califica, agenda_titulo_no_califica, agenda_enlace_no_califica, agenda_nombre, agenda_titulo,
             agenda_foto_url, agenda_titulo_evento, agenda_texto_video, agenda_texto_instrucciones, agenda_texto_oferta, agenda_whatsapp_link,
             agenda_campo_nombre, agenda_campo_correo, agenda_titulo_formulario, agenda_titulo_formulario_tamano,
-            agenda_foto_rectangular_url } = req.body || {};
+            agenda_foto_rectangular_url, agenda_whatsapp_confirmar_activo, agenda_whatsapp_confirmar_numero,
+            agenda_whatsapp_confirmar_mensaje } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -6679,6 +6713,9 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof agenda_titulo === "string") nuevaConfig.agenda_titulo = agenda_titulo.trim();
     if (typeof agenda_foto_url === "string") nuevaConfig.agenda_foto_url = agenda_foto_url.trim();
     if (typeof agenda_foto_rectangular_url === "string") nuevaConfig.agenda_foto_rectangular_url = agenda_foto_rectangular_url.trim();
+    if (typeof agenda_whatsapp_confirmar_activo === "boolean") nuevaConfig.agenda_whatsapp_confirmar_activo = agenda_whatsapp_confirmar_activo;
+    if (typeof agenda_whatsapp_confirmar_numero === "string") nuevaConfig.agenda_whatsapp_confirmar_numero = agenda_whatsapp_confirmar_numero.replace(/\D/g, "");
+    if (typeof agenda_whatsapp_confirmar_mensaje === "string") nuevaConfig.agenda_whatsapp_confirmar_mensaje = agenda_whatsapp_confirmar_mensaje.trim() || "Hola Coach, ya agendé mi llamada para {fecha} a las {hora}.";
     if (typeof agenda_titulo_evento === "string") nuevaConfig.agenda_titulo_evento = agenda_titulo_evento.trim();
     if (typeof agenda_texto_video === "string") nuevaConfig.agenda_texto_video = agenda_texto_video.trim();
     if (typeof agenda_texto_instrucciones === "string") nuevaConfig.agenda_texto_instrucciones = agenda_texto_instrucciones.trim();
@@ -7434,6 +7471,17 @@ ${estilosBase()}
       <div class="rte-shell" id="rteOferta"></div>
       <label style="margin-top:14px;">Enlace de WhatsApp (opcional — si lo llenas, aparece el aviso "si no encuentras un horario libre")</label>
       <input type="text" id="inputAgendaWhatsapp" placeholder="https://wa.me/...">
+    </div>
+
+    <div class="card">
+      <p class="cuentas-titulo">Paso 4.5</p>
+      <p class="cuentas-subtitulo">Confirmación por WhatsApp al agendar</p>
+      <p class="hint" style="margin-top:-8px;">Si lo activas, cuando alguien agenda exitosamente (solo si SÍ calificó), le aparece un botón para mandarte por WhatsApp un mensaje ya escrito confirmando su llamada.</p>
+      <label class="chk"><input type="checkbox" id="chkWhatsappConfirmarActivo"> Activar la confirmación por WhatsApp</label>
+      <label style="margin-top:14px;">Tu número de WhatsApp (con código de país, solo números — ej. 5215512345678)</label>
+      <input type="text" id="inputWhatsappConfirmarNumero" placeholder="5215512345678">
+      <label style="margin-top:14px;">Mensaje que se manda (usa <code>{fecha}</code> y <code>{hora}</code> — se reemplazan solos)</label>
+      <input type="text" id="inputWhatsappConfirmarMensaje">
     </div>
 
     <div class="card">
@@ -8202,6 +8250,10 @@ ${estilosBase()}
     document.getElementById("inputTituloFormulario").value = cfg.agenda_titulo_formulario || "Introduzca los detalles";
     document.getElementById("inputTituloFormularioTamano").value = cfg.agenda_titulo_formulario_tamano || 16;
 
+    document.getElementById("chkWhatsappConfirmarActivo").checked = Boolean(cfg.agenda_whatsapp_confirmar_activo);
+    document.getElementById("inputWhatsappConfirmarNumero").value = cfg.agenda_whatsapp_confirmar_numero || "";
+    document.getElementById("inputWhatsappConfirmarMensaje").value = cfg.agenda_whatsapp_confirmar_mensaje || "Hola Coach, ya agendé mi llamada para {fecha} a las {hora}.";
+
     preguntas = Array.isArray(cfg.agenda_preguntas) ? cfg.agenda_preguntas : [];
     renderPreguntas();
   }
@@ -8240,6 +8292,9 @@ ${estilosBase()}
       },
       agenda_titulo_formulario: document.getElementById("inputTituloFormulario").value.trim() || "Introduzca los detalles",
       agenda_titulo_formulario_tamano: Number(document.getElementById("inputTituloFormularioTamano").value) || 16,
+      agenda_whatsapp_confirmar_activo: document.getElementById("chkWhatsappConfirmarActivo").checked,
+      agenda_whatsapp_confirmar_numero: document.getElementById("inputWhatsappConfirmarNumero").value.trim(),
+      agenda_whatsapp_confirmar_mensaje: document.getElementById("inputWhatsappConfirmarMensaje").value.trim() || "Hola Coach, ya agendé mi llamada para {fecha} a las {hora}.",
       agenda_preguntas: preguntas
     });
 
