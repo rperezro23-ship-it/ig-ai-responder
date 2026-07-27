@@ -4497,7 +4497,7 @@ app.get("/agendar", (req, res) => {
     color:var(--accent); margin-bottom:14px;
   }
   .perfil-foto-rect{
-    display:block; width:100%; max-width:440px; height:auto; aspect-ratio:440/176;
+    display:block; width:220px; max-width:100%; height:88px;
     object-fit:cover; border-radius:10px; margin:0 auto 14px; background:var(--accent-soft);
   }
   .perfil-nombre{ font-weight:700; font-size:16px; }
