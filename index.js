@@ -4689,7 +4689,7 @@ app.get("/agendar", (req, res) => {
       </div>
 
       <div id="pasoFormulario" class="oculto">
-        <h2 class="titulo-paso titulo-h2">Introduzca los detalles</h2>
+        <h2 class="titulo-paso titulo-h2" id="tituloFormulario">Introduzca los detalles</h2>
         <label id="labelCampoNombre">Tu nombre</label>
         <input type="text" id="inputNombre" placeholder="Ej: Juan Pérez">
         <label id="labelCampoCorreo">Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
@@ -4994,6 +4994,12 @@ app.get("/agendar", (req, res) => {
     const campoCorreo = datosFormulario.campo_correo || { texto: "Tu correo", obligatorio: false };
     document.getElementById("labelCampoNombre").textContent = campoNombre.texto + (campoNombre.obligatorio ? " *" : "");
     document.getElementById("labelCampoCorreo").textContent = campoCorreo.texto + (campoCorreo.obligatorio ? " *" : "");
+
+    // Título del paso del formulario — texto y tamaño en píxeles, ambos
+    // configurables desde /calendario.
+    const tituloFormEl = document.getElementById("tituloFormulario");
+    tituloFormEl.textContent = datosFormulario.titulo_formulario || "Introduzca los detalles";
+    tituloFormEl.style.fontSize = (datosFormulario.titulo_formulario_tamano || 16) + "px";
 
     // TODAS las preguntas se renderizan aquí, cada una con su propio
     // estilo — "opciones"+"radios" se ve como círculos ya desplegados,
@@ -5358,6 +5364,8 @@ app.get("/agendar/pregunta", (req, res) => {
     enlace_no_califica: configActual.agenda_enlace_no_califica || "",
     campo_nombre: configActual.agenda_campo_nombre || { texto: "Tu nombre", obligatorio: true },
     campo_correo: configActual.agenda_campo_correo || { texto: "Tu correo", obligatorio: false },
+    titulo_formulario: configActual.agenda_titulo_formulario || "Introduzca los detalles",
+    titulo_formulario_tamano: configActual.agenda_titulo_formulario_tamano || 16,
     perfil: {
       nombre: configActual.agenda_nombre || "",
       titulo: configActual.agenda_titulo || "",
@@ -5645,6 +5653,11 @@ let configActual = {
   agenda_titulo_no_califica: "Gracias por tu interés",
   agenda_mensaje_no_califica: "Por ahora este programa no es para ti, pero aquí tienes un recurso gratis que te puede ayudar igual.",
   agenda_enlace_no_califica: "", // ej. un lead magnet — se muestra como botón si se llena
+
+  // Título del paso del formulario (después de elegir día y hora) — texto
+  // y tamaño en píxeles, ambos configurables.
+  agenda_titulo_formulario: "Introduzca los detalles",
+  agenda_titulo_formulario_tamano: 16,
 
   // Contenido del panel de perfil que se muestra en /agendar (columna
   // izquierda) — puramente informativo/visual, se puede personalizar sin
@@ -6500,7 +6513,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
             agenda_zona_horaria, agenda_duracion_minutos, agenda_dias_hacia_adelante, agenda_aviso_minimo_horas, agenda_horario_semanal,
             agenda_preguntas, agenda_mensaje_no_califica, agenda_titulo_no_califica, agenda_enlace_no_califica, agenda_nombre, agenda_titulo,
             agenda_foto_url, agenda_titulo_evento, agenda_texto_video, agenda_texto_instrucciones, agenda_texto_oferta, agenda_whatsapp_link,
-            agenda_campo_nombre, agenda_campo_correo } = req.body || {};
+            agenda_campo_nombre, agenda_campo_correo, agenda_titulo_formulario, agenda_titulo_formulario_tamano } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -6569,6 +6582,10 @@ app.post("/config", requireAdminKey, async (req, res) => {
         texto: String(agenda_campo_correo.texto || "Tu correo").trim() || "Tu correo",
         obligatorio: Boolean(agenda_campo_correo.obligatorio)
       };
+    }
+    if (typeof agenda_titulo_formulario === "string") nuevaConfig.agenda_titulo_formulario = agenda_titulo_formulario.trim() || "Introduzca los detalles";
+    if (Number.isFinite(Number(agenda_titulo_formulario_tamano)) && Number(agenda_titulo_formulario_tamano) > 0) {
+      nuevaConfig.agenda_titulo_formulario_tamano = Math.round(Number(agenda_titulo_formulario_tamano));
     }
 
     if (Array.isArray(agenda_preguntas)) {
@@ -7246,6 +7263,10 @@ ${estilosBase()}
     background:var(--surface-2); border:1px solid var(--border); color:var(--text); border-radius:6px;
     padding:5px 6px; font-size:12.5px; font-family:inherit; height:30px;
   }
+  .rte-toolbar input[type=number]{
+    background:var(--surface-2); border:1px solid var(--border); color:var(--text); border-radius:6px;
+    padding:5px 6px; font-size:12.5px; font-family:inherit; height:30px; box-sizing:border-box;
+  }
   .rte-editable{
     min-height:90px; padding:12px 13px; font-size:14.5px; color:var(--text); outline:none; line-height:1.5;
   }
@@ -7351,6 +7372,18 @@ ${estilosBase()}
         <label style="margin-top:10px;">Texto del campo "correo"</label>
         <input type="text" id="inputCampoCorreoTexto">
         <label class="chk"><input type="checkbox" id="chkCampoCorreoObligatorio"> Obligatorio</label>
+      </div>
+
+      <div class="pregunta-card" style="margin-bottom:18px;">
+        <span style="font-family:var(--mono); font-size:12px; color:var(--green);">Título del paso del formulario (después de elegir día y hora)</span>
+        <label style="margin-top:10px;">Texto del título</label>
+        <div class="row2" style="align-items:flex-end;">
+          <input type="text" id="inputTituloFormulario">
+          <div style="display:flex; align-items:center; gap:6px;">
+            <input type="number" id="inputTituloFormularioTamano" min="8" max="72" style="width:100%;">
+            <span style="color:var(--muted); font-size:13px; flex-shrink:0;">px</span>
+          </div>
+        </div>
       </div>
 
       <div class="preguntas-editor-shell">
@@ -7605,13 +7638,8 @@ ${estilosBase()}
           <option value="'Times New Roman'">Times New Roman</option>
           <option value="'Trebuchet MS'">Trebuchet MS</option>
         </select>
-        <select class="rte-tamano" title="Tamaño de letra">
-          <option value="2">Pequeño</option>
-          <option value="3" selected>Normal</option>
-          <option value="4">Mediano</option>
-          <option value="5">Grande</option>
-          <option value="6">Muy grande</option>
-        </select>
+        <input type="number" class="rte-tamano-px" min="8" max="72" value="14" title="Tamaño en píxeles" style="width:52px;">
+        <button type="button" class="rte-btn" data-cmd="aplicar-tamano" title="Aplicar este tamaño a la parte seleccionada">px</button>
         <div class="rte-sep"></div>
         <button type="button" class="rte-btn" data-cmd="createlink" title="Insertar enlace">🔗</button>
         <button type="button" class="rte-btn" data-cmd="unlink" title="Quitar enlace">🔗✕</button>
@@ -7623,7 +7651,11 @@ ${estilosBase()}
 
     // Los botones de formato usan document.execCommand — sigue siendo el
     // mecanismo estándar de los navegadores para editores "contenteditable"
-    // simples como este.
+    // simples como este. El tamaño de letra es la excepción: execCommand
+    // solo soporta 7 niveles fijos (no números reales de px), así que se
+    // usa un truco conocido — se aplica un tamaño "7" temporal a la
+    // selección y de inmediato se reemplaza ese <font> por un <span> con
+    // el tamaño real en píxeles que haya escrito el usuario.
     shell.querySelectorAll(".rte-btn[data-cmd]").forEach(btn => {
       btn.addEventListener("click", () => {
         editable.focus();
@@ -7631,6 +7663,15 @@ ${estilosBase()}
         if(cmd === "createlink"){
           const url = prompt("Pega aquí el enlace (por ejemplo, la invitación a tu comunidad de WhatsApp):", "https://");
           if(url) document.execCommand("createLink", false, url);
+        } else if(cmd === "aplicar-tamano"){
+          const px = Number(shell.querySelector(".rte-tamano-px").value) || 14;
+          document.execCommand("fontSize", false, "7");
+          editable.querySelectorAll('font[size="7"]').forEach(f => {
+            const span = document.createElement("span");
+            span.style.fontSize = px + "px";
+            span.innerHTML = f.innerHTML;
+            f.replaceWith(span);
+          });
         } else {
           document.execCommand(cmd, false, null);
         }
@@ -7640,10 +7681,6 @@ ${estilosBase()}
     shell.querySelector(".rte-fuente").addEventListener("change", (e) => {
       editable.focus();
       document.execCommand("fontName", false, e.target.value);
-    });
-    shell.querySelector(".rte-tamano").addEventListener("change", (e) => {
-      editable.focus();
-      document.execCommand("fontSize", false, e.target.value);
     });
 
     function actualizarEstadoBotones(){
@@ -8029,6 +8066,9 @@ ${estilosBase()}
     document.getElementById("inputCampoCorreoTexto").value = campoCorreo.texto;
     document.getElementById("chkCampoCorreoObligatorio").checked = campoCorreo.obligatorio;
 
+    document.getElementById("inputTituloFormulario").value = cfg.agenda_titulo_formulario || "Introduzca los detalles";
+    document.getElementById("inputTituloFormularioTamano").value = cfg.agenda_titulo_formulario_tamano || 16;
+
     preguntas = Array.isArray(cfg.agenda_preguntas) ? cfg.agenda_preguntas : [];
     renderPreguntas();
   }
@@ -8064,6 +8104,8 @@ ${estilosBase()}
         texto: document.getElementById("inputCampoCorreoTexto").value.trim() || "Tu correo",
         obligatorio: document.getElementById("chkCampoCorreoObligatorio").checked
       },
+      agenda_titulo_formulario: document.getElementById("inputTituloFormulario").value.trim() || "Introduzca los detalles",
+      agenda_titulo_formulario_tamano: Number(document.getElementById("inputTituloFormularioTamano").value) || 16,
       agenda_preguntas: preguntas
     });
 
