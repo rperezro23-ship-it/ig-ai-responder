@@ -4472,7 +4472,16 @@ app.get("/agendar", (req, res) => {
   .contenedor.expandido-form{ width:1090px; height:auto; min-height:700px; }
   .panel-izq{
     width:400px; flex:none; padding:32px 28px; border-right:1px solid var(--border); overflow-y:auto;
+    position:relative;
   }
+  .btn-volver{
+    width:36px; height:36px; border-radius:50%; margin:0 0 16px;
+    background:#fff; border:1px solid var(--border); color:var(--accent); font-size:16px;
+    display:flex; align-items:center; justify-content:center; cursor:pointer;
+    box-shadow:0 2px 6px rgba(20,25,35,.08); padding:0;
+  }
+  .btn-volver.oculto{ display:none; }
+  .btn-volver:hover{ background:var(--accent-soft); }
   .panel-der{ width:400px; flex:none; padding:32px 30px; min-width:0; overflow-y:auto; transition:width .25s ease; }
   .panel-der.ancho-form{ width:460px; }
   .panel-der.ancho-nocalifica{ width:690px; }
@@ -4583,11 +4592,6 @@ app.get("/agendar", (req, res) => {
   .error{ color:var(--red); font-size:13.5px; margin-top:10px; }
   .exito{ text-align:center; }
   .exito .icono{ font-size:44px; margin-bottom:10px; }
-  .resumen-horario{
-    background:var(--accent-soft); border:1px solid #CFE1FF; border-radius:10px; padding:12px 14px;
-    font-size:13.5px; margin-bottom:18px; display:flex; align-items:center; gap:8px;
-  }
-  .resumen-horario a{ margin-left:auto; font-size:12.5px; color:var(--accent); font-weight:600; cursor:pointer; text-decoration:none; }
 
   .cal-cabecera{ display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
   .cal-cabecera button{
@@ -4637,6 +4641,7 @@ app.get("/agendar", (req, res) => {
   <div class="contenedor">
 
     <div class="panel-izq">
+      <button type="button" class="btn-volver oculto" id="btnVolverAtras" title="Volver al calendario">←</button>
       <div id="perfilFoto" class="perfil-foto">?</div>
       <div class="perfil-nombre" id="perfilNombre"></div>
       <div class="perfil-titulo" id="perfilTitulo"></div>
@@ -4683,11 +4688,7 @@ app.get("/agendar", (req, res) => {
       </div>
 
       <div id="pasoFormulario" class="oculto">
-        <h1 class="titulo-paso">Un último paso</h1>
-        <div class="resumen-horario">
-          <span id="resumenHorarioTexto"></span>
-          <a id="btnCambiarHorario">Cambiar</a>
-        </div>
+        <h1 class="titulo-paso">Introduzca los detalles</h1>
         <label id="labelCampoNombre">Tu nombre</label>
         <input type="text" id="inputNombre" placeholder="Ej: Juan Pérez">
         <label id="labelCampoCorreo">Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
@@ -5172,8 +5173,7 @@ app.get("/agendar", (req, res) => {
     vaciarPanelHoras();
     document.getElementById("pasoCalendario").classList.add("oculto");
     document.getElementById("pasoFormulario").classList.remove("oculto");
-    document.getElementById("resumenHorarioTexto").textContent =
-      new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZone: zonaHorariaMostrada });
+    document.getElementById("btnVolverAtras").classList.remove("oculto");
     // La columna del medio (donde vive el formulario) crece de 400 a
     // 460px, para que sus campos puedan ocupar 400px con 30px de margen
     // a cada lado — y el cuadro completo ajusta su ancho total para
@@ -5184,9 +5184,10 @@ app.get("/agendar", (req, res) => {
     document.querySelector(".contenedor").classList.add("expandido-form");
   }
 
-  document.getElementById("btnCambiarHorario").addEventListener("click", () => {
+  document.getElementById("btnVolverAtras").addEventListener("click", () => {
     document.getElementById("pasoFormulario").classList.add("oculto");
     document.getElementById("pasoCalendario").classList.remove("oculto");
+    document.getElementById("btnVolverAtras").classList.add("oculto");
     // Se revierte la columna del medio a su ancho normal (400px), y el
     // espacio en blanco vuelve a poder crecer a 350px (ver más abajo, se
     // quita "vacio-form" antes de volver a renderizar los horarios reales).
@@ -5287,6 +5288,7 @@ app.get("/agendar", (req, res) => {
     });
     if(preguntaDescalificante){
       document.getElementById("pasoFormulario").classList.add("oculto");
+      document.getElementById("btnVolverAtras").classList.add("oculto");
       document.getElementById("tituloNoCalifica").textContent = datosFormulario.titulo_no_califica || "Gracias por tu interés";
       document.getElementById("textoNoCalifica").innerHTML = datosFormulario.mensaje_no_califica;
       if(datosFormulario.enlace_no_califica){
@@ -5327,6 +5329,7 @@ app.get("/agendar", (req, res) => {
         return;
       }
       document.getElementById("pasoFormulario").classList.add("oculto");
+      document.getElementById("btnVolverAtras").classList.add("oculto");
       document.getElementById("resumenExito").textContent =
         "Te esperamos el " + new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZone: zonaHorariaMostrada }) + ".";
       document.getElementById("pasoExito").classList.remove("oculto");
