@@ -7387,13 +7387,21 @@ ${estilosBase()}
   .rte-editable a{ color:var(--green); }
   .rte-editable:empty::before{ content: attr(data-placeholder); color:var(--muted); }
 
+  .guardar-flotante{
+    position:fixed; bottom:26px; right:32px; z-index:40; display:flex; flex-direction:column;
+    align-items:flex-end; gap:8px;
+  }
   .btn-guardar-agenda{
     font-family:var(--display); font-weight:600; font-size:15px; border:none; border-radius:11px;
-    padding:14px 22px; cursor:pointer; color:#04140D; background:linear-gradient(90deg, #31D97C, #34C9E8);
-    margin-top:6px;
+    padding:14px 26px; cursor:pointer; color:#04140D; background:linear-gradient(90deg, #31D97C, #34C9E8);
+    margin:0; box-shadow:0 6px 20px rgba(20,25,35,.35);
   }
   .btn-guardar-agenda:hover{ filter:brightness(1.06); }
-  .mensaje-guardado{ font-size:13.5px; margin-top:12px; min-height:18px; }
+  .mensaje-guardado{
+    font-size:13px; margin:0; padding:8px 14px; border-radius:9px; background:var(--surface-2);
+    border:1px solid var(--border); box-shadow:0 4px 14px rgba(20,25,35,.3);
+  }
+  .mensaje-guardado:empty{ display:none; }
 </style>
 </head>
 <body>
@@ -7541,8 +7549,10 @@ ${estilosBase()}
       </div>
     </div>
 
-    <button type="button" class="btn-guardar-agenda" id="btnGuardarAgenda">Guardar cambios</button>
-    <p class="mensaje-guardado" id="mensajeGuardado"></p>
+    <div class="guardar-flotante">
+      <p class="mensaje-guardado" id="mensajeGuardado"></p>
+      <button type="button" class="btn-guardar-agenda" id="btnGuardarAgenda">Guardar cambios</button>
+    </div>
   </div>
   </div>
   </div>
@@ -8305,6 +8315,9 @@ ${estilosBase()}
     if(data && data.mensaje){
       msg.textContent = "✅ Cambios guardados correctamente.";
       msg.style.color = "var(--green)";
+      setTimeout(() => {
+        if(msg.textContent === "✅ Cambios guardados correctamente.") msg.textContent = "";
+      }, 3000);
     } else {
       msg.textContent = "❌ " + (data?.error || "No se pudo guardar, intenta de nuevo.");
       msg.style.color = "var(--red)";
