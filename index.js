@@ -4496,6 +4496,10 @@ app.get("/agendar", (req, res) => {
     display:flex; align-items:center; justify-content:center; font-size:26px; font-weight:700;
     color:var(--accent); margin-bottom:14px;
   }
+  .perfil-foto-rect{
+    display:block; width:100%; max-width:440px; height:auto; aspect-ratio:440/176;
+    object-fit:cover; border-radius:10px; margin:0 auto 14px; background:var(--accent-soft);
+  }
   .perfil-nombre{ font-weight:700; font-size:16px; }
   .perfil-titulo{ color:var(--muted); font-size:13.5px; margin-top:2px; }
   .divisor{ height:1px; background:var(--border); margin:20px 0; }
@@ -4982,7 +4986,13 @@ app.get("/agendar", (req, res) => {
     document.getElementById("perfilTextoVideo").innerHTML = perfil.texto_video || "";
     document.getElementById("perfilInstrucciones").innerHTML = perfil.texto_instrucciones || "";
     document.getElementById("perfilOferta").innerHTML = perfil.texto_oferta || "";
-    if(perfil.foto_url){
+    if(perfil.foto_rectangular_url){
+      // La foto rectangular (440x176) reemplaza por completo a la
+      // circular en ese mismo espacio — se escala para caber en el
+      // ancho disponible del panel, manteniendo su proporción.
+      document.getElementById("perfilFoto").outerHTML =
+        \`<img class="perfil-foto-rect" id="perfilFoto" src="\${perfil.foto_rectangular_url}" alt="">\`;
+    } else if(perfil.foto_url){
       document.getElementById("perfilFoto").outerHTML = \`<img class="perfil-foto" id="perfilFoto" src="\${perfil.foto_url}" alt="">\`;
     } else {
       document.getElementById("perfilFoto").textContent = (perfil.nombre || "?").trim().charAt(0).toUpperCase();
@@ -5374,6 +5384,7 @@ app.get("/agendar/pregunta", (req, res) => {
       nombre: configActual.agenda_nombre || "",
       titulo: configActual.agenda_titulo || "",
       foto_url: configActual.agenda_foto_url || "",
+      foto_rectangular_url: configActual.agenda_foto_rectangular_url || "",
       titulo_evento: configActual.agenda_titulo_evento || "",
       texto_video: configActual.agenda_texto_video || "",
       texto_instrucciones: configActual.agenda_texto_instrucciones || "",
@@ -6517,7 +6528,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
             agenda_zona_horaria, agenda_duracion_minutos, agenda_dias_hacia_adelante, agenda_aviso_minimo_horas, agenda_horario_semanal,
             agenda_preguntas, agenda_mensaje_no_califica, agenda_titulo_no_califica, agenda_enlace_no_califica, agenda_nombre, agenda_titulo,
             agenda_foto_url, agenda_titulo_evento, agenda_texto_video, agenda_texto_instrucciones, agenda_texto_oferta, agenda_whatsapp_link,
-            agenda_campo_nombre, agenda_campo_correo, agenda_titulo_formulario, agenda_titulo_formulario_tamano } = req.body || {};
+            agenda_campo_nombre, agenda_campo_correo, agenda_titulo_formulario, agenda_titulo_formulario_tamano,
+            agenda_foto_rectangular_url } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -6620,6 +6632,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof agenda_nombre === "string") nuevaConfig.agenda_nombre = agenda_nombre.trim();
     if (typeof agenda_titulo === "string") nuevaConfig.agenda_titulo = agenda_titulo.trim();
     if (typeof agenda_foto_url === "string") nuevaConfig.agenda_foto_url = agenda_foto_url.trim();
+    if (typeof agenda_foto_rectangular_url === "string") nuevaConfig.agenda_foto_rectangular_url = agenda_foto_rectangular_url.trim();
     if (typeof agenda_titulo_evento === "string") nuevaConfig.agenda_titulo_evento = agenda_titulo_evento.trim();
     if (typeof agenda_texto_video === "string") nuevaConfig.agenda_texto_video = agenda_texto_video.trim();
     if (typeof agenda_texto_instrucciones === "string") nuevaConfig.agenda_texto_instrucciones = agenda_texto_instrucciones.trim();
@@ -6833,11 +6846,17 @@ app.post("/fotos/eliminar", requireAdminKey, async (req, res) => {
 // reutilizando el mismo bucket "fotos" de Supabase Storage.
 app.post("/calendario/foto", requireAdminKey, async (req, res) => {
   try {
-    const { base64, tipo } = req.body || {};
+    const { base64, tipo, campo } = req.body || {};
     if (!base64) return res.status(400).json({ error: "Falta el archivo de imagen." });
 
+    // "campo" indica a cuál de las dos fotos corresponde esta subida — la
+    // circular de siempre, o la rectangular nueva (440x176) que reemplaza
+    // ese mismo espacio cuando está presente.
+    const campoDestino = campo === "rectangular" ? "agenda_foto_rectangular_url" : "agenda_foto_url";
+    const prefijoArchivo = campo === "rectangular" ? "agenda_perfil_rect" : "agenda_perfil";
+
     const extension = (tipo && tipo.includes("/")) ? tipo.split("/")[1].split(";")[0] : "jpg";
-    const rutaArchivo = `agenda_perfil_${Date.now()}.${extension}`;
+    const rutaArchivo = `${prefijoArchivo}_${Date.now()}.${extension}`;
     const buffer = Buffer.from(base64, "base64");
 
     if (buffer.length > 15 * 1024 * 1024) {
@@ -6855,16 +6874,17 @@ app.post("/calendario/foto", requireAdminKey, async (req, res) => {
 
     const { data: urlData } = supabase.storage.from("fotos").getPublicUrl(rutaArchivo);
 
-    // Se borra la foto de perfil anterior del storage, si había una y era
-    // de este mismo mecanismo (para no dejar basura acumulada) — se
-    // reconoce por el prefijo del nombre de archivo.
-    const fotoAnteriorUrl = configActual.agenda_foto_url || "";
-    const coincideAnterior = fotoAnteriorUrl.match(/agenda_perfil_\d+\.\w+$/);
+    // Se borra la foto anterior de ESTE mismo campo en el storage, si
+    // había una y era de este mecanismo (para no dejar basura acumulada)
+    // — se reconoce por el prefijo del nombre de archivo.
+    const fotoAnteriorUrl = configActual[campoDestino] || "";
+    const patronAnterior = new RegExp(`${prefijoArchivo}_\\d+\\.\\w+$`);
+    const coincideAnterior = fotoAnteriorUrl.match(patronAnterior);
     if (coincideAnterior) {
       await supabase.storage.from("fotos").remove([coincideAnterior[0]]);
     }
 
-    await guardarConfigDB({ agenda_foto_url: urlData.publicUrl });
+    await guardarConfigDB({ [campoDestino]: urlData.publicUrl });
 
     res.json({ mensaje: "✅ Foto subida", url: urlData.publicUrl });
   } catch (err) {
@@ -7243,6 +7263,11 @@ ${estilosBase()}
     font-size:22px; color:var(--muted); flex-shrink:0;
   }
   .foto-perfil-botones{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .foto-rect-preview{
+    width:110px; height:44px; border-radius:8px; object-fit:cover; background:var(--surface-3);
+    border:1px solid var(--border); display:flex; align-items:center; justify-content:center;
+    font-size:10.5px; color:var(--muted); flex-shrink:0; text-align:center; padding:4px;
+  }
   .btn-subir-foto{
     background:var(--surface-3); border:1px solid var(--border); color:var(--text);
     border-radius:9px; padding:9px 14px; font-size:13.5px; font-weight:600; cursor:pointer;
@@ -7341,6 +7366,16 @@ ${estilosBase()}
           <input type="file" id="inputFotoPerfilArchivo" accept="image/*" style="display:none;">
           <button type="button" class="btn-subir-foto" id="btnSubirFotoPerfil">Subir foto</button>
           <span class="foto-perfil-estado" id="fotoPerfilEstado"></span>
+        </div>
+      </div>
+      <label style="margin-top:14px;">Foto rectangular (opcional — 440 x 176 px, reemplaza a la foto circular de arriba si subes una)</label>
+      <div class="foto-perfil-cont">
+        <div class="foto-rect-preview" id="fotoRectPreview">Sin foto rectangular</div>
+        <div class="foto-perfil-botones">
+          <input type="file" id="inputFotoRectArchivo" accept="image/*" style="display:none;">
+          <button type="button" class="btn-subir-foto" id="btnSubirFotoRect">Subir foto rectangular</button>
+          <button type="button" class="btn-eliminar" id="btnQuitarFotoRect" style="display:none;">Quitar</button>
+          <span class="foto-perfil-estado" id="fotoRectEstado"></span>
         </div>
       </div>
       <label style="margin-top:14px;">Título del evento</label>
@@ -7741,6 +7776,52 @@ ${estilosBase()}
     lector.readAsDataURL(archivo);
   });
 
+  // --- Subida de la foto RECTANGULAR (440x176) — opcional, reemplaza a
+  // la circular en ese mismo espacio si está presente. ---
+  let fotoRectUrlActual = "";
+  function actualizarPreviewFotoRect(url){
+    const cont = document.getElementById("fotoRectPreview");
+    const btnQuitar = document.getElementById("btnQuitarFotoRect");
+    if(url){
+      cont.innerHTML = \`<img src="\${url}" style="width:100%; height:100%; object-fit:cover; border-radius:8px;">\`;
+      btnQuitar.style.display = "";
+    } else {
+      cont.textContent = "Sin foto rectangular";
+      btnQuitar.style.display = "none";
+    }
+  }
+
+  document.getElementById("btnSubirFotoRect").addEventListener("click", () => {
+    document.getElementById("inputFotoRectArchivo").click();
+  });
+
+  document.getElementById("inputFotoRectArchivo").addEventListener("change", async (e) => {
+    const archivo = e.target.files[0];
+    if(!archivo) return;
+    const estado = document.getElementById("fotoRectEstado");
+    estado.textContent = "Subiendo...";
+
+    const lector = new FileReader();
+    lector.onload = async () => {
+      const base64 = lector.result.split(",")[1];
+      const data = await llamarPOST("/calendario/foto", { base64, tipo: archivo.type, campo: "rectangular" });
+      if(data && data.url){
+        fotoRectUrlActual = data.url;
+        actualizarPreviewFotoRect(data.url);
+        estado.textContent = "✅ Foto actualizada";
+      } else {
+        estado.textContent = "❌ " + (data?.error || "No se pudo subir");
+      }
+      setTimeout(() => { estado.textContent = ""; }, 4000);
+    };
+    lector.readAsDataURL(archivo);
+  });
+
+  document.getElementById("btnQuitarFotoRect").addEventListener("click", () => {
+    fotoRectUrlActual = "";
+    actualizarPreviewFotoRect("");
+  });
+
   // Estado ÚNICO de todas las preguntas del formulario — cada una:
   // { id, texto, tipo: "texto"|"opciones", estilo_visual: "radios"|"desplegable",
   //   opciones: [{texto, descalifica}], obligatoria }.
@@ -8053,6 +8134,8 @@ ${estilosBase()}
     document.getElementById("inputAgendaTitulo").value = cfg.agenda_titulo || "";
     fotoPerfilUrlActual = cfg.agenda_foto_url || "";
     actualizarPreviewFoto(fotoPerfilUrlActual);
+    fotoRectUrlActual = cfg.agenda_foto_rectangular_url || "";
+    actualizarPreviewFotoRect(fotoRectUrlActual);
     document.getElementById("inputAgendaTituloEvento").value = cfg.agenda_titulo_evento || "";
     editorTextoVideo.establecerHTML(cfg.agenda_texto_video || "");
     editorInstrucciones.establecerHTML(cfg.agenda_texto_instrucciones || "");
@@ -8092,6 +8175,7 @@ ${estilosBase()}
       agenda_nombre: document.getElementById("inputAgendaNombre").value.trim(),
       agenda_titulo: document.getElementById("inputAgendaTitulo").value.trim(),
       agenda_foto_url: fotoPerfilUrlActual,
+      agenda_foto_rectangular_url: fotoRectUrlActual,
       agenda_titulo_evento: document.getElementById("inputAgendaTituloEvento").value.trim(),
       agenda_texto_video: editorTextoVideo.obtenerHTML(),
       agenda_texto_instrucciones: editorInstrucciones.obtenerHTML(),
