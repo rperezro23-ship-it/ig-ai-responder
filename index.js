@@ -4656,6 +4656,7 @@ app.get("/agendar", (req, res) => {
       <div class="evento-detalle"><span class="icono">🕐</span><span id="perfilDuracion"></span></div>
       <div class="evento-detalle"><span class="icono">📹</span><span id="perfilTextoVideo"></span></div>
       <div class="evento-detalle oculto" id="perfilDetalleHorario"><span class="icono">📅</span><span id="perfilDetalleHorarioTexto"></span></div>
+      <div class="evento-detalle oculto" id="perfilDetalleZona"><span class="icono">🌐</span><span id="perfilDetalleZonaTexto"></span></div>
       <p class="instrucciones" id="perfilInstrucciones"></p>
       <div class="advertencia oculto" id="bloqueAdvertencia">
         ⚠️ Si no encuentras un horario en el que tengas libre, escríbenos por WhatsApp <a id="enlaceWhatsapp" href="#" target="_blank">tocando aquí</a>.
@@ -4697,11 +4698,11 @@ app.get("/agendar", (req, res) => {
         <h2 class="titulo-paso titulo-h2" id="tituloFormulario">Introduzca los detalles</h2>
         <div class="bloque-pregunta">
           <label id="labelCampoNombre">Tu nombre</label>
-          <input type="text" id="inputNombre" placeholder="Ej: Juan Pérez">
+          <input type="text" id="inputNombre">
         </div>
         <div class="bloque-pregunta">
           <label id="labelCampoCorreo">Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
-          <input type="email" id="inputEmail" placeholder="tucorreo@ejemplo.com">
+          <input type="email" id="inputEmail">
         </div>
         <div id="contenedorPreguntas"></div>
         <div class="error oculto" id="errorFormulario"></div>
@@ -5069,7 +5070,7 @@ app.get("/agendar", (req, res) => {
                 \${CODIGOS_PAIS.map(cp => \`<option value="\${cp.c}"\${cp.n === PAIS_POR_DEFECTO.n ? " selected" : ""}>\${cp.f} \${cp.n} \${cp.c}</option>\`).join("")}
               </select>
               <div class="tel-divisor"></div>
-              <input type="tel" class="input-tel-numero" placeholder="Número de WhatsApp" inputmode="numeric">
+              <input type="tel" class="input-tel-numero" inputmode="numeric">
             </div>
           </div>
         \`;
@@ -5202,6 +5203,34 @@ app.get("/agendar", (req, res) => {
     const fecha = inicio.toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: zonaHorariaMostrada });
     document.getElementById("perfilDetalleHorarioTexto").textContent = \`\${horaInicio} - \${horaFin}, \${fecha}\`;
     document.getElementById("perfilDetalleHorario").classList.remove("oculto");
+
+    document.getElementById("perfilDetalleZonaTexto").textContent = nombresDeZonasConMismoOffset(zonaHorariaMostrada);
+    document.getElementById("perfilDetalleZona").classList.remove("oculto");
+  }
+
+  // Arma algo como "Saskatchewan, Guatemala, Costa Rica" — unas cuantas
+  // ciudades/regiones que comparten AHORA MISMO el mismo desfase horario
+  // que la zona que se está mostrando, igual que hace Calendly.
+  function nombresDeZonasConMismoOffset(zona){
+    function desfaseDeZona(z){
+      try {
+        const partes = new Intl.DateTimeFormat("en-US", { timeZone: z, timeZoneName: "longOffset" }).formatToParts(new Date());
+        return (partes.find(p => p.type === "timeZoneName") || {}).value || "";
+      } catch(err) { return ""; }
+    }
+    const desfaseActual = desfaseDeZona(zona);
+    let listaZonas;
+    try { listaZonas = Intl.supportedValuesOf("timeZone"); } catch(err) { listaZonas = [zona]; }
+
+    const nombres = [];
+    for(const z of listaZonas){
+      if(!z.includes("/") || z.startsWith("Etc/")) continue; // se salta pseudo-zonas sin nombre de lugar real
+      if(desfaseDeZona(z) !== desfaseActual) continue;
+      const nombre = z.split("/").pop().replace(/_/g, " ");
+      if(!nombres.includes(nombre)) nombres.push(nombre);
+      if(nombres.length >= 3) break;
+    }
+    return nombres.length ? nombres.join(", ") : zona.split("/").pop().replace(/_/g, " ");
   }
 
   function irAlFormulario(){
@@ -5225,6 +5254,7 @@ app.get("/agendar", (req, res) => {
     document.getElementById("pasoCalendario").classList.remove("oculto");
     document.getElementById("btnVolverAtras").classList.add("oculto");
     document.getElementById("perfilDetalleHorario").classList.add("oculto");
+    document.getElementById("perfilDetalleZona").classList.add("oculto");
     // Se revierte la columna del medio a su ancho normal (400px), y el
     // espacio en blanco vuelve a poder crecer a 350px (ver más abajo, se
     // quita "vacio-form" antes de volver a renderizar los horarios reales).
