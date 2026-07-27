@@ -4513,6 +4513,7 @@ app.get("/agendar", (req, res) => {
   .oferta{ font-size:13.5px; font-weight:600; margin-top:16px; }
 
   h1.titulo-paso{ font-size:19px; margin:0 0 6px; }
+  h2.titulo-h2{ font-size:16px; margin:0 0 6px; }
   p.sub{ color:var(--muted); font-size:14px; margin:0 0 22px; line-height:1.5; }
   label{ display:block; font-size:13.5px; font-weight:600; margin:16px 0 10px; }
   .bloque-pregunta{ margin-bottom:25px; }
@@ -4688,7 +4689,7 @@ app.get("/agendar", (req, res) => {
       </div>
 
       <div id="pasoFormulario" class="oculto">
-        <h1 class="titulo-paso">Introduzca los detalles</h1>
+        <h2 class="titulo-paso titulo-h2">Introduzca los detalles</h2>
         <label id="labelCampoNombre">Tu nombre</label>
         <input type="text" id="inputNombre" placeholder="Ej: Juan Pérez">
         <label id="labelCampoCorreo">Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
