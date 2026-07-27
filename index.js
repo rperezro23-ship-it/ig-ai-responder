@@ -4655,6 +4655,7 @@ app.get("/agendar", (req, res) => {
       <h1 class="evento-titulo" id="perfilTituloEvento"></h1>
       <div class="evento-detalle"><span class="icono">🕐</span><span id="perfilDuracion"></span></div>
       <div class="evento-detalle"><span class="icono">📹</span><span id="perfilTextoVideo"></span></div>
+      <div class="evento-detalle oculto" id="perfilDetalleHorario"><span class="icono">📅</span><span id="perfilDetalleHorarioTexto"></span></div>
       <p class="instrucciones" id="perfilInstrucciones"></p>
       <div class="advertencia oculto" id="bloqueAdvertencia">
         ⚠️ Si no encuentras un horario en el que tengas libre, escríbenos por WhatsApp <a id="enlaceWhatsapp" href="#" target="_blank">tocando aquí</a>.
@@ -5190,11 +5191,25 @@ app.get("/agendar", (req, res) => {
     document.getElementById("panelHoras").classList.add("vacio-form");
   }
 
+  function actualizarDetalleHorario(){
+    const perfil = (datosFormulario && datosFormulario.perfil) || {};
+    const duracionMin = perfil.duracion_minutos || 30;
+    const inicio = new Date(horarioElegido);
+    const fin = new Date(inicio.getTime() + duracionMin * 60000);
+    const opcionesHora = { hour: "numeric", minute: "2-digit", timeZone: zonaHorariaMostrada };
+    const horaInicio = inicio.toLocaleTimeString("es-MX", opcionesHora);
+    const horaFin = fin.toLocaleTimeString("es-MX", opcionesHora);
+    const fecha = inicio.toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: zonaHorariaMostrada });
+    document.getElementById("perfilDetalleHorarioTexto").textContent = \`\${horaInicio} - \${horaFin}, \${fecha}\`;
+    document.getElementById("perfilDetalleHorario").classList.remove("oculto");
+  }
+
   function irAlFormulario(){
     vaciarPanelHoras();
     document.getElementById("pasoCalendario").classList.add("oculto");
     document.getElementById("pasoFormulario").classList.remove("oculto");
     document.getElementById("btnVolverAtras").classList.remove("oculto");
+    actualizarDetalleHorario();
     // La columna del medio (donde vive el formulario) crece de 400 a
     // 460px, para que sus campos puedan ocupar 400px con 30px de margen
     // a cada lado — y el cuadro completo ajusta su ancho total para
@@ -5209,6 +5224,7 @@ app.get("/agendar", (req, res) => {
     document.getElementById("pasoFormulario").classList.add("oculto");
     document.getElementById("pasoCalendario").classList.remove("oculto");
     document.getElementById("btnVolverAtras").classList.add("oculto");
+    document.getElementById("perfilDetalleHorario").classList.add("oculto");
     // Se revierte la columna del medio a su ancho normal (400px), y el
     // espacio en blanco vuelve a poder crecer a 350px (ver más abajo, se
     // quita "vacio-form" antes de volver a renderizar los horarios reales).
