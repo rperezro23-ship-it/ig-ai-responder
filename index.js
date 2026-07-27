@@ -7387,21 +7387,21 @@ ${estilosBase()}
   .rte-editable a{ color:var(--green); }
   .rte-editable:empty::before{ content: attr(data-placeholder); color:var(--muted); }
 
-  .guardar-flotante{
-    position:fixed; bottom:26px; right:32px; z-index:40; display:flex; flex-direction:column;
-    align-items:flex-end; gap:8px;
+  .savebar{
+    position:fixed; left:236px; right:0; bottom:0; background:linear-gradient(0deg, var(--bg) 65%, transparent);
+    padding:22px 46px 24px; z-index:40;
   }
+  .savebar-inner{ width:100%; max-width:1360px; margin:0; display:flex; align-items:center; gap:14px; }
   .btn-guardar-agenda{
-    font-family:var(--display); font-weight:600; font-size:15px; border:none; border-radius:11px;
-    padding:14px 26px; cursor:pointer; color:#04140D; background:linear-gradient(90deg, #31D97C, #34C9E8);
-    margin:0; box-shadow:0 6px 20px rgba(20,25,35,.35);
+    background:var(--green); color:#0A0D13; font-family:var(--display);
+    font-weight:600; font-size:16px; border:none; border-radius:12px; padding:15px 28px; cursor:pointer;
+    letter-spacing:.01em;
   }
-  .btn-guardar-agenda:hover{ filter:brightness(1.06); }
-  .mensaje-guardado{
-    font-size:13px; margin:0; padding:8px 14px; border-radius:9px; background:var(--surface-2);
-    border:1px solid var(--border); box-shadow:0 4px 14px rgba(20,25,35,.3);
-  }
+  .btn-guardar-agenda:active{ transform:scale(.985); }
+  .mensaje-guardado{ font-size:13.5px; color:var(--muted); white-space:nowrap; }
   .mensaje-guardado:empty{ display:none; }
+  .content-area{ padding-bottom:110px; }
+  @media (max-width:860px){ .savebar{ left:0; padding:18px 18px 20px; } .btn-guardar-agenda{ flex:1; } }
 </style>
 </head>
 <body>
@@ -7548,13 +7548,15 @@ ${estilosBase()}
         </div>
       </div>
     </div>
+  </div>
+  </div>
+  </div>
 
-    <div class="guardar-flotante">
-      <p class="mensaje-guardado" id="mensajeGuardado"></p>
+  <div class="savebar">
+    <div class="savebar-inner">
       <button type="button" class="btn-guardar-agenda" id="btnGuardarAgenda">Guardar cambios</button>
+      <span class="mensaje-guardado" id="mensajeGuardado"></span>
     </div>
-  </div>
-  </div>
   </div>
 
 <script>
