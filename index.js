@@ -5405,10 +5405,11 @@ app.get("/agendar", (req, res) => {
       document.getElementById("pasoExito").classList.remove("oculto");
 
       // Si está activada la confirmación por WhatsApp, se arma el enlace
-      // con el mensaje ya escrito (reemplazando {fecha} y {hora}) y se
-      // muestra el botón — un clic manual es más confiable que abrir la
-      // pestaña sola, ya que los navegadores suelen bloquear ventanas
-      // abiertas después de una llamada al servidor.
+      // con el mensaje ya escrito (reemplazando {fecha} y {hora}). Se
+      // intenta abrir directo (para pruebas) — el botón se deja visible
+      // igual como respaldo, por si el navegador bloquea la apertura
+      // automática (es bastante común justo después de una llamada al
+      // servidor).
       const wc = datosFormulario.whatsapp_confirmar;
       if(wc && wc.activo && wc.numero){
         const inicio = new Date(horarioElegido);
@@ -5419,6 +5420,7 @@ app.get("/agendar", (req, res) => {
         const botonWa = document.getElementById("btnWhatsappConfirmar");
         botonWa.href = enlaceWa;
         botonWa.classList.remove("oculto");
+        window.open(enlaceWa, "_blank");
       }
     } catch (err) {
       errorEl.textContent = "Ocurrió un error, intenta de nuevo.";
