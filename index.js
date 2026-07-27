@@ -4690,10 +4690,14 @@ app.get("/agendar", (req, res) => {
 
       <div id="pasoFormulario" class="oculto">
         <h2 class="titulo-paso titulo-h2" id="tituloFormulario">Introduzca los detalles</h2>
-        <label id="labelCampoNombre">Tu nombre</label>
-        <input type="text" id="inputNombre" placeholder="Ej: Juan Pérez">
-        <label id="labelCampoCorreo">Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
-        <input type="email" id="inputEmail" placeholder="tucorreo@ejemplo.com">
+        <div class="bloque-pregunta">
+          <label id="labelCampoNombre">Tu nombre</label>
+          <input type="text" id="inputNombre" placeholder="Ej: Juan Pérez">
+        </div>
+        <div class="bloque-pregunta">
+          <label id="labelCampoCorreo">Tu correo (opcional, para mandarte la invitación y el enlace de la videollamada)</label>
+          <input type="email" id="inputEmail" placeholder="tucorreo@ejemplo.com">
+        </div>
         <div id="contenedorPreguntas"></div>
         <div class="error oculto" id="errorFormulario"></div>
         <button class="ancho" id="btnAgendar">Agendar</button>
