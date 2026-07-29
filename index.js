@@ -2636,6 +2636,23 @@ async function procesarBuffer(senderId) {
       }
     }
 
+    // Mismo mecanismo que arriba, pero contra nuestra propia tabla de
+    // reservas (el calendario propio en /agendar) — para cuando ya no se
+    // usa Calendly en absoluto.
+    let eventoReservaPropiaConfirmado = null;
+    let pedirConfirmacionReservaPropia = false;
+    if (transicion?.verificar_reserva_propia) {
+      const resultado = await verificarReservaPropia(conv.username);
+      if (resultado.encontrado) {
+        console.log(`✅ Reserva propia confirmada para ${senderId} (@${conv.username}): ${resultado.reserva.inicio}`);
+        eventoReservaPropiaConfirmado = resultado.reserva;
+      } else {
+        console.log(`❌ No se encontró ninguna reserva propia para ${senderId} (@${conv.username || "sin username"}): ${resultado.motivo}`);
+        transicion = null;
+        pedirConfirmacionReservaPropia = true;
+      }
+    }
+
     if (transicion && transicion.etapa_destino !== (etapaActualClave || "")) {
       const nuevaEtapaConfig = transicion.etapa_destino ? obtenerEtapaConfig(transicion.etapa_destino) : null;
       if (transicion.etapa_destino === "" || nuevaEtapaConfig) {
@@ -2666,7 +2683,7 @@ async function procesarBuffer(senderId) {
         if (transicion.agendo) {
           console.log(`📅 ${senderId} AGENDÓ — se detienen sus seguimientos (si esa opción está activada).`);
           camposTransicion.agendo = true;
-          camposTransicion.agendo_en = eventoCalendlyConfirmado?.start_time || new Date().toISOString();
+          camposTransicion.agendo_en = eventoCalendlyConfirmado?.start_time || eventoReservaPropiaConfirmado?.inicio || new Date().toISOString();
         }
 
         await guardarConversacion(senderId, camposTransicion);
@@ -2805,6 +2822,25 @@ async function procesarBuffer(senderId) {
         });
       }
       promptSistema += `\n\nNOTA IMPORTANTE PARA ESTE MENSAJE: Calendly confirmó que la llamada del cliente quedó agendada para: ${fechaEvento} (hora del propio cliente). Puedes mencionar este día y hora de forma natural en tu respuesta (ej. para confirmarle o recordárselo), no hace falta que se lo repitas palabra por palabra, solo que quede claro que sabes cuándo es.`;
+    }
+
+    // Mismo mecanismo que arriba, pero para nuestro propio calendario en
+    // /agendar (sin Calendly de por medio).
+    if (pedirConfirmacionReservaPropia) {
+      promptSistema += `\n\nNOTA IMPORTANTE PARA ESTE MENSAJE: el cliente acaba de decir que ya agendó su llamada, pero nuestro sistema NO encuentra ninguna reserva confirmada a su nombre en el calendario en este momento. NO le digas que no encuentras nada ni que "el sistema no lo detecta" (suena robótico y desconfiado) — en vez de eso, de forma cálida y natural, pídele que te confirme qué día y hora eligió, como si quisieras anotarlo tú mismo para tenerlo presente. Si te da el día y la hora, no hace falta que sigas insistiendo en este mensaje.`;
+    }
+
+    // Nuestro propio calendario no guarda la zona horaria exacta que usó
+    // el lead al elegir su horario (solo el instante UTC) — se usa la
+    // zona horaria del negocio como referencia razonable para mostrarle
+    // la hora de vuelta.
+    if (eventoReservaPropiaConfirmado?.inicio) {
+      const zonaHoraria = configActual.agenda_zona_horaria || "America/Mexico_City";
+      const fechaEvento = new Date(eventoReservaPropiaConfirmado.inicio).toLocaleString("es-MX", {
+        weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", hour12: true,
+        timeZone: zonaHoraria
+      });
+      promptSistema += `\n\nNOTA IMPORTANTE PARA ESTE MENSAJE: nuestro calendario confirmó que la llamada del cliente quedó agendada para: ${fechaEvento}. Puedes mencionar este día y hora de forma natural en tu respuesta (ej. para confirmarle o recordárselo), no hace falta que se lo repitas palabra por palabra, solo que quede claro que sabes cuándo es.`;
     }
 
     // El PRIMER mensaje real de este lead se guarda aparte (no depende del
@@ -6511,7 +6547,12 @@ function normalizarTransiciones(transiciones) {
         no_califica: Boolean(t.no_califica),
         motivo_no_califica: typeof t.motivo_no_califica === "string" ? t.motivo_no_califica.trim() : "",
         agendo: Boolean(t.agendo),
-        verificar_calendly: Boolean(t.verificar_calendly)
+        verificar_calendly: Boolean(t.verificar_calendly),
+        // Igual que "verificar_calendly", pero consultando nuestra propia
+        // tabla de reservas (la del calendario propio en /agendar) en vez
+        // de la API de Calendly — para cuando ya se dejó de usar Calendly
+        // por completo.
+        verificar_reserva_propia: Boolean(t.verificar_reserva_propia)
       };
     })
     .filter(t => t.coincidencia === "condicion" ? Boolean(t.condicion) : t.frases.length > 0);
@@ -9962,6 +10003,10 @@ ${estilosBase()}
           <input type="checkbox" class="\${prefijoClase}-verificar-calendly" data-i="\${i}"\${t.verificar_calendly ? " checked" : ""} style="width:16px; height:16px; accent-color:#FFC542; cursor:pointer;">
           <span style="color:var(--text); font-size:13.5px; font-weight:500;">📆 Verificar EN VIVO en Calendly antes de activarse (si no encuentra la reserva, no cambia de etapa y le pide confirmar día/hora)</span>
         </label>
+        <label style="display:flex; align-items:center; gap:9px; cursor:pointer; margin:10px 0 0;">
+          <input type="checkbox" class="\${prefijoClase}-verificar-reserva-propia" data-i="\${i}"\${t.verificar_reserva_propia ? " checked" : ""} style="width:16px; height:16px; accent-color:#3FC7E8; cursor:pointer;">
+          <span style="color:var(--text); font-size:13.5px; font-weight:500;">🗓️ Verificar EN VIVO en nuestro propio calendario (/agendar) antes de activarse — usa esta en vez de la de Calendly si ya dejaste de usarlo</span>
+        </label>
       \`;
       cont.appendChild(div);
     });
@@ -10031,6 +10076,11 @@ ${estilosBase()}
       if(!lista[i]) return;
       lista[i].verificar_calendly = chk.checked;
     });
+    document.querySelectorAll(\`.\${prefijoClase}-verificar-reserva-propia\`).forEach((chk) => {
+      const i = +chk.dataset.i;
+      if(!lista[i]) return;
+      lista[i].verificar_reserva_propia = chk.checked;
+    });
   }
 
   let transicionesGenerales = [];
@@ -10048,7 +10098,7 @@ ${estilosBase()}
       alert("Primero crea al menos una etapa para poder mandar al lead hacia ella.");
       return;
     }
-    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "", agendo: false, verificar_calendly: false });
+    transicionesGenerales.push({ frases: [], etapa_destino: etapas.find(e => e.clave)?.clave || "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "", agendo: false, verificar_calendly: false, verificar_reserva_propia: false });
     renderTransicionesGenerales();
   });
 
@@ -10305,7 +10355,7 @@ ${estilosBase()}
       leerEtapasDelDOM();
       const i = +e.target.dataset.i;
       if(!etapas[i].transiciones) etapas[i].transiciones = [];
-      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "", agendo: false, verificar_calendly: false });
+      etapas[i].transiciones.push({ frases: [], etapa_destino: "", coincidencia: "contiene", condicion: "", silenciosa: false, no_califica: false, motivo_no_califica: "", agendo: false, verificar_calendly: false, verificar_reserva_propia: false });
       renderEtapas();
     }));
   }
