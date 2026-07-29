@@ -5589,14 +5589,11 @@ app.post("/agendar/confirmar", async (req, res) => {
     // Calendar, para que queden visibles ahí mismo sin tener que entrar a
     // Supabase a buscarlas. Las de "casillas" son un arreglo (puede haber
     // marcado varias) — se muestran unidas por comas.
-    const notasCompletas = [
-      `Instagram: @${instagram_username || "no especificado"}`,
-      ...preguntas.map(p => {
-        const r = respuestasRecibidas[p.id];
-        const texto = Array.isArray(r) ? r.join(", ") : r;
-        return texto ? `${p.texto}: ${texto}` : null;
-      }).filter(Boolean)
-    ].join("\n");
+    const notasCompletas = preguntas.map(p => {
+      const r = respuestasRecibidas[p.id];
+      const texto = Array.isArray(r) ? r.join(", ") : r;
+      return texto ? `${p.texto}: ${texto}` : null;
+    }).filter(Boolean).join("\n");
 
     const eventoCreado = await crearEventoGoogleCalendar({
       inicioIso: inicio_iso,
@@ -5643,21 +5640,32 @@ app.post("/agendar/confirmar", async (req, res) => {
         const zona = configActual.agenda_zona_horaria || "America/Mexico_City";
         const fechaTexto = inicio.toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: zona });
         const horaTexto = inicio.toLocaleTimeString("es-MX", { hour: "numeric", minute: "2-digit", timeZone: zona });
+
+        // Orden del correo: nombre y correo primero (si están activados),
+        // luego cada pregunta que se haya marcado como "incluir en el
+        // correo" (en el mismo orden en que están armadas), y la fecha/hora
+        // al final — nada de esto se repite ni sale fijo si se desactivó.
+        const lineasCuerpo = [
+          configActual.agenda_correo_texto_intro || "¡Alguien acaba de agendar una llamada!",
+          "",
+          configActual.agenda_correo_incluir_nombre !== false ? `Nombre: ${nombre || "no especificado"}` : null,
+          (configActual.agenda_correo_incluir_correo !== false && email) ? `Correo: ${email}` : null,
+          ...preguntas
+            .filter(p => p.incluir_en_correo !== false)
+            .map(p => {
+              const r = respuestasRecibidas[p.id];
+              const texto = Array.isArray(r) ? r.join(", ") : r;
+              return texto ? `${p.texto}: ${texto}` : null;
+            }),
+          configActual.agenda_correo_incluir_fecha_hora !== false ? "" : null,
+          configActual.agenda_correo_incluir_fecha_hora !== false ? `Fecha: ${fechaTexto}` : null,
+          configActual.agenda_correo_incluir_fecha_hora !== false ? `Hora: ${horaTexto}` : null
+        ].filter(v => v !== null);
+
         await enviarCorreoGmail({
           destinatario: destinatarios,
           asunto: `Nueva llamada agendada: ${nombre || "Lead"}`,
-          cuerpo: [
-            `¡Alguien acaba de agendar una llamada!`,
-            ``,
-            `Nombre: ${nombre || "no especificado"}`,
-            `Instagram: @${instagram_username || "no especificado"}`,
-            email ? `Correo: ${email}` : null,
-            ``,
-            `Fecha: ${fechaTexto}`,
-            `Hora: ${horaTexto}`,
-            ``,
-            notasCompletas
-          ].filter(Boolean).join("\n")
+          cuerpo: lineasCuerpo.join("\n")
         });
       }
     } catch (errorCorreo) {
@@ -5812,7 +5820,8 @@ let configActual = {
         { texto: "De 100 a 300 USD", descalifica: false },
         { texto: "De 300 a 500 USD", descalifica: false }
       ],
-      obligatoria: true
+      obligatoria: true,
+      incluir_en_correo: true
     }
   ],
   // Qué se le muestra a quien queda descalificado por cualquiera de las
@@ -5839,6 +5848,16 @@ let configActual = {
   // asistente). Si se deja vacío, se usa el correo de la cuenta de Google
   // conectada como respaldo.
   agenda_correos_notificacion: "",
+
+  // Qué aparece dentro del correo de notificación — el texto de
+  // introducción es personalizable, y cada dato (nombre, correo, y
+  // fecha/hora) se puede incluir o no. Cuáles PREGUNTAS aparecen se
+  // controla por pregunta, con "incluir_en_correo" dentro de cada una
+  // (ver agenda_preguntas más abajo).
+  agenda_correo_texto_intro: "¡Alguien acaba de agendar una llamada!",
+  agenda_correo_incluir_nombre: true,
+  agenda_correo_incluir_correo: true,
+  agenda_correo_incluir_fecha_hora: true,
 
   // Contenido del panel de perfil que se muestra en /agendar (columna
   // izquierda) — puramente informativo/visual, se puede personalizar sin
@@ -6696,7 +6715,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
             agenda_foto_url, agenda_titulo_evento, agenda_texto_video, agenda_texto_instrucciones, agenda_texto_oferta, agenda_whatsapp_link,
             agenda_campo_nombre, agenda_campo_correo, agenda_titulo_formulario, agenda_titulo_formulario_tamano,
             agenda_foto_rectangular_url, agenda_whatsapp_confirmar_activo, agenda_whatsapp_confirmar_numero,
-            agenda_whatsapp_confirmar_mensaje, agenda_correos_notificacion } = req.body || {};
+            agenda_whatsapp_confirmar_mensaje, agenda_correos_notificacion, agenda_correo_texto_intro,
+            agenda_correo_incluir_nombre, agenda_correo_incluir_correo, agenda_correo_incluir_fecha_hora } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -6779,7 +6799,12 @@ app.post("/config", requireAdminKey, async (req, res) => {
             id: String(p?.id || `pregunta_${i}`),
             texto: String(p?.texto || "").trim(),
             tipo,
-            obligatoria: Boolean(p?.obligatoria)
+            obligatoria: Boolean(p?.obligatoria),
+            // Por defecto SÍ se incluye en el correo, salvo que se marque
+            // explícitamente lo contrario — así las preguntas ya
+            // existentes (guardadas antes de este campo existir) no
+            // desaparecen del correo de la nada.
+            incluir_en_correo: p?.incluir_en_correo !== false
           };
           if (tipo === "opciones") {
             base.estilo_visual = p?.estilo_visual === "desplegable" ? "desplegable" : "radios";
@@ -6810,6 +6835,10 @@ app.post("/config", requireAdminKey, async (req, res) => {
       nuevaConfig.agenda_correos_notificacion = agenda_correos_notificacion
         .split(",").map(c => c.trim()).filter(c => c.includes("@")).join(", ");
     }
+    if (typeof agenda_correo_texto_intro === "string") nuevaConfig.agenda_correo_texto_intro = agenda_correo_texto_intro.trim() || "¡Alguien acaba de agendar una llamada!";
+    if (typeof agenda_correo_incluir_nombre === "boolean") nuevaConfig.agenda_correo_incluir_nombre = agenda_correo_incluir_nombre;
+    if (typeof agenda_correo_incluir_correo === "boolean") nuevaConfig.agenda_correo_incluir_correo = agenda_correo_incluir_correo;
+    if (typeof agenda_correo_incluir_fecha_hora === "boolean") nuevaConfig.agenda_correo_incluir_fecha_hora = agenda_correo_incluir_fecha_hora;
     if (typeof agenda_titulo_evento === "string") nuevaConfig.agenda_titulo_evento = agenda_titulo_evento.trim();
     if (typeof agenda_texto_video === "string") nuevaConfig.agenda_texto_video = agenda_texto_video.trim();
     if (typeof agenda_texto_instrucciones === "string") nuevaConfig.agenda_texto_instrucciones = agenda_texto_instrucciones.trim();
@@ -7622,6 +7651,13 @@ ${estilosBase()}
       <p class="hint" style="margin-top:-8px;">Cada vez que alguien agenda (y sí califica), se manda un correo con todos los datos a esta lista. Si lo dejas vacío, se usa el correo de la cuenta de Google que tienes conectada.</p>
       <label>Correos que reciben la notificación (separados por coma)</label>
       <input type="text" id="inputCorreosNotificacion" placeholder="tu@correo.com, asistente@correo.com">
+      <label style="margin-top:14px;">Texto de introducción del correo</label>
+      <input type="text" id="inputCorreoTextoIntro">
+      <label style="margin-top:14px;">Qué se incluye en el correo</label>
+      <label class="chk"><input type="checkbox" id="chkCorreoIncluirNombre"> Nombre</label>
+      <label class="chk"><input type="checkbox" id="chkCorreoIncluirCorreo"> Correo del lead</label>
+      <label class="chk"><input type="checkbox" id="chkCorreoIncluirFechaHora"> Fecha y hora de la llamada</label>
+      <p class="hint" style="margin:6px 0 0;">Qué preguntas del formulario aparecen se controla desde cada pregunta, en la sección de abajo ("Preguntas del formulario").</p>
       <button type="button" class="add-paso" id="btnCorreoPrueba" style="margin-top:12px;">Enviar correo de prueba</button>
       <span class="foto-perfil-estado" id="correoPruebaEstado" style="margin-left:10px;"></span>
     </div>
@@ -8296,6 +8332,7 @@ ${estilosBase()}
           <button type="button" class="add-paso add-opcion-mini">+ Agregar opción</button>
         </div>
         <label class="chk"><input type="checkbox" class="chk-p-obligatoria" \${p.obligatoria ? "checked" : ""}> Obligatoria (no deja agendar si no se responde)</label>
+        <label class="chk"><input type="checkbox" class="chk-p-incluir-correo" \${p.incluir_en_correo !== false ? "checked" : ""}> Incluir en el correo de notificación</label>
       </div>
     \`).join("");
 
@@ -8319,6 +8356,11 @@ ${estilosBase()}
       chk.addEventListener("change", () => {
         preguntas[i].obligatoria = chk.checked;
         renderPreview();
+      });
+    });
+    cont.querySelectorAll(".chk-p-incluir-correo").forEach((chk, i) => {
+      chk.addEventListener("change", () => {
+        preguntas[i].incluir_en_correo = chk.checked;
       });
     });
     cont.querySelectorAll(".input-p-tipo").forEach((sel, i) => {
@@ -8354,7 +8396,7 @@ ${estilosBase()}
   }
 
   document.getElementById("btnAgregarPregunta").addEventListener("click", () => {
-    preguntas.push({ id: "p_" + Date.now(), texto: "", tipo: "texto", opciones: [], estilo_visual: "radios", obligatoria: false });
+    preguntas.push({ id: "p_" + Date.now(), texto: "", tipo: "texto", opciones: [], estilo_visual: "radios", obligatoria: false, incluir_en_correo: true });
     renderPreguntas();
   });
 
@@ -8400,6 +8442,10 @@ ${estilosBase()}
     document.getElementById("inputWhatsappConfirmarNumero").value = cfg.agenda_whatsapp_confirmar_numero || "";
     document.getElementById("inputWhatsappConfirmarMensaje").value = cfg.agenda_whatsapp_confirmar_mensaje || "Hola Coach, ya agendé mi llamada para {fecha} a las {hora}.";
     document.getElementById("inputCorreosNotificacion").value = cfg.agenda_correos_notificacion || "";
+    document.getElementById("inputCorreoTextoIntro").value = cfg.agenda_correo_texto_intro || "¡Alguien acaba de agendar una llamada!";
+    document.getElementById("chkCorreoIncluirNombre").checked = cfg.agenda_correo_incluir_nombre !== false;
+    document.getElementById("chkCorreoIncluirCorreo").checked = cfg.agenda_correo_incluir_correo !== false;
+    document.getElementById("chkCorreoIncluirFechaHora").checked = cfg.agenda_correo_incluir_fecha_hora !== false;
 
     preguntas = Array.isArray(cfg.agenda_preguntas) ? cfg.agenda_preguntas : [];
     renderPreguntas();
@@ -8468,6 +8514,10 @@ ${estilosBase()}
       agenda_whatsapp_confirmar_numero: document.getElementById("inputWhatsappConfirmarNumero").value.trim(),
       agenda_whatsapp_confirmar_mensaje: document.getElementById("inputWhatsappConfirmarMensaje").value.trim() || "Hola Coach, ya agendé mi llamada para {fecha} a las {hora}.",
       agenda_correos_notificacion: document.getElementById("inputCorreosNotificacion").value.trim(),
+      agenda_correo_texto_intro: document.getElementById("inputCorreoTextoIntro").value.trim() || "¡Alguien acaba de agendar una llamada!",
+      agenda_correo_incluir_nombre: document.getElementById("chkCorreoIncluirNombre").checked,
+      agenda_correo_incluir_correo: document.getElementById("chkCorreoIncluirCorreo").checked,
+      agenda_correo_incluir_fecha_hora: document.getElementById("chkCorreoIncluirFechaHora").checked,
       agenda_preguntas: preguntas
     });
 
