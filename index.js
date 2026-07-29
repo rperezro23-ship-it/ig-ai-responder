@@ -847,6 +847,34 @@ async function crearEventoGoogleCalendar({ inicioIso, nombre, email, notas }) {
   return resp.data; // incluye .id (para guardarlo) y .hangoutLink (el enlace de Meet)
 }
 
+// Manda un correo EN NOMBRE de la cuenta de Google conectada, usando la
+// API de Gmail directamente — se usa para avisarle al coach cada vez que
+// alguien agenda, sin depender de las notificaciones de Google Calendar
+// (que Google nunca le manda al organizador por eventos que él mismo
+// crea en su propio calendario, sin importar la configuración).
+async function enviarCorreoGmail({ destinatario, asunto, cuerpo }) {
+  const accessToken = await obtenerAccessTokenGoogleValido();
+  if (!accessToken) throw new Error("No hay una cuenta de Google conectada para mandar el correo.");
+
+  const mensaje = [
+    `To: ${destinatario}`,
+    `Subject: =?UTF-8?B?${Buffer.from(asunto, "utf-8").toString("base64")}?=`,
+    `Content-Type: text/plain; charset="UTF-8"`,
+    "",
+    cuerpo
+  ].join("\r\n");
+
+  // Gmail exige "base64url" (sin + / =), no el base64 normal.
+  const raw = Buffer.from(mensaje, "utf-8").toString("base64")
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+  await axios.post(
+    "https://www.googleapis.com/gmail/v1/users/me/messages/send",
+    { raw },
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+}
+
 // ---------------------------------------------------------------
 // Conexión con Calendly: se usa para saber, con certeza real (no solo
 // porque el lead lo dijo), si alguien ya agendó su llamada. Funciona con
@@ -4343,7 +4371,12 @@ app.get("/oauth/google/start", requireAdminKey, (req, res) => {
     // alcanza para consultar el correo conectado (endpoint userinfo) — solo
     // sirve para el calendario en sí. Se agrega aquí para poder mostrar en
     // /calendario qué cuenta está conectada.
-    "https://www.googleapis.com/auth/userinfo.email"
+    "https://www.googleapis.com/auth/userinfo.email",
+    // Permite mandar correos EN NOMBRE de la cuenta conectada — se usa
+    // para avisarte por correo cada vez que alguien agenda, sin depender
+    // de las notificaciones de Google Calendar (que no le avisan al
+    // organizador por eventos que él mismo crea).
+    "https://www.googleapis.com/auth/gmail.send"
   ].join(" ");
 
   const url = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -5594,6 +5627,36 @@ app.post("/agendar/confirmar", async (req, res) => {
     }
 
     console.log(`📅 Nueva reserva confirmada: ${nombre || "sin nombre"} (@${instagram_username || "sin username"}) para ${inicio.toISOString()}`);
+
+    // Le avisa al coach por correo — nunca se deja que un fallo aquí
+    // tumbe la reserva ya hecha (el evento ya quedó creado en su
+    // calendario de verdad, eso es lo importante).
+    try {
+      const cuentaConectada = await obtenerCuentaGoogleConectada();
+      if (cuentaConectada?.email) {
+        const zona = configActual.agenda_zona_horaria || "America/Mexico_City";
+        const fechaTexto = inicio.toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: zona });
+        const horaTexto = inicio.toLocaleTimeString("es-MX", { hour: "numeric", minute: "2-digit", timeZone: zona });
+        await enviarCorreoGmail({
+          destinatario: cuentaConectada.email,
+          asunto: `Nueva llamada agendada: ${nombre || "Lead"}`,
+          cuerpo: [
+            `¡Alguien acaba de agendar una llamada!`,
+            ``,
+            `Nombre: ${nombre || "no especificado"}`,
+            `Instagram: @${instagram_username || "no especificado"}`,
+            email ? `Correo: ${email}` : null,
+            ``,
+            `Fecha: ${fechaTexto}`,
+            `Hora: ${horaTexto}`,
+            ``,
+            notasCompletas
+          ].filter(Boolean).join("\n")
+        });
+      }
+    } catch (errorCorreo) {
+      console.error("⚠️ La llamada se agendó correctamente pero no se pudo mandar el correo de aviso:", errorCorreo.response?.data || errorCorreo.message);
+    }
 
     // Si este lead ya tiene una conversación con el bot, se cancelan sus
     // seguimientos pendientes de inmediato — ya no hace falta insistirle
