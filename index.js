@@ -852,14 +852,23 @@ async function crearEventoGoogleCalendar({ inicioIso, nombre, email, notas }) {
 // alguien agenda, sin depender de las notificaciones de Google Calendar
 // (que Google nunca le manda al organizador por eventos que él mismo
 // crea en su propio calendario, sin importar la configuración).
-async function enviarCorreoGmail({ destinatario, asunto, cuerpo }) {
+// Escapa caracteres especiales de HTML — se usa al armar el correo en
+// HTML, para que un nombre o respuesta con "<", ">", "&", etc. (poco
+// común, pero posible) no rompa el formato del correo.
+function escaparHtml(texto) {
+  return String(texto || "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+
+async function enviarCorreoGmail({ destinatario, asunto, cuerpo, html }) {
   const accessToken = await obtenerAccessTokenGoogleValido();
   if (!accessToken) throw new Error("No hay una cuenta de Google conectada para mandar el correo.");
 
   const mensaje = [
     `To: ${destinatario}`,
     `Subject: =?UTF-8?B?${Buffer.from(asunto, "utf-8").toString("base64")}?=`,
-    `Content-Type: text/plain; charset="UTF-8"`,
+    `Content-Type: text/${html ? "html" : "plain"}; charset="UTF-8"`,
     "",
     cuerpo
   ].join("\r\n");
@@ -5645,27 +5654,30 @@ app.post("/agendar/confirmar", async (req, res) => {
         // luego cada pregunta que se haya marcado como "incluir en el
         // correo" (en el mismo orden en que están armadas), y la fecha/hora
         // al final — nada de esto se repite ni sale fijo si se desactivó.
+        // Cada etiqueta (antes de los dos puntos) va en negrita — para eso
+        // el correo se manda en HTML en vez de texto plano.
+        const campo = (etiqueta, valor) => `<b>${escaparHtml(etiqueta)}:</b> ${escaparHtml(valor)}<br>`;
         const lineasCuerpo = [
-          configActual.agenda_correo_texto_intro || "¡Alguien acaba de agendar una llamada!",
-          "",
-          configActual.agenda_correo_incluir_nombre !== false ? `Nombre: ${nombre || "no especificado"}` : null,
-          (configActual.agenda_correo_incluir_correo !== false && email) ? `Correo: ${email}` : null,
+          `${escaparHtml(configActual.agenda_correo_texto_intro || "¡Alguien acaba de agendar una llamada!")}<br><br>`,
+          configActual.agenda_correo_incluir_nombre !== false ? campo("Nombre", nombre || "no especificado") : null,
+          (configActual.agenda_correo_incluir_correo !== false && email) ? campo("Correo", email) : null,
           ...preguntas
             .filter(p => p.incluir_en_correo !== false)
             .map(p => {
               const r = respuestasRecibidas[p.id];
               const texto = Array.isArray(r) ? r.join(", ") : r;
-              return texto ? `${p.texto}: ${texto}` : null;
+              return texto ? campo(p.texto, texto) : null;
             }),
-          configActual.agenda_correo_incluir_fecha_hora !== false ? "" : null,
-          configActual.agenda_correo_incluir_fecha_hora !== false ? `Fecha: ${fechaTexto}` : null,
-          configActual.agenda_correo_incluir_fecha_hora !== false ? `Hora: ${horaTexto}` : null
+          configActual.agenda_correo_incluir_fecha_hora !== false ? "<br>" : null,
+          configActual.agenda_correo_incluir_fecha_hora !== false ? campo("Fecha", fechaTexto) : null,
+          configActual.agenda_correo_incluir_fecha_hora !== false ? campo("Hora", horaTexto) : null
         ].filter(v => v !== null);
 
         await enviarCorreoGmail({
           destinatario: destinatarios,
           asunto: `Nueva llamada agendada: ${nombre || "Lead"}`,
-          cuerpo: lineasCuerpo.join("\n")
+          cuerpo: lineasCuerpo.join(""),
+          html: true
         });
       }
     } catch (errorCorreo) {
