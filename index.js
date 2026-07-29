@@ -5633,12 +5633,18 @@ app.post("/agendar/confirmar", async (req, res) => {
     // calendario de verdad, eso es lo importante).
     try {
       const cuentaConectada = await obtenerCuentaGoogleConectada();
-      if (cuentaConectada?.email) {
+      const correosConfigurados = (configActual.agenda_correos_notificacion || "")
+        .split(",").map(c => c.trim()).filter(Boolean);
+      const destinatarios = correosConfigurados.length > 0
+        ? correosConfigurados.join(", ")
+        : cuentaConectada?.email;
+
+      if (destinatarios) {
         const zona = configActual.agenda_zona_horaria || "America/Mexico_City";
         const fechaTexto = inicio.toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: zona });
         const horaTexto = inicio.toLocaleTimeString("es-MX", { hour: "numeric", minute: "2-digit", timeZone: zona });
         await enviarCorreoGmail({
-          destinatario: cuentaConectada.email,
+          destinatario: destinatarios,
           asunto: `Nueva llamada agendada: ${nombre || "Lead"}`,
           cuerpo: [
             `¡Alguien acaba de agendar una llamada!`,
@@ -5827,6 +5833,12 @@ let configActual = {
   agenda_whatsapp_confirmar_activo: false,
   agenda_whatsapp_confirmar_numero: "", // con código de país, solo dígitos (ej. 5215512345678)
   agenda_whatsapp_confirmar_mensaje: "Hola Coach, ya agendé mi llamada para {fecha} a las {hora}.",
+
+  // A qué correo(s) se avisa cada vez que alguien agenda — se puede
+  // poner más de uno, separados por coma (ej. para avisarle también a un
+  // asistente). Si se deja vacío, se usa el correo de la cuenta de Google
+  // conectada como respaldo.
+  agenda_correos_notificacion: "",
 
   // Contenido del panel de perfil que se muestra en /agendar (columna
   // izquierda) — puramente informativo/visual, se puede personalizar sin
@@ -6684,7 +6696,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
             agenda_foto_url, agenda_titulo_evento, agenda_texto_video, agenda_texto_instrucciones, agenda_texto_oferta, agenda_whatsapp_link,
             agenda_campo_nombre, agenda_campo_correo, agenda_titulo_formulario, agenda_titulo_formulario_tamano,
             agenda_foto_rectangular_url, agenda_whatsapp_confirmar_activo, agenda_whatsapp_confirmar_numero,
-            agenda_whatsapp_confirmar_mensaje } = req.body || {};
+            agenda_whatsapp_confirmar_mensaje, agenda_correos_notificacion } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -6791,6 +6803,13 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof agenda_whatsapp_confirmar_activo === "boolean") nuevaConfig.agenda_whatsapp_confirmar_activo = agenda_whatsapp_confirmar_activo;
     if (typeof agenda_whatsapp_confirmar_numero === "string") nuevaConfig.agenda_whatsapp_confirmar_numero = agenda_whatsapp_confirmar_numero.replace(/\D/g, "");
     if (typeof agenda_whatsapp_confirmar_mensaje === "string") nuevaConfig.agenda_whatsapp_confirmar_mensaje = agenda_whatsapp_confirmar_mensaje.trim() || "Hola Coach, ya agendé mi llamada para {fecha} a las {hora}.";
+    if (typeof agenda_correos_notificacion === "string") {
+      // Se limpia cada correo (sin espacios), se descartan los que no
+      // tengan al menos un "@", y se vuelve a armar como texto separado
+      // por comas — así queda guardado ya validado, listo para usar.
+      nuevaConfig.agenda_correos_notificacion = agenda_correos_notificacion
+        .split(",").map(c => c.trim()).filter(c => c.includes("@")).join(", ");
+    }
     if (typeof agenda_titulo_evento === "string") nuevaConfig.agenda_titulo_evento = agenda_titulo_evento.trim();
     if (typeof agenda_texto_video === "string") nuevaConfig.agenda_texto_video = agenda_texto_video.trim();
     if (typeof agenda_texto_instrucciones === "string") nuevaConfig.agenda_texto_instrucciones = agenda_texto_instrucciones.trim();
@@ -7048,6 +7067,36 @@ app.post("/calendario/foto", requireAdminKey, async (req, res) => {
   } catch (err) {
     console.error("❌ Error inesperado subiendo foto de perfil de agenda:", err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Manda un correo de prueba de inmediato, para diagnosticar el envío sin
+// tener que pasar por todo el flujo de agendar una llamada real cada vez.
+app.post("/calendario/correo-prueba", requireAdminKey, async (req, res) => {
+  try {
+    const cuentaConectada = await obtenerCuentaGoogleConectada();
+    const correosConfigurados = (configActual.agenda_correos_notificacion || "")
+      .split(",").map(c => c.trim()).filter(Boolean);
+    const destinatarios = correosConfigurados.length > 0 ? correosConfigurados.join(", ") : cuentaConectada?.email;
+
+    if (!destinatarios) {
+      return res.status(400).json({ error: "No hay ningún correo configurado, ni una cuenta de Google conectada como respaldo." });
+    }
+
+    await enviarCorreoGmail({
+      destinatario: destinatarios,
+      asunto: "Correo de prueba — Instagram AI Responder",
+      cuerpo: `Este es un correo de prueba para confirmar que el envío funciona correctamente.\n\nSe mandó a: ${destinatarios}\nHora del envío: ${new Date().toLocaleString("es-MX")}`
+    });
+
+    res.json({ mensaje: "✅ Correo de prueba enviado", destinatarios });
+  } catch (err) {
+    // Se manda el detalle completo del error de Google (si lo hay) para
+    // poder diagnosticar exactamente qué está fallando — por ejemplo, si
+    // falta el permiso de "gmail.send" (que requiere reconectar la
+    // cuenta), Google lo dice explícitamente en este mismo detalle.
+    console.error("❌ Error mandando el correo de prueba:", err.response?.data || err.message);
+    res.status(500).json({ error: err.response?.data?.error?.message || err.message, detalle: err.response?.data || null });
   }
 });
 
@@ -7565,6 +7614,16 @@ ${estilosBase()}
       <input type="text" id="inputWhatsappConfirmarNumero" placeholder="5215512345678">
       <label style="margin-top:14px;">Mensaje que se manda (usa <code>{fecha}</code> y <code>{hora}</code> — se reemplazan solos)</label>
       <input type="text" id="inputWhatsappConfirmarMensaje">
+    </div>
+
+    <div class="card">
+      <p class="cuentas-titulo">Paso 4.6</p>
+      <p class="cuentas-subtitulo">Notificación por correo al agendar</p>
+      <p class="hint" style="margin-top:-8px;">Cada vez que alguien agenda (y sí califica), se manda un correo con todos los datos a esta lista. Si lo dejas vacío, se usa el correo de la cuenta de Google que tienes conectada.</p>
+      <label>Correos que reciben la notificación (separados por coma)</label>
+      <input type="text" id="inputCorreosNotificacion" placeholder="tu@correo.com, asistente@correo.com">
+      <button type="button" class="add-paso" id="btnCorreoPrueba" style="margin-top:12px;">Enviar correo de prueba</button>
+      <span class="foto-perfil-estado" id="correoPruebaEstado" style="margin-left:10px;"></span>
     </div>
 
     <div class="card">
@@ -8340,10 +8399,36 @@ ${estilosBase()}
     document.getElementById("chkWhatsappConfirmarActivo").checked = Boolean(cfg.agenda_whatsapp_confirmar_activo);
     document.getElementById("inputWhatsappConfirmarNumero").value = cfg.agenda_whatsapp_confirmar_numero || "";
     document.getElementById("inputWhatsappConfirmarMensaje").value = cfg.agenda_whatsapp_confirmar_mensaje || "Hola Coach, ya agendé mi llamada para {fecha} a las {hora}.";
+    document.getElementById("inputCorreosNotificacion").value = cfg.agenda_correos_notificacion || "";
 
     preguntas = Array.isArray(cfg.agenda_preguntas) ? cfg.agenda_preguntas : [];
     renderPreguntas();
   }
+
+  document.getElementById("btnCorreoPrueba").addEventListener("click", async () => {
+    const btn = document.getElementById("btnCorreoPrueba");
+    const estado = document.getElementById("correoPruebaEstado");
+    btn.disabled = true;
+    btn.textContent = "Enviando...";
+    estado.textContent = "";
+    estado.style.color = "";
+
+    const data = await llamarPOST("/calendario/correo-prueba");
+
+    btn.disabled = false;
+    btn.textContent = "Enviar correo de prueba";
+    if(data && data.mensaje){
+      estado.textContent = "✅ Enviado a: " + data.destinatarios;
+      estado.style.color = "var(--green)";
+    } else {
+      // Se muestra el error completo que devolvió Google — por ejemplo,
+      // si falta el permiso de "gmail.send", Google lo dice explícito
+      // aquí mismo, en vez de fallar en silencio.
+      estado.textContent = "❌ " + (data?.error || "No se pudo enviar.");
+      estado.style.color = "var(--red)";
+      if(data?.detalle) console.error("Detalle completo del error:", data.detalle);
+    }
+  });
 
   document.getElementById("btnGuardarAgenda").addEventListener("click", async () => {
     const btn = document.getElementById("btnGuardarAgenda");
@@ -8382,6 +8467,7 @@ ${estilosBase()}
       agenda_whatsapp_confirmar_activo: document.getElementById("chkWhatsappConfirmarActivo").checked,
       agenda_whatsapp_confirmar_numero: document.getElementById("inputWhatsappConfirmarNumero").value.trim(),
       agenda_whatsapp_confirmar_mensaje: document.getElementById("inputWhatsappConfirmarMensaje").value.trim() || "Hola Coach, ya agendé mi llamada para {fecha} a las {hora}.",
+      agenda_correos_notificacion: document.getElementById("inputCorreosNotificacion").value.trim(),
       agenda_preguntas: preguntas
     });
 
