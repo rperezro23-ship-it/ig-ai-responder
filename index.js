@@ -807,12 +807,22 @@ async function crearEventoGoogleCalendar({ inicioIso, nombre, email, notas }) {
   const inicio = new Date(inicioIso);
   const fin = new Date(inicio.getTime() + duracionMin * 60000);
 
+  // El correo del LEAD se agrega como invitado si lo dio — pero el
+  // organizador (la cuenta de Google conectada, es decir, TÚ) también
+  // tiene que agregarse explícitamente como invitado, porque si no,
+  // Google no manda ningún correo de notificación por crear un evento en
+  // tu propio calendario vía la API — solo les avisa a los invitados.
+  const cuentaConectada = await obtenerCuentaGoogleConectada();
+  const invitados = [];
+  if (cuentaConectada?.email) invitados.push({ email: cuentaConectada.email });
+  if (email && email !== cuentaConectada?.email) invitados.push({ email });
+
   const evento = {
     summary: `Llamada con ${nombre || "lead"}`,
     description: notas || "",
     start: { dateTime: inicio.toISOString() },
     end: { dateTime: fin.toISOString() },
-    attendees: email ? [{ email }] : [],
+    attendees: invitados,
     conferenceData: {
       createRequest: {
         requestId: crypto.randomBytes(8).toString("hex"),
@@ -829,7 +839,7 @@ async function crearEventoGoogleCalendar({ inicioIso, nombre, email, notas }) {
     "https://www.googleapis.com/calendar/v3/calendars/primary/events",
     evento,
     {
-      params: { conferenceDataVersion: 1, sendUpdates: email ? "all" : "none" },
+      params: { conferenceDataVersion: 1, sendUpdates: invitados.length > 0 ? "all" : "none" },
       headers: { Authorization: `Bearer ${accessToken}` }
     }
   );
