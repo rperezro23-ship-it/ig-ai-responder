@@ -1744,6 +1744,7 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
 
     if (parte.tipo === "texto") {
       let valorFinal = parte.valor;
+      let convParaEnlaces = null; // se comparte entre las dos verificaciones de abajo, para no consultar dos veces la misma conversación
 
       // Si el texto trae un enlace de Calendly y hay una posición configurada
       // para la pregunta del usuario de Instagram, se le agrega el parámetro
@@ -1752,12 +1753,28 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
       // deje en blanco). Se busca el username de forma perezosa (solo si
       // hace falta) para no gastar una consulta extra en cada mensaje.
       if (configActual.calendly_pregunta_instagram_posicion && valorFinal.includes("calendly.com")) {
-        const conv = await obtenerConversacion(senderId);
-        if (conv.username) {
-          valorFinal = agregarUsernameAEnlacesCalendly(valorFinal, conv.username, configActual.calendly_pregunta_instagram_posicion);
-          console.log(`🔗 Enlace de Calendly a ${senderId} pre-llenado con el usuario @${conv.username}.`);
+        convParaEnlaces = convParaEnlaces || await obtenerConversacion(senderId);
+        if (convParaEnlaces.username) {
+          valorFinal = agregarUsernameAEnlacesCalendly(valorFinal, convParaEnlaces.username, configActual.calendly_pregunta_instagram_posicion);
+          console.log(`🔗 Enlace de Calendly a ${senderId} pre-llenado con el usuario @${convParaEnlaces.username}.`);
         } else {
           console.warn(`⚠️ No se pudo pre-llenar el enlace de Calendly para ${senderId} — todavía no se tiene su username de Instagram.`);
+        }
+      }
+
+      // Mismo mecanismo para nuestro propio calendario en /agendar — se
+      // le agrega "?u=username" (o "&u=username" si ya trae otros
+      // parámetros) automáticamente, sin que haga falta que la IA lo
+      // escriba ni que dependa de que el lead lo tipee bien en el
+      // formulario — así la reserva siempre queda bien etiquetada con el
+      // usuario de Instagram correcto.
+      if (valorFinal.includes("/agendar")) {
+        convParaEnlaces = convParaEnlaces || await obtenerConversacion(senderId);
+        if (convParaEnlaces.username) {
+          valorFinal = agregarUsernameAEnlaceAgendar(valorFinal, convParaEnlaces.username);
+          console.log(`🔗 Enlace de /agendar a ${senderId} pre-llenado con el usuario @${convParaEnlaces.username}.`);
+        } else {
+          console.warn(`⚠️ No se pudo pre-llenar el enlace de /agendar para ${senderId} — todavía no se tiene su username de Instagram.`);
         }
       }
 
@@ -1852,6 +1869,21 @@ function agregarUsernameAEnlacesCalendly(texto, username, posicion) {
   return texto.replace(/https:\/\/calendly\.com\/\S+/g, (url) => {
     const separador = url.includes("?") ? "&" : "?";
     return `${url}${separador}a${posicion}=${encodeURIComponent(username)}`;
+  });
+}
+
+// Mismo mecanismo, pero para nuestro propio calendario en /agendar — a
+// diferencia de Calendly (que necesita saber en qué POSICIÓN de sus
+// preguntas va el username), aquí siempre es el mismo parámetro fijo
+// "u", así que no hace falta ninguna posición configurada — siempre se
+// intenta agregar si el texto trae un enlace a /agendar.
+function agregarUsernameAEnlaceAgendar(texto, username) {
+  if (!texto || !username) return texto;
+
+  return texto.replace(/https?:\/\/\S*\/agendar\S*/g, (url) => {
+    if (/[?&]u=/.test(url)) return url; // ya lo trae, no se duplica
+    const separador = url.includes("?") ? "&" : "?";
+    return `${url}${separador}u=${encodeURIComponent(username)}`;
   });
 }
 
@@ -5171,6 +5203,19 @@ app.get("/agendar", (req, res) => {
         <input type="text" class="input-respuesta" data-id="\${p.id}" data-tipo="texto" data-obligatoria="\${p.obligatoria ? "1" : ""}">
       \`;
     }).map(html => \`<div class="bloque-pregunta">\${html}</div>\`).join("");
+
+    // Si el enlace llegó con el usuario de Instagram ya identificado (el
+    // bot lo agrega automáticamente), se autocompleta la pregunta que
+    // pida el Instagram del lead — se detecta por su texto (que
+    // contenga la palabra "instagram"), y se deja editable por si el
+    // lead quiere corregirlo.
+    if(usernamePrellenado){
+      const preguntaInstagram = preguntasCargadas.find(p => p.tipo === "texto" && /instagram/i.test(p.texto));
+      if(preguntaInstagram){
+        const campo = cont.querySelector(\`.input-respuesta[data-id="\${preguntaInstagram.id}"]\`);
+        if(campo && !campo.value) campo.value = usernamePrellenado;
+      }
+    }
 
     cont.querySelectorAll(".grupo-radios").forEach(grupo => {
       grupo.querySelectorAll(".opcion").forEach(el => {
