@@ -1962,9 +1962,18 @@ function agregarUsernameAEnlaceAgendar(texto, username) {
   if (!texto || !username) return texto;
 
   return texto.replace(/https?:\/\/\S*\/agendar\S*/g, (url) => {
-    if (/[?&]u=/.test(url)) return url; // ya lo trae, no se duplica
-    const separador = url.includes("?") ? "&" : "?";
-    return `${url}${separador}u=${encodeURIComponent(username)}`;
+    // Si la IA escribió el enlace pegado a un signo de puntuación de fin
+    // de oración (ej. "...aquí: https://.../agendar." con el punto
+    // pegado), ese signo se captura por el \S* del regex de arriba como
+    // si fuera parte de la URL — se separa aquí para no terminar con
+    // algo roto como ".../agendar.?u=usuario".
+    const coincidenciaFinal = url.match(/[.,;:!?)\]}>]+$/);
+    const puntuacionFinal = coincidenciaFinal ? coincidenciaFinal[0] : "";
+    const urlLimpia = puntuacionFinal ? url.slice(0, -puntuacionFinal.length) : url;
+
+    if (/[?&]u=/.test(urlLimpia)) return url; // ya lo trae, no se duplica
+    const separador = urlLimpia.includes("?") ? "&" : "?";
+    return `${urlLimpia}${separador}u=${encodeURIComponent(username)}${puntuacionFinal}`;
   });
 }
 
