@@ -2648,6 +2648,22 @@ async function procesarBuffer(senderId) {
     const conv = await obtenerConversacion(senderId);
     const historial = conv.historial || [];
 
+    // Si todavía no se tiene el username de Instagram de este lead (puede
+    // pasar con conversaciones viejas, o si el primer intento falló), se
+    // intenta obtener aquí mismo, en cada mensaje — así deja de depender
+    // únicamente del reporte de "dolores y obstáculos" (que es la única
+    // otra parte del código que lo consultaba) para que finalmente quede
+    // guardado. `obtenerPerfilInstagram` ya se encarga de no reintentar
+    // de más si viene fallando (space de 10 minutos entre reintentos), así
+    // que es seguro llamarlo aquí sin preocuparse por saturar la API.
+    if (!conv.username) {
+      const perfilLead = await obtenerPerfilInstagram(senderId);
+      if (perfilLead?.username) {
+        conv.username = perfilLead.username;
+        console.log(`👤 Username de ${senderId} obtenido y guardado: @${perfilLead.username}`);
+      }
+    }
+
     // Bot pausado PARA ESTE LEAD en particular (distinto del apagado
     // general): el admin decidió tomar esta conversación a mano desde
     // /chats. Se guarda igual el mensaje del cliente en el historial (para
