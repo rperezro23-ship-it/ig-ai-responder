@@ -963,26 +963,94 @@ let calendlyOrgUriCache = null;
 // reservas — mucho más simple y confiable que la verificación de Calendly,
 // ya que ahora controlamos los dos lados (el formulario Y el bot), no hace
 // falta ninguna llamada a una API externa para esto.
-async function verificarReservaPropia(username) {
+async function verificarReservaPropia(username, mensajeFecha) {
   const limpio = (username || "").trim().replace(/^@/, "").toLowerCase();
-  if (!limpio) return { encontrado: false, motivo: "El lead no tiene username de Instagram guardado." };
 
-  const { data, error } = await supabase
-    .from("reservas")
-    .select("*")
-    .eq("instagram_username", limpio)
-    .gte("inicio", new Date().toISOString()) // solo reservas futuras, no las que ya pasaron
-    .order("inicio", { ascending: true })
-    .limit(1)
-    .maybeSingle();
+  if (limpio) {
+    const { data, error } = await supabase
+      .from("reservas")
+      .select("*")
+      .eq("instagram_username", limpio)
+      .gte("inicio", new Date().toISOString()) // solo reservas futuras, no las que ya pasaron
+      .order("inicio", { ascending: true })
+      .limit(1)
+      .maybeSingle();
 
-  if (error) {
-    console.error("❌ Error verificando reserva propia:", error.message);
-    return { encontrado: false, motivo: "Error consultando la base de datos: " + error.message };
+    if (error) {
+      console.error("❌ Error verificando reserva propia:", error.message);
+      return { encontrado: false, motivo: "Error consultando la base de datos: " + error.message };
+    }
+    if (data) return { encontrado: true, reserva: data };
   }
-  if (!data) return { encontrado: false, motivo: "No se encontró ninguna reserva futura con ese usuario de Instagram." };
 
-  return { encontrado: true, reserva: data };
+  // RESPALDO POR FECHA/HORA: igual que con Calendly — si no se encontró
+  // por username (el lead pudo haber escrito mal su usuario en el
+  // formulario, o el enlace no traía el parámetro por alguna razón), y el
+  // lead mencionó CUÁNDO agendó (ej. "el jueves a las 3pm"), se compara
+  // ese texto contra TODAS las reservas futuras — si coincide con una
+  // sola de forma razonable, se toma como confirmación válida. Esto evita
+  // que un simple error de tipeo bloquee para siempre la confirmación de
+  // una reserva real.
+  if (mensajeFecha?.trim()) {
+    try {
+      const { data: reservasFuturas, error: errorFuturas } = await supabase
+        .from("reservas")
+        .select("*")
+        .gte("inicio", new Date().toISOString())
+        .order("inicio", { ascending: true })
+        .limit(50);
+
+      if (errorFuturas) throw new Error(errorFuturas.message);
+      if (!reservasFuturas || reservasFuturas.length === 0) {
+        return { encontrado: false, motivo: limpio ? "No se encontró ninguna reserva futura con ese usuario de Instagram, ni coincidencia por fecha." : "El lead no tiene username de Instagram guardado, y no hay reservas futuras con las que comparar la fecha." };
+      }
+
+      const zona = configActual.agenda_zona_horaria || "America/Mexico_City";
+      const listaHorarios = reservasFuturas.map((r, i) => {
+        const fechaLegible = new Date(r.inicio).toLocaleString("es-MX", {
+          timeZone: zona, weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", hour12: true
+        });
+        return `${i}. ${fechaLegible}`;
+      }).join("\n");
+
+      const respMatch = await openaiClient.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        max_tokens: 60,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "Tienes una lista de horarios de llamadas YA agendadas, y un mensaje de un cliente describiendo " +
+              "cuándo dice que agendó la suya (puede ser vago, como 'el jueves a las 3', 'mañana en la tarde', " +
+              "etc.). Decide si el mensaje del cliente coincide razonablemente con ALGUNO de los horarios de la " +
+              "lista. Si coincide con más de uno de forma ambigua, o no coincide con ninguno con suficiente " +
+              'confianza, responde null. Responde ÚNICAMENTE un JSON con este formato exacto, sin texto ' +
+              'adicional: {"indice": <número del horario que coincide, o null>}.\n\n' +
+              "Horarios agendados:\n" + listaHorarios
+          },
+          { role: "user", content: `Lo que dijo el cliente sobre cuándo agendó: "${mensajeFecha}"` }
+        ]
+      });
+
+      const textoMatch = respMatch.choices[0]?.message?.content?.trim();
+      const parsedMatch = JSON.parse(textoMatch);
+      const indice = parsedMatch.indice;
+
+      if (Number.isInteger(indice) && indice >= 0 && indice < reservasFuturas.length) {
+        const reservaCoincidente = reservasFuturas[indice];
+        console.log(`🗓️ Reserva propia de ${username || "(sin username)"} confirmada por FECHA/HORA (no por username) — coincide con la reserva #${indice}.`);
+        return { encontrado: true, reserva: reservaCoincidente, viaFecha: true };
+      }
+    } catch (errFecha) {
+      console.error("⚠️ Error en el respaldo de verificación por fecha (reserva propia):", errFecha.message);
+      // Si el respaldo por fecha falla, simplemente se sigue sin
+      // confirmación — no se le echa la culpa al lead por un error técnico.
+    }
+  }
+
+  return { encontrado: false, motivo: limpio ? "No se encontró ninguna reserva futura con ese usuario de Instagram." : "El lead no tiene username de Instagram guardado." };
 }
 
 async function verificarReservaEnCalendly(username, mensajeFecha) {
@@ -2674,9 +2742,9 @@ async function procesarBuffer(senderId) {
     let eventoReservaPropiaConfirmado = null;
     let pedirConfirmacionReservaPropia = false;
     if (transicion?.verificar_reserva_propia) {
-      const resultado = await verificarReservaPropia(conv.username);
+      const resultado = await verificarReservaPropia(conv.username, mensajeCompleto);
       if (resultado.encontrado) {
-        console.log(`✅ Reserva propia confirmada para ${senderId} (@${conv.username}): ${resultado.reserva.inicio}`);
+        console.log(`✅ Reserva propia confirmada para ${senderId} (@${conv.username}): ${resultado.reserva.inicio}${resultado.viaFecha ? " — confirmado por fecha/hora, no por username" : ""}`);
         eventoReservaPropiaConfirmado = resultado.reserva;
       } else {
         console.log(`❌ No se encontró ninguna reserva propia para ${senderId} (@${conv.username || "sin username"}): ${resultado.motivo}`);
