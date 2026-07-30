@@ -1023,11 +1023,18 @@ async function verificarReservaPropia(username, mensajeFecha) {
             role: "system",
             content:
               "Tienes una lista de horarios de llamadas YA agendadas, y un mensaje de un cliente describiendo " +
-              "cuándo dice que agendó la suya (puede ser vago, como 'el jueves a las 3', 'mañana en la tarde', " +
-              "etc.). Decide si el mensaje del cliente coincide razonablemente con ALGUNO de los horarios de la " +
-              "lista. Si coincide con más de uno de forma ambigua, o no coincide con ninguno con suficiente " +
-              'confianza, responde null. Responde ÚNICAMENTE un JSON con este formato exacto, sin texto ' +
-              'adicional: {"indice": <número del horario que coincide, o null>}.\n\n' +
+              "cuándo dice que agendó la suya (puede ser vago o incompleto, como 'el jueves a las 3', 'mañana " +
+              "en la tarde', 'el 31 a las 10am', 'el 15', etc. — es normal que no mencione el mes, el año, o si " +
+              "es a.m./p.m., y aun así debes intentar encontrar la coincidencia más razonable, no exigir una " +
+              "mención exacta y completa). Decide si el mensaje del cliente coincide razonablemente con ALGUNO " +
+              "de los horarios de la lista, usando sentido común: si el cliente solo da el día del mes (ej. " +
+              "'el 31') sin mes, asume que se refiere a la PRÓXIMA vez que ocurra ese día del mes entre los " +
+              "horarios de la lista — si solo hay UNO que cae en ese día del mes, esa es tu respuesta, no hace " +
+              "falta que el cliente haya mencionado el mes para que cuente. Solo responde null si de verdad hay " +
+              "más de un horario en la lista que podría corresponder igual de bien a lo que dijo el cliente (ahí " +
+              "sí es ambiguo), o si lo que dijo no se parece a NINGUNO de los horarios listados. Responde " +
+              'ÚNICAMENTE un JSON con este formato exacto, sin texto adicional: {"indice": <número del horario ' +
+              'que coincide, o null>}.\n\n' +
               "Horarios agendados:\n" + listaHorarios
           },
           { role: "user", content: `Lo que dijo el cliente sobre cuándo agendó: "${mensajeFecha}"` }
@@ -1043,6 +1050,12 @@ async function verificarReservaPropia(username, mensajeFecha) {
         console.log(`🗓️ Reserva propia de ${username || "(sin username)"} confirmada por FECHA/HORA (no por username) — coincide con la reserva #${indice}.`);
         return { encontrado: true, reserva: reservaCoincidente, viaFecha: true };
       }
+      // Se deja constancia explícita de que SÍ se intentó el respaldo por
+      // fecha (y de qué mensaje se le mandó a la IA) pero no encontró
+      // ninguna coincidencia con suficiente confianza — para que la
+      // próxima vez que esto pase, sea inmediato ver por qué en el log,
+      // en vez de tener que deducirlo por ausencia de otras líneas.
+      console.log(`🗓️ Respaldo por fecha intentado para "${mensajeFecha}" pero la IA no encontró ninguna coincidencia con suficiente confianza (respuesta cruda: ${textoMatch}).`);
     } catch (errFecha) {
       console.error("⚠️ Error en el respaldo de verificación por fecha (reserva propia):", errFecha.message);
       // Si el respaldo por fecha falla, simplemente se sigue sin
