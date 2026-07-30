@@ -4662,6 +4662,16 @@ app.get("/google/estado", requireAdminKey, async (req, res) => {
 // ---------------------------------------------------------------
 app.get("/agendar", (req, res) => {
   const usernamePrellenado = (req.query.u || "").toString().slice(0, 100);
+
+  // Vista previa del enlace (Open Graph) — lo que Instagram, WhatsApp, etc.
+  // muestran cuando se comparte este link, ANTES de que se abra. Se arma
+  // con lo que esté configurado en /calendario, con una foto por defecto
+  // razonable si no hay ninguna subida todavía.
+  const dominioActual = `${req.protocol}://${req.get("host")}`;
+  const ogTitulo = escaparHtml(configActual.agenda_titulo_evento || "Agenda tu llamada");
+  const ogDescripcion = escaparHtml(configActual.agenda_titulo || "Reserva tu espacio en el calendario.");
+  const ogImagenUrl = configActual.agenda_foto_rectangular_url || configActual.agenda_foto_url || `${dominioActual}/favicon-calendario.svg`;
+
   res.type("html").send(`<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -4669,6 +4679,16 @@ app.get("/agendar", (req, res) => {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agenda tu llamada</title>
 <link rel="icon" type="image/svg+xml" href="/favicon-calendario.svg">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="${ogTitulo}">
+<meta property="og:description" content="${ogDescripcion}">
+<meta property="og:image" content="${escaparHtml(ogImagenUrl)}">
+<meta property="og:url" content="${escaparHtml(dominioActual)}/agendar">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${ogTitulo}">
+<meta name="twitter:description" content="${ogDescripcion}">
+<meta name="twitter:image" content="${escaparHtml(ogImagenUrl)}">
 <style>
   :root{
     --bg:#F7F8FA; --card:#FFFFFF; --border:#E3E6EB; --text:#1A2028; --muted:#68707E;
