@@ -48,6 +48,14 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 // Genera una clave larga y aleatoria y ponla en Render como ADMIN_API_KEY.
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
+// Ruta donde vive la pantalla de "iniciar sesión" del panel — a propósito
+// NO se llama "/login" ni nada obvio, para que alguien con malas
+// intenciones no la encuentre solo por adivinar rutas típicas (más aún
+// estando el dominio puesto públicamente, ej. en la bio de Instagram).
+// Para cambiarla, solo edita este valor por lo que tú quieras (debe
+// empezar con "/").
+const RUTA_LOGIN = "/x9k2q7f4";
+
 // ---------------------------------------------------------------
 // Sesión de admin vía cookie (para que /panel y /cuentas puedan
 // verificar el acceso ANTES de mandar cualquier HTML al navegador,
@@ -97,7 +105,7 @@ function requireAdminKey(req, res, next) {
 function requireAdminSesion(req, res, next) {
   const key = parseCookies(req)[COOKIE_NOMBRE];
   if (!ADMIN_API_KEY || key !== ADMIN_API_KEY) {
-    return res.redirect(`/login?redirect=${encodeURIComponent(req.originalUrl)}`);
+    return res.redirect(`${RUTA_LOGIN}?redirect=${encodeURIComponent(req.originalUrl)}`);
   }
   next();
 }
@@ -3467,7 +3475,12 @@ app.post("/webhook/calendly", async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.redirect("/login");
+  // Antes mandaba directo a /login — pero eso revela que aquí vive un
+  // panel de administración solo con visitar el dominio a secas, lo cual
+  // no conviene si el dominio está puesto públicamente (ej. en la bio).
+  // Ahora manda a la página pública de agendar, que es lo único que
+  // tiene sentido que alguien vea si entra solo con el dominio.
+  res.redirect("/agendar");
 });
 
 // Ícono de la app (aparece en la pestaña del navegador, ej. en /panel)
@@ -7365,7 +7378,7 @@ app.post("/calendario/correo-prueba", requireAdminKey, async (req, res) => {
 // nunca llega a mostrarse el diseño del panel sin autenticar.
 // ---------------------------------------------------------------
 
-app.get("/login", (req, res) => {
+app.get(RUTA_LOGIN, (req, res) => {
   const yaAutenticado = parseCookies(req)[COOKIE_NOMBRE] === ADMIN_API_KEY && ADMIN_API_KEY;
   if (yaAutenticado) {
     return res.redirect(req.query.redirect || "/panel");
@@ -7433,7 +7446,7 @@ ${estilosBase()}
     btn.disabled = true; btn.textContent = "Entrando…";
 
     try {
-      const res = await fetch("/login", {
+      const res = await fetch("${RUTA_LOGIN}", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ clave })
@@ -7456,7 +7469,7 @@ ${estilosBase()}
   `);
 });
 
-app.post("/login", (req, res) => {
+app.post(RUTA_LOGIN, (req, res) => {
   const { clave } = req.body || {};
   if (!ADMIN_API_KEY || clave !== ADMIN_API_KEY) {
     return res.status(401).json({ error: "Clave incorrecta" });
@@ -7467,7 +7480,7 @@ app.post("/login", (req, res) => {
 
 app.get("/logout", (req, res) => {
   borrarCookieSesion(res);
-  res.redirect("/login");
+  res.redirect(RUTA_LOGIN);
 });
 
 app.get("/cuentas", requireAdminSesion, (req, res) => {
