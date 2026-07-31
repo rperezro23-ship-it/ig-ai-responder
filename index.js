@@ -2219,7 +2219,7 @@ async function evaluarTransicionesPorCondicion(mensajeUsuario, historial, transi
 
     if (elegirMejor) {
       const resp = await openaiClient.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: "gpt-4o",
         temperature: 0,
         max_tokens: 80,
         response_format: { type: "json_object" },
@@ -2252,7 +2252,7 @@ async function evaluarTransicionesPorCondicion(mensajeUsuario, historial, transi
     }
 
     const resp = await openaiClient.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       temperature: 0,
       max_tokens: 150,
       response_format: { type: "json_object" },
