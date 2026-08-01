@@ -1514,6 +1514,13 @@ function estilosBase() {
 
   /* --- Tarjetas de contenido genéricas --- */
   .card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:24px 26px; margin-bottom:16px; }
+  .pasos-grid{
+    display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px; align-items:start;
+  }
+  .pasos-grid .card{ margin-bottom:0; }
+  @media (max-width:960px){
+    .pasos-grid{ grid-template-columns:1fr; }
+  }
   .card h2{ font-family:var(--display); font-size:18px; font-weight:600; margin:0 0 5px; }
   .card .hint{ color:var(--muted); font-size:14px; margin:0 0 16px; line-height:1.6; }
   .card p{ color:#C9D1DE; font-size:16px; line-height:1.75; margin:0 0 7px; }
@@ -8247,6 +8254,7 @@ ${estilosBase()}
       <div id="cuentaGoogleActual"><p class="sin-cuenta">Cargando…</p></div>
     </div>
 
+    <div class="pasos-grid">
     <div class="card">
       <p class="cuentas-titulo">Paso 2</p>
       <p class="cuentas-subtitulo">Horario disponible</p>
@@ -8345,6 +8353,7 @@ ${estilosBase()}
       <input type="text" id="inputRecordatorioAsunto">
       <label style="margin-top:14px;">Mensaje (usa <code>{nombre}</code>, <code>{fecha}</code>, <code>{hora}</code>, <code>{tiempo_restante}</code>)</label>
       <textarea id="inputRecordatorioMensaje" rows="4"></textarea>
+    </div>
     </div>
 
     <div class="card">
