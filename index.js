@@ -6109,43 +6109,72 @@ app.get("/agendar/horarios", async (req, res) => {
 // llamada para continuar.
 app.post("/agendar/no-califica", async (req, res) => {
   try {
-    if (!configActual.agenda_correo_no_califica_activo) return res.json({ ok: true, omitido: true });
-
     const { nombre, email, instagram_username, respuestas, pregunta_descalificante, respuesta_descalificante } = req.body || {};
 
-    const cuentaConectada = await obtenerCuentaGoogleConectada();
-    const correosConfigurados = (configActual.agenda_correos_notificacion || "")
-      .split(",").map(c => c.trim()).filter(Boolean);
-    const destinatarios = correosConfigurados.length > 0 ? correosConfigurados.join(", ") : cuentaConectada?.email;
-    if (!destinatarios) return res.json({ ok: true, omitido: true });
+    // Aviso al coach — igual que antes, independiente del correo al lead
+    // de más abajo (uno puede estar activado sin el otro).
+    if (configActual.agenda_correo_no_califica_activo) {
+      try {
+        const cuentaConectada = await obtenerCuentaGoogleConectada();
+        const correosConfigurados = (configActual.agenda_correos_notificacion || "")
+          .split(",").map(c => c.trim()).filter(Boolean);
+        const destinatarios = correosConfigurados.length > 0 ? correosConfigurados.join(", ") : cuentaConectada?.email;
 
-    const preguntas = Array.isArray(configActual.agenda_preguntas) ? configActual.agenda_preguntas : [];
-    const lineasRespuestas = preguntas.map(p => {
-      const r = (respuestas || {})[p.id];
-      const texto = Array.isArray(r) ? r.join(", ") : r;
-      return texto ? `${p.texto}: ${texto}` : null;
-    }).filter(Boolean);
+        if (destinatarios) {
+          const preguntas = Array.isArray(configActual.agenda_preguntas) ? configActual.agenda_preguntas : [];
+          const lineasRespuestas = preguntas.map(p => {
+            const r = (respuestas || {})[p.id];
+            const texto = Array.isArray(r) ? r.join(", ") : r;
+            return texto ? `${p.texto}: ${texto}` : null;
+          }).filter(Boolean);
 
-    await enviarCorreoGmail({
-      destinatario: destinatarios,
-      asunto: `Alguien intentó agendar pero NO calificó: ${nombre || "sin nombre"}`,
-      cuerpo: [
-        "Alguien llegó a intentar agendar una llamada, pero quedó descalificado antes de llegar al calendario.",
-        "",
-        `Nombre: ${nombre || "no especificado"}`,
-        instagram_username ? `Instagram: @${instagram_username}` : null,
-        email ? `Correo: ${email}` : null,
-        "",
-        pregunta_descalificante ? `Lo descalificó: "${pregunta_descalificante}" → respondió: "${respuesta_descalificante}"` : null,
-        "",
-        "Todas sus respuestas:",
-        ...lineasRespuestas
-      ].filter(v => v !== null).join("\n")
-    });
+          await enviarCorreoGmail({
+            destinatario: destinatarios,
+            asunto: `Alguien intentó agendar pero NO calificó: ${nombre || "sin nombre"}`,
+            cuerpo: [
+              "Alguien llegó a intentar agendar una llamada, pero quedó descalificado antes de llegar al calendario.",
+              "",
+              `Nombre: ${nombre || "no especificado"}`,
+              instagram_username ? `Instagram: @${instagram_username}` : null,
+              email ? `Correo: ${email}` : null,
+              "",
+              pregunta_descalificante ? `Lo descalificó: "${pregunta_descalificante}" → respondió: "${respuesta_descalificante}"` : null,
+              "",
+              "Todas sus respuestas:",
+              ...lineasRespuestas
+            ].filter(v => v !== null).join("\n")
+          });
+        }
+      } catch (errCoach) {
+        console.error("❌ Error mandando el aviso de 'no califica' al coach:", errCoach.response?.data || errCoach.message);
+      }
+    }
+
+    // Correo AL LEAD — el mismo mensaje que ve en pantalla (incluyendo
+    // cualquier enlace que haya adentro, ej. a una comunidad de WhatsApp),
+    // para que le quede guardado en su correo aunque cierre la página.
+    // Solo se manda si dejó su correo Y está activado en /calendario.
+    if (configActual.agenda_correo_lead_no_califica_activo && email?.trim()) {
+      try {
+        const tituloNoCalifica = configActual.agenda_titulo_no_califica || "Gracias por tu interés";
+        let cuerpoHtml = configActual.agenda_mensaje_no_califica || "";
+        if (configActual.agenda_enlace_no_califica?.trim()) {
+          cuerpoHtml += `<br><br><a href="${escaparHtml(configActual.agenda_enlace_no_califica.trim())}">${escaparHtml(configActual.agenda_enlace_no_califica.trim())}</a>`;
+        }
+        await enviarCorreoGmail({
+          destinatario: email.trim(),
+          asunto: tituloNoCalifica,
+          cuerpo: cuerpoHtml,
+          html: true
+        });
+      } catch (errLead) {
+        console.error("❌ Error mandando el correo de 'no califica' al lead:", errLead.response?.data || errLead.message);
+      }
+    }
 
     res.json({ ok: true });
   } catch (err) {
-    console.error("❌ Error mandando el aviso de 'no califica':", err.response?.data || err.message);
+    console.error("❌ Error en /agendar/no-califica:", err.response?.data || err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -6500,6 +6529,13 @@ let configActual = {
   // califiqué" (ambos terminan en una pantalla final), así que sin este
   // aviso el coach nunca se entera de que alguien lo intentó.
   agenda_correo_no_califica_activo: true,
+
+  // Además del aviso al coach de arriba, esto le manda un correo AL LEAD
+  // que no calificó (solo si dejó su correo), con el mismo mensaje que ve
+  // en pantalla (incluyendo cualquier enlace, ej. a una comunidad de
+  // WhatsApp) — así, aunque cierre la página sin fijarse bien, le queda
+  // ese acceso guardado en su correo.
+  agenda_correo_lead_no_califica_activo: false,
 
   // Recordatorios por correo al LEAD que agendó (no al coach) — igual que
   // hace Calendly, cada uno se manda X horas antes de la llamada, solo si
@@ -7376,7 +7412,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
             agenda_foto_rectangular_url, agenda_whatsapp_confirmar_activo, agenda_whatsapp_confirmar_numero,
             agenda_whatsapp_confirmar_mensaje, agenda_correos_notificacion, agenda_correo_texto_intro,
             agenda_correo_incluir_nombre, agenda_correo_incluir_correo, agenda_correo_incluir_fecha_hora, boton_texto_intro,
-            agenda_recordatorios, agenda_recordatorio_asunto, agenda_recordatorio_mensaje, agenda_correo_no_califica_activo } = req.body || {};
+            agenda_recordatorios, agenda_recordatorio_asunto, agenda_recordatorio_mensaje, agenda_correo_no_califica_activo,
+            agenda_correo_lead_no_califica_activo } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -7419,6 +7456,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof agenda_recordatorio_asunto === "string") nuevaConfig.agenda_recordatorio_asunto = agenda_recordatorio_asunto.trim() || "Recordatorio: tu llamada es {tiempo_restante}";
     if (typeof agenda_recordatorio_mensaje === "string") nuevaConfig.agenda_recordatorio_mensaje = agenda_recordatorio_mensaje.trim() || "Hola {nombre}, te escribo para recordarte tu llamada agendada para {fecha} a las {hora} ({tiempo_restante}). ¡Nos vemos ahí!";
     if (typeof agenda_correo_no_califica_activo === "boolean") nuevaConfig.agenda_correo_no_califica_activo = agenda_correo_no_califica_activo;
+    if (typeof agenda_correo_lead_no_califica_activo === "boolean") nuevaConfig.agenda_correo_lead_no_califica_activo = agenda_correo_lead_no_califica_activo;
     if (Array.isArray(mensajes_error_audio)) nuevaConfig.mensajes_error_audio = mensajes_error_audio.map(m => String(m).trim()).filter(Boolean);
     if (typeof criterios_calificacion === "string") nuevaConfig.criterios_calificacion = criterios_calificacion.trim();
     if (typeof enlace_calificacion === "string") nuevaConfig.enlace_calificacion = enlace_calificacion.trim();
@@ -8485,6 +8523,7 @@ ${estilosBase()}
           <label style="margin-top:14px;">Mensaje para quien NO califica</label>
           <div class="rte-shell" id="rteNoCalifica"></div>
           <p class="hint" style="margin:6px 0 0;">Puedes agregar un enlace real aquí (por ejemplo, a tu comunidad de WhatsApp) con el botón 🔗 — va a funcionar como un enlace de verdad en la página pública.</p>
+          <label class="chk" style="margin-top:10px;"><input type="checkbox" id="chkCorreoLeadNoCalificaActivo"> Mandarle este mismo mensaje por correo al lead que no calificó (solo si dejó su correo) — así le queda guardado aunque cierre la página</label>
           <label style="margin-top:14px;">Enlace de un recurso para quien no califica (opcional — aparece como botón)</label>
           <input type="text" id="inputEnlaceNoCalifica">
         </div>
@@ -9247,6 +9286,7 @@ ${estilosBase()}
 
     document.getElementById("inputTituloNoCalifica").value = cfg.agenda_titulo_no_califica || "Gracias por tu interés";
     editorNoCalifica.establecerHTML(cfg.agenda_mensaje_no_califica || "");
+    document.getElementById("chkCorreoLeadNoCalificaActivo").checked = Boolean(cfg.agenda_correo_lead_no_califica_activo);
     document.getElementById("inputEnlaceNoCalifica").value = cfg.agenda_enlace_no_califica || "";
 
     const campoNombre = cfg.agenda_campo_nombre || { texto: "Tu nombre", obligatorio: true };
@@ -9326,6 +9366,7 @@ ${estilosBase()}
       agenda_whatsapp_link: document.getElementById("inputAgendaWhatsapp").value.trim(),
       agenda_titulo_no_califica: document.getElementById("inputTituloNoCalifica").value.trim() || "Gracias por tu interés",
       agenda_mensaje_no_califica: editorNoCalifica.obtenerHTML(),
+      agenda_correo_lead_no_califica_activo: document.getElementById("chkCorreoLeadNoCalificaActivo").checked,
       agenda_enlace_no_califica: document.getElementById("inputEnlaceNoCalifica").value.trim(),
       agenda_campo_nombre: {
         texto: document.getElementById("inputCampoNombreTexto").value.trim() || "Tu nombre",
