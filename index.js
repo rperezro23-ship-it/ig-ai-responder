@@ -8301,23 +8301,6 @@ ${estilosBase()}
       <label style="margin-top:14px;">Enlace de WhatsApp (opcional — si lo llenas, aparece el aviso "si no encuentras un horario libre")</label>
       <input type="text" id="inputAgendaWhatsapp" placeholder="https://wa.me/...">
     </div>
-
-    <div class="card">
-      <p class="cuentas-titulo">Paso 4.6</p>
-      <p class="cuentas-subtitulo">Notificación por correo al agendar</p>
-      <p class="hint" style="margin-top:-8px;">Cada vez que alguien agenda (y sí califica), se manda un correo con todos los datos a esta lista. Si lo dejas vacío, se usa el correo de la cuenta de Google que tienes conectada.</p>
-      <label>Correos que reciben la notificación (separados por coma)</label>
-      <input type="text" id="inputCorreosNotificacion" placeholder="tu@correo.com, asistente@correo.com">
-      <label style="margin-top:14px;">Texto de introducción del correo</label>
-      <input type="text" id="inputCorreoTextoIntro">
-      <label style="margin-top:14px;">Qué se incluye en el correo</label>
-      <label class="chk"><input type="checkbox" id="chkCorreoIncluirNombre"> Nombre</label>
-      <label class="chk"><input type="checkbox" id="chkCorreoIncluirCorreo"> Correo del lead</label>
-      <label class="chk"><input type="checkbox" id="chkCorreoIncluirFechaHora"> Fecha y hora de la llamada</label>
-      <p class="hint" style="margin:6px 0 0;">Qué preguntas del formulario aparecen se controla desde cada pregunta, en la sección de abajo ("Preguntas del formulario").</p>
-      <button type="button" class="add-paso" id="btnCorreoPrueba" style="margin-top:12px;">Enviar correo de prueba</button>
-      <span class="foto-perfil-estado" id="correoPruebaEstado" style="margin-left:10px;"></span>
-    </div>
     </div>
 
     <div class="pasos-col">
@@ -8344,6 +8327,23 @@ ${estilosBase()}
       <input type="text" id="inputWhatsappConfirmarNumero" placeholder="5215512345678">
       <label style="margin-top:14px;">Mensaje que se manda (usa <code>{fecha}</code> y <code>{hora}</code> — se reemplazan solos)</label>
       <input type="text" id="inputWhatsappConfirmarMensaje">
+    </div>
+
+    <div class="card">
+      <p class="cuentas-titulo">Paso 4.6</p>
+      <p class="cuentas-subtitulo">Notificación por correo al agendar</p>
+      <p class="hint" style="margin-top:-8px;">Cada vez que alguien agenda (y sí califica), se manda un correo con todos los datos a esta lista. Si lo dejas vacío, se usa el correo de la cuenta de Google que tienes conectada.</p>
+      <label>Correos que reciben la notificación (separados por coma)</label>
+      <input type="text" id="inputCorreosNotificacion" placeholder="tu@correo.com, asistente@correo.com">
+      <label style="margin-top:14px;">Texto de introducción del correo</label>
+      <input type="text" id="inputCorreoTextoIntro">
+      <label style="margin-top:14px;">Qué se incluye en el correo</label>
+      <label class="chk"><input type="checkbox" id="chkCorreoIncluirNombre"> Nombre</label>
+      <label class="chk"><input type="checkbox" id="chkCorreoIncluirCorreo"> Correo del lead</label>
+      <label class="chk"><input type="checkbox" id="chkCorreoIncluirFechaHora"> Fecha y hora de la llamada</label>
+      <p class="hint" style="margin:6px 0 0;">Qué preguntas del formulario aparecen se controla desde cada pregunta, en la sección de abajo ("Preguntas del formulario").</p>
+      <button type="button" class="add-paso" id="btnCorreoPrueba" style="margin-top:12px;">Enviar correo de prueba</button>
+      <span class="foto-perfil-estado" id="correoPruebaEstado" style="margin-left:10px;"></span>
     </div>
 
     <div class="card">
