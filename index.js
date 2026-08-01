@@ -1646,6 +1646,34 @@ async function enviarImagenInstagram(senderId, urlImagen) {
   registrarMidBot(resp.data?.message_id);
 }
 
+// Manda un PDF (u otro documento) como ADJUNTO REAL del chat de
+// Instagram — no como un enlace de texto. Esto evita por completo la
+// restricción de "no puedes enviar enlaces" que aplica Instagram a
+// cuentas con mucho envío de links, ya que técnicamente esto no es un
+// link en el mensaje, es un archivo adjunto nativo (igual que una foto o
+// un audio).
+async function enviarArchivoInstagram(senderId, urlArchivo) {
+  const cuenta = await obtenerCuentaActiva();
+  if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
+
+  const resp = await axios.post(
+    `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
+    {
+      recipient: { id: senderId },
+      message: {
+        attachment: {
+          type: "file",
+          payload: { url: urlArchivo }
+        }
+      }
+    },
+    {
+      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
+    }
+  );
+  registrarMidBot(resp.data?.message_id);
+}
+
 // Pequeña espera asíncrona, usada por el envío secuencial de mensajes para
 // respetar los marcadores [[pausa:N]] (ver más abajo) y por los reintentos.
 function sleep(ms) {
@@ -1736,7 +1764,7 @@ async function conReintento(fn, intentos = 1, esperaMs = 1500) {
 // Nota: el regex es tolerante a espacios extra que a veces mete la IA por su
 // cuenta (ej. "[[ audio: clave ]]" o "[[pausa: 5]]") — así no se pierde el
 // marcador solo porque el modelo lo escribió con un espacio de más.
-const MARCADOR_MULTIMEDIA_REGEX = /\[\[\s*(audio|foto|pausa|etapa)\s*:\s*([a-zA-Z0-9_.-]+)\s*\]\]/gi;
+const MARCADOR_MULTIMEDIA_REGEX = /\[\[\s*(audio|foto|archivo|pausa|etapa)\s*:\s*([a-zA-Z0-9_.-]+)\s*\]\]/gi;
 
 // Convierte el contenido crudo (con marcadores) en una lista ordenada de
 // "partes" a mandar en secuencia, respetando el orden en el que aparecen en
@@ -1894,8 +1922,10 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
       continue;
     }
 
-    // tipo === "audio" | "foto"
-    const almacen = parte.tipo === "audio" ? configActual.audios : configActual.fotos;
+    // tipo === "audio" | "foto" | "archivo"
+    const almacen = parte.tipo === "audio" ? configActual.audios
+      : parte.tipo === "archivo" ? configActual.archivos
+      : configActual.fotos;
     const item = almacen?.[parte.clave];
 
     if (!item?.url) {
@@ -1907,6 +1937,10 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
       console.log(`🎤 Enviando audio pregrabado "${parte.clave}" a ${senderId}`);
       await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${item.url}`);
       await conReintento(() => enviarAudioInstagram(senderId, item.url));
+    } else if (parte.tipo === "archivo") {
+      console.log(`📄 Enviando archivo pregrabado "${parte.clave}" a ${senderId} (como adjunto, no como enlace)`);
+      await agregarAlHistorialDB(senderId, "assistant", `[[archivo]]${item.url}`);
+      await conReintento(() => enviarArchivoInstagram(senderId, item.url));
     } else {
       console.log(`📷 Enviando foto pregrabada "${parte.clave}" a ${senderId}`);
       await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${item.url}`);
@@ -2115,7 +2149,9 @@ async function enviarDisparador(senderId, disparador, origenLog) {
     return;
   }
 
-  const almacen = disparador.tipo === "audio" ? configActual.audios : configActual.fotos;
+  const almacen = disparador.tipo === "audio" ? configActual.audios
+    : disparador.tipo === "archivo" ? configActual.archivos
+    : configActual.fotos;
   const item = almacen?.[disparador.clave];
   if (!item?.url) {
     console.warn(`⚠️ El disparador apunta al ${disparador.tipo} "${disparador.clave}", pero no existe (o se borró) en /panel.`);
@@ -2127,6 +2163,10 @@ async function enviarDisparador(senderId, disparador, origenLog) {
       console.log(`🎯 Disparador automático (${origenLog}): enviando audio "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
       await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${item.url}`);
       await conReintento(() => enviarAudioInstagram(senderId, item.url));
+    } else if (disparador.tipo === "archivo") {
+      console.log(`🎯 Disparador automático (${origenLog}): enviando archivo "${disparador.clave}" a ${senderId} (activado por palabra clave) — como adjunto, no como enlace`);
+      await agregarAlHistorialDB(senderId, "assistant", `[[archivo]]${item.url}`);
+      await conReintento(() => enviarArchivoInstagram(senderId, item.url));
     } else {
       console.log(`🎯 Disparador automático (${origenLog}): enviando foto "${disparador.clave}" a ${senderId} (activado por palabra clave)`);
       await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${item.url}`);
@@ -6654,7 +6694,7 @@ app.get("/config", requireAdminKey, async (req, res) => {
 function normalizarDisparadores(disparadores) {
   if (!Array.isArray(disparadores)) return [];
   return disparadores
-    .filter(d => d && (d.tipo === "audio" || d.tipo === "foto" || d.tipo === "mensaje" || d.tipo === "etiqueta"))
+    .filter(d => d && (d.tipo === "audio" || d.tipo === "foto" || d.tipo === "archivo" || d.tipo === "mensaje" || d.tipo === "etiqueta"))
     .map(d => {
       let frases = Array.isArray(d.frases) ? d.frases.map(f => String(f).trim()).filter(Boolean) : [];
       let coincidencia = (d.coincidencia === "exacta" || d.coincidencia === "combinaciones" || d.coincidencia === "etiqueta") ? d.coincidencia : "contiene";
@@ -7279,6 +7319,88 @@ app.post("/fotos/eliminar", requireAdminKey, async (req, res) => {
     await guardarConfigDB({ fotos });
 
     res.json({ mensaje: "🗑️ Foto eliminada" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Biblioteca de ARCHIVOS (PDF) — mismo patrón exacto que la de fotos de
+// arriba, pero para documentos. Se manda como adjunto real de Instagram
+// (tipo "file"), no como un enlace de texto — así se evita por completo
+// la restricción de enlaces que aplica Instagram, ya que técnicamente no
+// es un link, es un archivo adjunto nativo del chat.
+app.post("/archivos/subir", requireAdminKey, async (req, res) => {
+  try {
+    const { nombre, base64, tipo } = req.body || {};
+    if (!nombre || !nombre.trim()) return res.status(400).json({ error: "Falta el nombre del archivo." });
+    if (!base64) return res.status(400).json({ error: "Falta el archivo." });
+
+    const clave = nombre.trim().toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9_-]/g, "_");
+
+    if (!clave) return res.status(400).json({ error: "El nombre no dejó ningún caracter válido, prueba con otro." });
+
+    const extension = (tipo && tipo.includes("/")) ? tipo.split("/")[1].split(";")[0] : "pdf";
+    const rutaArchivo = `${clave}_${Date.now()}.${extension}`;
+    const buffer = Buffer.from(base64, "base64");
+
+    // Instagram acepta PDFs de hasta 25MB — se deja un margen debajo de
+    // eso para no arriesgarse a que lo rechace por unos KB de diferencia.
+    if (buffer.length > 20 * 1024 * 1024) {
+      return res.status(400).json({ error: "El archivo pesa más de 20MB — Instagram rechaza adjuntos de más de 25MB, así que hay que dejarlo más liviano." });
+    }
+
+    const { error: errorSubida } = await supabase.storage
+      .from("archivos")
+      .upload(rutaArchivo, buffer, { contentType: tipo || "application/pdf", upsert: true });
+
+    if (errorSubida) {
+      console.error("❌ Error subiendo archivo a Supabase Storage:", errorSubida.message);
+      return res.status(500).json({ error: "No se pudo subir el archivo: " + errorSubida.message + ". ¿Existe el bucket 'archivos' en Supabase Storage y es público?" });
+    }
+
+    const { data: urlData } = supabase.storage.from("archivos").getPublicUrl(rutaArchivo);
+
+    const archivoAnterior = configActual.archivos?.[clave];
+    if (archivoAnterior?.ruta_archivo) {
+      await supabase.storage.from("archivos").remove([archivoAnterior.ruta_archivo]);
+    }
+
+    const nuevosArchivos = { ...(configActual.archivos || {}) };
+    nuevosArchivos[clave] = {
+      url: urlData.publicUrl,
+      nombre_original: nombre.trim(),
+      ruta_archivo: rutaArchivo,
+      subido_en: new Date().toISOString()
+    };
+
+    await guardarConfigDB({ archivos: nuevosArchivos });
+
+    res.json({ mensaje: "✅ Archivo subido", clave, archivo: nuevosArchivos[clave] });
+  } catch (err) {
+    console.error("❌ Error inesperado subiendo archivo:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/archivos/eliminar", requireAdminKey, async (req, res) => {
+  try {
+    const { clave } = req.body || {};
+    if (!clave) return res.status(400).json({ error: "Falta la clave del archivo a eliminar." });
+
+    const archivos = { ...(configActual.archivos || {}) };
+    const archivo = archivos[clave];
+
+    if (archivo?.ruta_archivo) {
+      const { error: errorBorrado } = await supabase.storage.from("archivos").remove([archivo.ruta_archivo]);
+      if (errorBorrado) console.error("❌ Error borrando archivo en Storage:", errorBorrado.message);
+    }
+
+    delete archivos[clave];
+    await guardarConfigDB({ archivos });
+
+    res.json({ mensaje: "🗑️ Archivo eliminado" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -9586,6 +9708,24 @@ ${estilosBase()}
 
           <div style="height:1px; background:var(--border); margin:24px 0;"></div>
 
+          <p style="font-family:var(--display); font-weight:600; font-size:14.5px; margin:0 0 10px;">📄 Archivos (PDF)</p>
+          <p class="hint" style="margin:0 0 12px;">Se mandan como adjunto real del chat (igual que una foto o un audio), no como un enlace de texto — así se evita la restricción de Instagram sobre enviar demasiados enlaces.</p>
+          <div id="listaArchivos" style="margin-bottom:14px;"></div>
+          <div class="row2" style="align-items:flex-end;">
+            <div>
+              <label for="archivoNombre">Nombre (clave)</label>
+              <input type="text" id="archivoNombre" placeholder="ej: dieta, rutina, pack_completo">
+            </div>
+            <div>
+              <label for="archivoArchivo">Archivo PDF</label>
+              <input type="file" id="archivoArchivo" accept="application/pdf">
+            </div>
+          </div>
+          <button class="add-paso" id="btnSubirArchivo" type="button" style="margin-top:12px;">⬆ Subir archivo</button>
+          <p class="hint" id="archivoSubidaMsg" style="margin:10px 0 0;"></p>
+
+          <div style="height:1px; background:var(--border); margin:24px 0;"></div>
+
           <p style="font-family:var(--display); font-weight:600; font-size:14.5px; margin:0 0 5px;">🎙️ Si un audio del CLIENTE no se puede transcribir</p>
           <p class="hint" style="margin:0 0 10px;">Cuando un lead te manda un audio, el bot lo transcribe con IA para poder entenderlo y responder. Si por lo que sea la transcripción falla (error de red, archivo raro, etc.), en vez de quedarse callado le manda uno de estos mensajes pidiéndole que lo vuelva a mandar — rotan entre ellos para no sonar repetitivo. Uno por línea.</p>
           <textarea id="mensajesErrorAudio" rows="5" placeholder="Ej: Se me cortó tu audio, no me llegó completo. ¿me lo puedes volver a mandar?"></textarea>
@@ -9944,9 +10084,10 @@ ${estilosBase()}
   let disparadores = [];
   let audiosDisponibles = {};
   let fotosDisponibles = {};
+  let archivosDisponibles = {};
 
   function opcionesClaveHTML(tipo, claveSeleccionada){
-    const almacen = tipo === "audio" ? audiosDisponibles : fotosDisponibles;
+    const almacen = tipo === "audio" ? audiosDisponibles : tipo === "archivo" ? archivosDisponibles : fotosDisponibles;
     const claves = Object.keys(almacen || {});
     if(claves.length === 0){
       return '<option value="">(no hay ninguno subido todavía)</option>';
@@ -9998,6 +10139,7 @@ ${estilosBase()}
             <select class="\${prefijoClase}-tipo" data-i="\${i}">
               <option value="audio"\${d.tipo === "audio" ? " selected" : ""}>🎤 Audio</option>
               <option value="foto"\${d.tipo === "foto" ? " selected" : ""}>🖼️ Foto</option>
+              <option value="archivo"\${d.tipo === "archivo" ? " selected" : ""}>📄 Archivo (PDF, se manda como adjunto real, no como enlace)</option>
               <option value="mensaje"\${esMensaje ? " selected" : ""}>📝 Mensaje (texto + fotos + audios + pausas combinados)</option>
               <option value="etiqueta"\${esSoloEtiqueta ? " selected" : ""}>🏷️ Solo agregar etiqueta (no manda nada)</option>
             </select>
@@ -10719,8 +10861,10 @@ ${estilosBase()}
     renderPasosEnlace();
     audiosDisponibles = cfg.audios || {};
     fotosDisponibles = cfg.fotos || {};
+    archivosDisponibles = cfg.archivos || {};
     renderAudios(cfg.audios || {});
     renderFotos(cfg.fotos || {});
+    renderArchivos(cfg.archivos || {});
     disparadores = Array.isArray(cfg.disparadores) ? JSON.parse(JSON.stringify(cfg.disparadores)) : [];
     renderDisparadores();
     etapas = Array.isArray(cfg.etapas) ? JSON.parse(JSON.stringify(cfg.etapas)) : [];
@@ -10856,6 +11000,44 @@ ${estilosBase()}
     });
   }
 
+  function renderArchivos(archivos){
+    const cont = document.getElementById("listaArchivos");
+    const claves = Object.keys(archivos || {});
+    if(claves.length === 0){
+      cont.innerHTML = '<p class="hint" style="margin:0 0 4px;">Todavía no has subido ningún archivo.</p>';
+      return;
+    }
+    cont.innerHTML = claves.map(clave => {
+      const a = archivos[clave];
+      return \`
+        <div class="audio-item" data-clave="\${clave}">
+          <div style="width:52px; height:52px; border-radius:9px; flex-shrink:0; background:var(--surface-3); display:flex; align-items:center; justify-content:center; font-size:22px;">📄</div>
+          <div class="audio-info">
+            <div class="audio-clave">[[archivo:\${clave}]]</div>
+            <div class="audio-nombre">\${(a.nombre_original || clave).replace(/</g,"&lt;")}</div>
+          </div>
+          <button type="button" class="quitar btn-archivo-quitar" data-clave="\${clave}">quitar</button>
+        </div>
+      \`;
+    }).join("");
+
+    cont.querySelectorAll(".btn-archivo-quitar").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const clave = btn.dataset.clave;
+        if(!confirm('¿Eliminar el archivo "' + clave + '"? Ya no se podrá usar en el prompt ni en seguimientos.')) return;
+        btn.disabled = true; btn.textContent = "eliminando…";
+        const data = await llamarPOST("/archivos/eliminar", { clave });
+        if(data && !data.error){
+          const cfgActualizado = await llamarGET("/config");
+          if(cfgActualizado){ archivosDisponibles = cfgActualizado.archivos || {}; renderArchivos(archivosDisponibles); renderDisparadores(); renderEtapas(); }
+        } else {
+          alert("No se pudo eliminar: " + (data?.error || "error desconocido"));
+          btn.disabled = false; btn.textContent = "quitar";
+        }
+      });
+    });
+  }
+
   document.getElementById("btnSubirFoto").addEventListener("click", async () => {
     const nombre = document.getElementById("fotoNombre").value.trim();
     const inputArchivo = document.getElementById("fotoArchivo");
@@ -10883,6 +11065,42 @@ ${estilosBase()}
       } else {
         msg.style.color = "var(--red)";
         msg.textContent = "❌ " + (data?.error || "No se pudo subir la foto.");
+      }
+    } catch (err) {
+      msg.style.color = "var(--red)";
+      msg.textContent = "❌ Error leyendo o subiendo el archivo: " + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById("btnSubirArchivo").addEventListener("click", async () => {
+    const nombre = document.getElementById("archivoNombre").value.trim();
+    const inputArchivo = document.getElementById("archivoArchivo");
+    const archivo = inputArchivo.files?.[0];
+    const msg = document.getElementById("archivoSubidaMsg");
+    const btn = document.getElementById("btnSubirArchivo");
+
+    msg.style.color = "";
+    if(!nombre){ msg.style.color = "var(--red)"; msg.textContent = "Ponle un nombre al archivo primero."; return; }
+    if(!archivo){ msg.style.color = "var(--red)"; msg.textContent = "Selecciona un archivo PDF primero."; return; }
+
+    btn.disabled = true;
+    msg.textContent = "Subiendo archivo…";
+
+    try {
+      const base64 = await leerArchivoComoBase64(archivo);
+      const data = await llamarPOST("/archivos/subir", { nombre, base64, tipo: archivo.type });
+      if(data && !data.error){
+        msg.style.color = "var(--green)";
+        msg.textContent = "✓ Archivo \\"" + data.clave + "\\" subido correctamente. Úsalo como [[archivo:" + data.clave + "]]";
+        document.getElementById("archivoNombre").value = "";
+        inputArchivo.value = "";
+        const cfgActualizado = await llamarGET("/config");
+        if(cfgActualizado){ archivosDisponibles = cfgActualizado.archivos || {}; renderArchivos(archivosDisponibles); renderDisparadores(); renderEtapas(); }
+      } else {
+        msg.style.color = "var(--red)";
+        msg.textContent = "❌ " + (data?.error || "No se pudo subir el archivo.");
       }
     } catch (err) {
       msg.style.color = "var(--red)";
