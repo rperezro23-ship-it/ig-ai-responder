@@ -5977,6 +5977,21 @@ app.get("/agendar", (req, res) => {
       // usa ese espacio también, ocupando el ancho completo del cuadro.
       document.getElementById("panelHoras").classList.remove("visible", "vacio-form");
       document.querySelector(".panel-der").classList.add("ancho-nocalifica");
+
+      // Se le avisa al coach por correo — sin esperar la respuesta (no
+      // debe atrasar ni interrumpir lo que ya ve el lead en pantalla). Sin
+      // este aviso, el coach nunca se enteraría de que alguien lo intentó,
+      // ya que esto nunca llega a /agendar/confirmar.
+      const respuestaQueDescalifico = respuestas[preguntaDescalificante.id];
+      fetch("/agendar/no-califica", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nombre, email: correo, instagram_username: usernamePrellenado, respuestas,
+          pregunta_descalificante: preguntaDescalificante.texto,
+          respuesta_descalificante: Array.isArray(respuestaQueDescalifico) ? respuestaQueDescalifico.join(", ") : respuestaQueDescalifico
+        })
+      }).catch(() => {});
       return;
     }
 
@@ -6080,6 +6095,57 @@ app.get("/agendar/horarios", async (req, res) => {
     res.json({ horarios, zona_horaria: configActual.agenda_zona_horaria || "America/Mexico_City" });
   } catch (err) {
     console.error("❌ Error obteniendo horarios disponibles:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Se llama desde el navegador del lead justo en el momento en que se
+// detecta que NO califica (nunca llega a /agendar/confirmar, así que sin
+// esto el coach nunca se entera de que alguien lo intentó — desde el
+// lado del lead, "no califiqué" y "sí agendé" se ven casi igual, ambos
+// terminan en una pantalla final sin más). No crea ninguna reserva, solo
+// manda el aviso — un fallo aquí nunca debe impedir que se muestre la
+// pantalla de "no califica" al lead, por eso el frontend no espera esta
+// llamada para continuar.
+app.post("/agendar/no-califica", async (req, res) => {
+  try {
+    if (!configActual.agenda_correo_no_califica_activo) return res.json({ ok: true, omitido: true });
+
+    const { nombre, email, instagram_username, respuestas, pregunta_descalificante, respuesta_descalificante } = req.body || {};
+
+    const cuentaConectada = await obtenerCuentaGoogleConectada();
+    const correosConfigurados = (configActual.agenda_correos_notificacion || "")
+      .split(",").map(c => c.trim()).filter(Boolean);
+    const destinatarios = correosConfigurados.length > 0 ? correosConfigurados.join(", ") : cuentaConectada?.email;
+    if (!destinatarios) return res.json({ ok: true, omitido: true });
+
+    const preguntas = Array.isArray(configActual.agenda_preguntas) ? configActual.agenda_preguntas : [];
+    const lineasRespuestas = preguntas.map(p => {
+      const r = (respuestas || {})[p.id];
+      const texto = Array.isArray(r) ? r.join(", ") : r;
+      return texto ? `${p.texto}: ${texto}` : null;
+    }).filter(Boolean);
+
+    await enviarCorreoGmail({
+      destinatario: destinatarios,
+      asunto: `Alguien intentó agendar pero NO calificó: ${nombre || "sin nombre"}`,
+      cuerpo: [
+        "Alguien llegó a intentar agendar una llamada, pero quedó descalificado antes de llegar al calendario.",
+        "",
+        `Nombre: ${nombre || "no especificado"}`,
+        instagram_username ? `Instagram: @${instagram_username}` : null,
+        email ? `Correo: ${email}` : null,
+        "",
+        pregunta_descalificante ? `Lo descalificó: "${pregunta_descalificante}" → respondió: "${respuesta_descalificante}"` : null,
+        "",
+        "Todas sus respuestas:",
+        ...lineasRespuestas
+      ].filter(v => v !== null).join("\n")
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("❌ Error mandando el aviso de 'no califica':", err.response?.data || err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -6427,6 +6493,13 @@ let configActual = {
   agenda_correo_incluir_nombre: true,
   agenda_correo_incluir_correo: true,
   agenda_correo_incluir_fecha_hora: true,
+
+  // Aviso al coach cuando alguien LLEGA a intentar agendar pero queda
+  // descalificado por alguna de las preguntas — útil porque, desde el
+  // lado del lead, no hay forma de distinguir "agendé de verdad" de "no
+  // califiqué" (ambos terminan en una pantalla final), así que sin este
+  // aviso el coach nunca se entera de que alguien lo intentó.
+  agenda_correo_no_califica_activo: true,
 
   // Recordatorios por correo al LEAD que agendó (no al coach) — igual que
   // hace Calendly, cada uno se manda X horas antes de la llamada, solo si
@@ -7303,7 +7376,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
             agenda_foto_rectangular_url, agenda_whatsapp_confirmar_activo, agenda_whatsapp_confirmar_numero,
             agenda_whatsapp_confirmar_mensaje, agenda_correos_notificacion, agenda_correo_texto_intro,
             agenda_correo_incluir_nombre, agenda_correo_incluir_correo, agenda_correo_incluir_fecha_hora, boton_texto_intro,
-            agenda_recordatorios, agenda_recordatorio_asunto, agenda_recordatorio_mensaje } = req.body || {};
+            agenda_recordatorios, agenda_recordatorio_asunto, agenda_recordatorio_mensaje, agenda_correo_no_califica_activo } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -7345,6 +7418,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
     }
     if (typeof agenda_recordatorio_asunto === "string") nuevaConfig.agenda_recordatorio_asunto = agenda_recordatorio_asunto.trim() || "Recordatorio: tu llamada es {tiempo_restante}";
     if (typeof agenda_recordatorio_mensaje === "string") nuevaConfig.agenda_recordatorio_mensaje = agenda_recordatorio_mensaje.trim() || "Hola {nombre}, te escribo para recordarte tu llamada agendada para {fecha} a las {hora} ({tiempo_restante}). ¡Nos vemos ahí!";
+    if (typeof agenda_correo_no_califica_activo === "boolean") nuevaConfig.agenda_correo_no_califica_activo = agenda_correo_no_califica_activo;
     if (Array.isArray(mensajes_error_audio)) nuevaConfig.mensajes_error_audio = mensajes_error_audio.map(m => String(m).trim()).filter(Boolean);
     if (typeof criterios_calificacion === "string") nuevaConfig.criterios_calificacion = criterios_calificacion.trim();
     if (typeof enlace_calificacion === "string") nuevaConfig.enlace_calificacion = enlace_calificacion.trim();
@@ -8344,6 +8418,11 @@ ${estilosBase()}
       <p class="hint" style="margin:6px 0 0;">Qué preguntas del formulario aparecen se controla desde cada pregunta, en la sección de abajo ("Preguntas del formulario").</p>
       <button type="button" class="add-paso" id="btnCorreoPrueba" style="margin-top:12px;">Enviar correo de prueba</button>
       <span class="foto-perfil-estado" id="correoPruebaEstado" style="margin-left:10px;"></span>
+
+      <div style="height:1px; background:var(--border); margin:18px 0;"></div>
+
+      <label class="chk"><input type="checkbox" id="chkCorreoNoCalificaActivo"> Avisarme también cuando alguien LLEGA a intentar agendar pero NO califica</label>
+      <p class="hint" style="margin:6px 0 0;">Sin esto, no hay forma de distinguir "alguien agendó de verdad" de "alguien no calificó" — desde el lado del lead ambos casos se ven casi igual, así que sin este aviso nunca te enterarías de que alguien lo intentó.</p>
     </div>
 
     <div class="card">
@@ -9188,6 +9267,7 @@ ${estilosBase()}
     document.getElementById("chkCorreoIncluirNombre").checked = cfg.agenda_correo_incluir_nombre !== false;
     document.getElementById("chkCorreoIncluirCorreo").checked = cfg.agenda_correo_incluir_correo !== false;
     document.getElementById("chkCorreoIncluirFechaHora").checked = cfg.agenda_correo_incluir_fecha_hora !== false;
+    document.getElementById("chkCorreoNoCalificaActivo").checked = cfg.agenda_correo_no_califica_activo !== false;
 
     recordatorios = Array.isArray(cfg.agenda_recordatorios) ? JSON.parse(JSON.stringify(cfg.agenda_recordatorios)) : [];
     renderRecordatorios();
@@ -9265,6 +9345,7 @@ ${estilosBase()}
       agenda_correo_incluir_nombre: document.getElementById("chkCorreoIncluirNombre").checked,
       agenda_correo_incluir_correo: document.getElementById("chkCorreoIncluirCorreo").checked,
       agenda_correo_incluir_fecha_hora: document.getElementById("chkCorreoIncluirFechaHora").checked,
+      agenda_correo_no_califica_activo: document.getElementById("chkCorreoNoCalificaActivo").checked,
       agenda_recordatorios: recordatorios,
       agenda_recordatorio_asunto: document.getElementById("inputRecordatorioAsunto").value.trim() || "Recordatorio: tu llamada es {tiempo_restante}",
       agenda_recordatorio_mensaje: document.getElementById("inputRecordatorioMensaje").value.trim() || "Hola {nombre}, te escribo para recordarte tu llamada agendada para {fecha} a las {hora} ({tiempo_restante}). ¡Nos vemos ahí!",
