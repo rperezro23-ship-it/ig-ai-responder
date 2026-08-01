@@ -1515,11 +1515,12 @@ function estilosBase() {
   /* --- Tarjetas de contenido genéricas --- */
   .card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:24px 26px; margin-bottom:16px; }
   .pasos-grid{
-    display:grid; grid-template-columns:1fr 1fr; row-gap:15px; column-gap:16px; margin-bottom:16px; align-items:start;
+    display:flex; gap:16px; margin-bottom:16px; align-items:flex-start;
   }
+  .pasos-col{ display:flex; flex-direction:column; gap:15px; flex:1; min-width:0; }
   .pasos-grid .card{ margin-bottom:0; }
   @media (max-width:960px){
-    .pasos-grid{ grid-template-columns:1fr; }
+    .pasos-grid{ flex-direction:column; }
   }
   .card h2{ font-family:var(--display); font-size:18px; font-weight:600; margin:0 0 5px; }
   .card .hint{ color:var(--muted); font-size:14px; margin:0 0 16px; line-height:1.6; }
@@ -8255,25 +8256,12 @@ ${estilosBase()}
     </div>
 
     <div class="pasos-grid">
+    <div class="pasos-col">
     <div class="card">
       <p class="cuentas-titulo">Paso 2</p>
       <p class="cuentas-subtitulo">Horario disponible</p>
       <p class="hint" style="margin-top:-8px;">Marca los días en que sí trabajas, y el rango de horas de cada uno — son los únicos horarios que se le van a ofrecer a los leads (siempre cruzados contra lo que ya tengas ocupado en tu calendario real).</p>
       <div id="horarioSemanalCont"></div>
-    </div>
-
-    <div class="card">
-      <p class="cuentas-titulo">Paso 3</p>
-      <p class="cuentas-subtitulo">Configuración general</p>
-      <div class="row2">
-        <div><label>Duración de la llamada (minutos)</label><input type="number" id="inputDuracion" min="5" step="5"></div>
-        <div><label>Días hacia adelante a mostrar</label><input type="number" id="inputDiasAdelante" min="1"></div>
-      </div>
-      <div class="row2" style="margin-top:14px;">
-        <div><label>Aviso mínimo antes de la llamada (horas)</label><input type="number" id="inputAvisoMinimo" min="0" step="0.5"></div>
-        <div><label>Zona horaria de tu negocio</label><input type="text" id="inputZonaNegocio" placeholder="America/Mexico_City"></div>
-      </div>
-      <p class="hint" style="margin:10px 0 0;">La zona horaria de tu negocio se usa para calcular tu horario de trabajo — cada visitante de la página ve los horarios convertidos a la suya propia automáticamente.</p>
     </div>
 
     <div class="card">
@@ -8315,17 +8303,6 @@ ${estilosBase()}
     </div>
 
     <div class="card">
-      <p class="cuentas-titulo">Paso 4.5</p>
-      <p class="cuentas-subtitulo">Confirmación por WhatsApp al agendar</p>
-      <p class="hint" style="margin-top:-8px;">Si lo activas, cuando alguien agenda exitosamente (solo si SÍ calificó), le aparece un botón para mandarte por WhatsApp un mensaje ya escrito confirmando su llamada.</p>
-      <label class="chk"><input type="checkbox" id="chkWhatsappConfirmarActivo"> Activar la confirmación por WhatsApp</label>
-      <label style="margin-top:14px;">Tu número de WhatsApp (con código de país, solo números — ej. 5215512345678)</label>
-      <input type="text" id="inputWhatsappConfirmarNumero" placeholder="5215512345678">
-      <label style="margin-top:14px;">Mensaje que se manda (usa <code>{fecha}</code> y <code>{hora}</code> — se reemplazan solos)</label>
-      <input type="text" id="inputWhatsappConfirmarMensaje">
-    </div>
-
-    <div class="card">
       <p class="cuentas-titulo">Paso 4.6</p>
       <p class="cuentas-subtitulo">Notificación por correo al agendar</p>
       <p class="hint" style="margin-top:-8px;">Cada vez que alguien agenda (y sí califica), se manda un correo con todos los datos a esta lista. Si lo dejas vacío, se usa el correo de la cuenta de Google que tienes conectada.</p>
@@ -8341,6 +8318,33 @@ ${estilosBase()}
       <button type="button" class="add-paso" id="btnCorreoPrueba" style="margin-top:12px;">Enviar correo de prueba</button>
       <span class="foto-perfil-estado" id="correoPruebaEstado" style="margin-left:10px;"></span>
     </div>
+    </div>
+
+    <div class="pasos-col">
+    <div class="card">
+      <p class="cuentas-titulo">Paso 3</p>
+      <p class="cuentas-subtitulo">Configuración general</p>
+      <div class="row2">
+        <div><label>Duración de la llamada (minutos)</label><input type="number" id="inputDuracion" min="5" step="5"></div>
+        <div><label>Días hacia adelante a mostrar</label><input type="number" id="inputDiasAdelante" min="1"></div>
+      </div>
+      <div class="row2" style="margin-top:14px;">
+        <div><label>Aviso mínimo antes de la llamada (horas)</label><input type="number" id="inputAvisoMinimo" min="0" step="0.5"></div>
+        <div><label>Zona horaria de tu negocio</label><input type="text" id="inputZonaNegocio" placeholder="America/Mexico_City"></div>
+      </div>
+      <p class="hint" style="margin:10px 0 0;">La zona horaria de tu negocio se usa para calcular tu horario de trabajo — cada visitante de la página ve los horarios convertidos a la suya propia automáticamente.</p>
+    </div>
+
+    <div class="card">
+      <p class="cuentas-titulo">Paso 4.5</p>
+      <p class="cuentas-subtitulo">Confirmación por WhatsApp al agendar</p>
+      <p class="hint" style="margin-top:-8px;">Si lo activas, cuando alguien agenda exitosamente (solo si SÍ calificó), le aparece un botón para mandarte por WhatsApp un mensaje ya escrito confirmando su llamada.</p>
+      <label class="chk"><input type="checkbox" id="chkWhatsappConfirmarActivo"> Activar la confirmación por WhatsApp</label>
+      <label style="margin-top:14px;">Tu número de WhatsApp (con código de país, solo números — ej. 5215512345678)</label>
+      <input type="text" id="inputWhatsappConfirmarNumero" placeholder="5215512345678">
+      <label style="margin-top:14px;">Mensaje que se manda (usa <code>{fecha}</code> y <code>{hora}</code> — se reemplazan solos)</label>
+      <input type="text" id="inputWhatsappConfirmarMensaje">
+    </div>
 
     <div class="card">
       <p class="cuentas-titulo">Paso 4.7</p>
@@ -8353,6 +8357,7 @@ ${estilosBase()}
       <input type="text" id="inputRecordatorioAsunto">
       <label style="margin-top:14px;">Mensaje (usa <code>{nombre}</code>, <code>{fecha}</code>, <code>{hora}</code>, <code>{tiempo_restante}</code>)</label>
       <textarea id="inputRecordatorioMensaje" rows="4"></textarea>
+    </div>
     </div>
     </div>
 
