@@ -1674,6 +1674,44 @@ async function enviarArchivoInstagram(senderId, urlArchivo) {
   registrarMidBot(resp.data?.message_id);
 }
 
+// Manda un enlace DENTRO de un botón (el "Button Template" oficial de la
+// API de Instagram) en vez de como texto plano — mismo mecanismo que usa
+// ManyChat para links como los de YouTube o Loom, que no se pueden mandar
+// como adjunto real (a diferencia de un PDF). No hay garantía de que esto
+// evite la detección de enlaces de Instagram (no es información pública),
+// pero técnicamente el link ya no viaja como texto suelto en el mensaje.
+async function enviarBotonInstagram(senderId, urlBoton, textoBoton) {
+  const cuenta = await obtenerCuentaActiva();
+  if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
+
+  // El título del botón no puede pasar de 20 caracteres (límite de Meta) —
+  // se recorta si hace falta, para no fallar el envío.
+  const tituloRecortado = (textoBoton || "Ver más").slice(0, 20);
+
+  const resp = await axios.post(
+    `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
+    {
+      recipient: { id: senderId },
+      message: {
+        attachment: {
+          type: "template",
+          payload: {
+            template_type: "button",
+            text: tituloRecortado,
+            buttons: [
+              { type: "web_url", url: urlBoton, title: tituloRecortado }
+            ]
+          }
+        }
+      }
+    },
+    {
+      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
+    }
+  );
+  registrarMidBot(resp.data?.message_id);
+}
+
 // Pequeña espera asíncrona, usada por el envío secuencial de mensajes para
 // respetar los marcadores [[pausa:N]] (ver más abajo) y por los reintentos.
 function sleep(ms) {
@@ -1766,6 +1804,13 @@ async function conReintento(fn, intentos = 1, esperaMs = 1500) {
 // marcador solo porque el modelo lo escribió con un espacio de más.
 const MARCADOR_MULTIMEDIA_REGEX = /\[\[\s*(audio|foto|archivo|pausa|etapa)\s*:\s*([a-zA-Z0-9_.-]+)\s*\]\]/gi;
 
+// Marcador aparte para botones con enlace adentro (ej. para YouTube, Loom,
+// o cualquier link que no se pueda mandar como archivo adjunto real) — un
+// regex separado porque los enlaces traen caracteres (:, /, ?, =, &) que
+// el regex de arriba no permite en la "clave". Formato en el prompt:
+//   [[boton:https://youtu.be/xxxx|Ver el video]]
+const MARCADOR_BOTON_REGEX = /\[\[\s*boton\s*:\s*([^\|\]]+?)\s*\|\s*([^\]]+?)\s*\]\]/gi;
+
 // Convierte el contenido crudo (con marcadores) en una lista ordenada de
 // "partes" a mandar en secuencia, respetando el orden en el que aparecen en
 // el string original: { tipo:"texto", valor }, { tipo:"audio"|"foto", clave },
@@ -1773,25 +1818,35 @@ const MARCADOR_MULTIMEDIA_REGEX = /\[\[\s*(audio|foto|archivo|pausa|etapa)\s*:\s
 function parsearPartes(contenidoCrudo) {
   const partesCrudas = [];
   let ultimoIndice = 0;
-  const regex = new RegExp(MARCADOR_MULTIMEDIA_REGEX.source, "gi");
+  // Se combinan los dos regex de marcadores en un solo recorrido (con
+  // alternancia "|"), para que el orden entre un [[foto:..]] y un
+  // [[boton:..|..]] en el mismo mensaje se respete tal cual como los
+  // escribió la IA, en vez de procesarlos por separado.
+  const regex = new RegExp(MARCADOR_MULTIMEDIA_REGEX.source + "|" + MARCADOR_BOTON_REGEX.source, "gi");
   let match;
 
   while ((match = regex.exec(contenidoCrudo)) !== null) {
     const textoPrevio = contenidoCrudo.slice(ultimoIndice, match.index).trim();
     if (textoPrevio) partesCrudas.push({ tipo: "texto", valor: textoPrevio });
 
-    const tipoMarcador = match[1].toLowerCase();
-    const valorMarcador = match[2];
+    if (match[1] !== undefined) {
+      // Coincidió la rama de audio/foto/archivo/pausa/etapa.
+      const tipoMarcador = match[1].toLowerCase();
+      const valorMarcador = match[2];
 
-    if (tipoMarcador === "pausa") {
-      const segundos = parseFloat(valorMarcador);
-      if (Number.isFinite(segundos) && segundos > 0) {
-        partesCrudas.push({ tipo: "pausa", segundos });
+      if (tipoMarcador === "pausa") {
+        const segundos = parseFloat(valorMarcador);
+        if (Number.isFinite(segundos) && segundos > 0) {
+          partesCrudas.push({ tipo: "pausa", segundos });
+        }
+      } else if (tipoMarcador === "etapa") {
+        partesCrudas.push({ tipo: "etapa", clave: valorMarcador.toLowerCase() });
+      } else {
+        partesCrudas.push({ tipo: tipoMarcador, clave: valorMarcador.toLowerCase() });
       }
-    } else if (tipoMarcador === "etapa") {
-      partesCrudas.push({ tipo: "etapa", clave: valorMarcador.toLowerCase() });
-    } else {
-      partesCrudas.push({ tipo: tipoMarcador, clave: valorMarcador.toLowerCase() });
+    } else if (match[3] !== undefined) {
+      // Coincidió la rama de [[boton:url|texto]].
+      partesCrudas.push({ tipo: "boton", url: match[3].trim(), texto: match[4].trim() });
     }
 
     ultimoIndice = match.index + match[0].length;
@@ -1856,6 +1911,14 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
       }
       console.log(`🧭 Cambiando la etapa de ${senderId} a "${parte.clave}"`);
       await guardarConversacion(senderId, { etapa: parte.clave });
+      continue;
+    }
+
+    if (parte.tipo === "boton") {
+      console.log(`🔘 Enviando botón con enlace a ${senderId}: "${parte.texto}" -> ${parte.url}`);
+      await agregarAlHistorialDB(senderId, "assistant", `[[boton]]${parte.texto}|${parte.url}`);
+      await conReintento(() => enviarBotonInstagram(senderId, parte.url, parte.texto));
+      algoSeMando = true;
       continue;
     }
 
