@@ -40,6 +40,18 @@ const IG_APP_ID        = process.env.IG_APP_ID;       // ID de "Instagram API wi
 const GOOGLE_CLIENT_ID     = (process.env.GOOGLE_CLIENT_ID || "").trim();
 const GOOGLE_CLIENT_SECRET = (process.env.GOOGLE_CLIENT_SECRET || "").trim();
 
+// Clave de API simple de Google (NO es lo mismo que GOOGLE_CLIENT_ID/SECRET
+// de arriba, que son para el login OAuth del calendario) — esta se usa
+// solo para consultar el NOMBRE real de un archivo público de Google
+// Drive (por su enlace), y así poder ponerle ese nombre al botón cuando
+// se manda un link de Drive (ej. si el PDF se llama "Rutina", el botón
+// dice "Rutina"). Se genera en console.cloud.google.com, dentro de
+// "APIs & Services > Credentials > Create Credentials > API Key" (no
+// hace falta ningún flujo de conexión ni permiso especial, funciona con
+// cualquier archivo que esté compartido como "Cualquiera con el enlace").
+// Si se deja vacía, el botón simplemente dice "Ver archivo" en su lugar.
+const GOOGLE_API_KEY = (process.env.GOOGLE_API_KEY || "").trim();
+
 const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
@@ -1882,6 +1894,34 @@ function parsearPartes(contenidoCrudo) {
   return partes;
 }
 
+// Consulta el nombre REAL de un archivo público de Google Drive a partir
+// de su ID (extraído del enlace) — así el botón puede decir "Rutina" en
+// vez de un genérico "Ver archivo", si así se llama el PDF en Drive. Se
+// cachea en memoria por el ID del archivo (no cambia de nombre seguido),
+// para no volver a consultar la API cada vez que se manda el mismo
+// enlace. Si falla la consulta (o no hay GOOGLE_API_KEY configurada), se
+// devuelve null y quien llama debe usar un texto de respaldo.
+const nombresArchivosDriveCache = new Map(); // fileId -> nombre (o null si falló)
+async function obtenerNombreArchivoDrive(fileId) {
+  if (!GOOGLE_API_KEY || !fileId) return null;
+  if (nombresArchivosDriveCache.has(fileId)) return nombresArchivosDriveCache.get(fileId);
+
+  try {
+    const resp = await axios.get(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+      params: { fields: "name", key: GOOGLE_API_KEY }
+    });
+    // Se quita la extensión (".pdf", ".docx", etc.) del nombre, ya que en
+    // el botón no aporta nada verla — solo ensucia el texto.
+    const nombreLimpio = (resp.data?.name || "").replace(/\.[a-z0-9]{2,5}$/i, "").trim();
+    nombresArchivosDriveCache.set(fileId, nombreLimpio || null);
+    return nombreLimpio || null;
+  } catch (err) {
+    console.warn(`⚠️ No se pudo consultar el nombre del archivo de Drive "${fileId}" (¿está compartido como "cualquiera con el enlace"? ¿está bien la GOOGLE_API_KEY?):`, err.response?.data?.error?.message || err.message);
+    nombresArchivosDriveCache.set(fileId, null); // no se vuelve a intentar en esta misma sesión del servidor
+    return null;
+  }
+}
+
 // Red de seguridad a nivel de código: detecta CUALQUIER enlace (no solo
 // YouTube/Loom) que haya quedado como texto plano dentro de una parte de
 // texto — ya sea porque la IA nunca usó el marcador [[boton:...]], o
@@ -1892,7 +1932,7 @@ function parsearPartes(contenidoCrudo) {
 // alrededor intacto. Se usa DESPUÉS del pre-llenado de username en
 // enviarContenidoConMarcadores, nunca antes.
 const REGEX_CUALQUIER_ENLACE = /https?:\/\/[^\s]+/gi;
-function extraerEnlacesComoBotones(texto) {
+async function extraerEnlacesComoBotones(texto) {
   const subpartes = [];
   const regex = new RegExp(REGEX_CUALQUIER_ENLACE.source, "gi");
   let ultimoIndice = 0;
@@ -1912,7 +1952,15 @@ function extraerEnlacesComoBotones(texto) {
     if (/youtu\.?be/i.test(url)) textoBoton = "Ver video";
     else if (/loom\.com/i.test(url)) textoBoton = "Ver Loom";
     else if (/\/agendar\b/i.test(url) || /calendly\.com/i.test(url)) textoBoton = "Agendar";
-    else if (/drive\.google\.com/i.test(url)) textoBoton = "Ver archivo";
+    else if (/drive\.google\.com/i.test(url)) {
+      // Se intenta usar el nombre REAL del archivo en Drive (ej. "Rutina",
+      // si así se llama el PDF) — si no se puede consultar (sin
+      // GOOGLE_API_KEY, archivo no público, o cualquier error), se cae de
+      // vuelta al genérico "Ver archivo", sin que esto rompa el envío.
+      const idArchivo = (url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || url.match(/[?&]id=([a-zA-Z0-9_-]+)/) || [])[1];
+      const nombreReal = idArchivo ? await obtenerNombreArchivoDrive(idArchivo) : null;
+      textoBoton = nombreReal || "Ver archivo";
+    }
 
     subpartes.push({ tipo: "boton", url, texto: textoBoton });
     ultimoIndice = m.index + m[0].length;
@@ -2014,7 +2062,7 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
       // incluye el enlace de /agendar, Calendly, YouTube, Loom, o
       // cualquier otro recurso, sin que la IA tenga que saber usar ningún
       // marcador especial. Si no hay ningún enlace, esto no cambia nada.
-      const subpartes = extraerEnlacesComoBotones(valorFinal);
+      const subpartes = await extraerEnlacesComoBotones(valorFinal);
 
       for (const sub of subpartes) {
         if (sub.tipo === "boton") {
