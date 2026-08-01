@@ -1699,6 +1699,10 @@ async function enviarBotonInstagram(senderId, urlBoton, textoBoton) {
   // El título del botón no puede pasar de 20 caracteres (límite de Meta) —
   // se recorta si hace falta, para no fallar el envío.
   const tituloRecortado = (textoBoton || "Ver más").slice(0, 20);
+  // El texto que aparece ARRIBA del botón (dentro del mismo mensaje) sí es
+  // configurable en /panel — por defecto invita a tocarlo, en vez de
+  // simplemente repetir el título del botón.
+  const textoArriba = (configActual.boton_texto_intro || "👇 Toca el botón debajo 👇").slice(0, 640);
 
   const resp = await axios.post(
     `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
@@ -1709,7 +1713,7 @@ async function enviarBotonInstagram(senderId, urlBoton, textoBoton) {
           type: "template",
           payload: {
             template_type: "button",
-            text: tituloRecortado,
+            text: textoArriba,
             buttons: [
               { type: "web_url", url: urlBoton, title: tituloRecortado }
             ]
@@ -6196,6 +6200,11 @@ let configActual = {
   calificar_automatico_con_enlace: false,
   no_seguir_si_no_califica: false,
   parar_seguimientos_si_agendo: false,
+  // Texto que aparece ARRIBA de cualquier botón con enlace (ver
+  // enviarBotonInstagram) — se usa para TODOS los botones del bot, sin
+  // importar si es el enlace de agendar, un recurso de Drive, YouTube,
+  // Loom, etc.
+  boton_texto_intro: "👇 Toca el botón debajo 👇",
   mensajes_error_audio: [
     "Se me cortó tu audio a la mitad, no me llegó completo 😅 ¿me lo puedes volver a mandar?",
     "Uy, no me cargó bien tu audio, se ve que hubo un error de conexión. ¿Me lo mandas de nuevo?",
@@ -7164,7 +7173,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
             agenda_campo_nombre, agenda_campo_correo, agenda_titulo_formulario, agenda_titulo_formulario_tamano,
             agenda_foto_rectangular_url, agenda_whatsapp_confirmar_activo, agenda_whatsapp_confirmar_numero,
             agenda_whatsapp_confirmar_mensaje, agenda_correos_notificacion, agenda_correo_texto_intro,
-            agenda_correo_incluir_nombre, agenda_correo_incluir_correo, agenda_correo_incluir_fecha_hora } = req.body || {};
+            agenda_correo_incluir_nombre, agenda_correo_incluir_correo, agenda_correo_incluir_fecha_hora, boton_texto_intro } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -7195,6 +7204,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof calificar_automatico_con_enlace === "boolean") nuevaConfig.calificar_automatico_con_enlace = calificar_automatico_con_enlace;
     if (typeof no_seguir_si_no_califica === "boolean") nuevaConfig.no_seguir_si_no_califica = no_seguir_si_no_califica;
     if (typeof parar_seguimientos_si_agendo === "boolean") nuevaConfig.parar_seguimientos_si_agendo = parar_seguimientos_si_agendo;
+    if (typeof boton_texto_intro === "string") nuevaConfig.boton_texto_intro = boton_texto_intro.trim() || "👇 Toca el botón debajo 👇";
     if (Array.isArray(mensajes_error_audio)) nuevaConfig.mensajes_error_audio = mensajes_error_audio.map(m => String(m).trim()).filter(Boolean);
     if (typeof criterios_calificacion === "string") nuevaConfig.criterios_calificacion = criterios_calificacion.trim();
     if (typeof enlace_calificacion === "string") nuevaConfig.enlace_calificacion = enlace_calificacion.trim();
@@ -9806,6 +9816,18 @@ ${estilosBase()}
         </div>
 
         <div class="card">
+          <h2>🔘 Botones con enlace</h2>
+          <details class="ayuda">
+            <summary>¿Cómo funciona esto?</summary>
+            <div class="hint-contenido">
+              <p class="hint">Cualquier enlace que el bot mande (el de agendar, Calendly, un video de YouTube o Loom, un PDF de Drive, etc.) se convierte automáticamente en un botón — nunca sale como texto plano suelto. Este texto es lo que aparece ARRIBA del botón, dentro del mismo mensaje, sin importar a cuál enlace pertenezca.</p>
+            </div>
+          </details>
+          <label for="botonTextoIntro">Texto que aparece arriba del botón</label>
+          <input type="text" id="botonTextoIntro" placeholder="👇 Toca el botón debajo 👇">
+        </div>
+
+        <div class="card">
           <h2>Memoria de conversación</h2>
           <details class="ayuda">
             <summary>¿Cómo funciona esto?</summary>
@@ -11010,6 +11032,7 @@ ${estilosBase()}
     document.getElementById("minDelay").value = cfg.min_delay ?? 8;
     document.getElementById("maxDelay").value = cfg.max_delay ?? 15;
     document.getElementById("maxHistorial").value = cfg.max_historial ?? 20;
+    document.getElementById("botonTextoIntro").value = cfg.boton_texto_intro || "👇 Toca el botón debajo 👇";
     document.getElementById("calificacionActiva").checked = Boolean(cfg.calificacion_activa);
     document.getElementById("calificarAutomaticoConEnlace").checked = Boolean(cfg.calificar_automatico_con_enlace);
     document.getElementById("noSeguirSiNoCalifica").checked = Boolean(cfg.no_seguir_si_no_califica);
@@ -11334,6 +11357,7 @@ ${estilosBase()}
       min_delay: parseInt(document.getElementById("minDelay").value, 10),
       max_delay: parseInt(document.getElementById("maxDelay").value, 10),
       max_historial: parseInt(document.getElementById("maxHistorial").value, 10),
+      boton_texto_intro: document.getElementById("botonTextoIntro").value.trim() || "👇 Toca el botón debajo 👇",
       seguimientos: pasos,
       seguimientos_enlace: pasosEnlace,
       calificacion_activa: document.getElementById("calificacionActiva").checked,
