@@ -904,6 +904,80 @@ async function enviarCorreoGmail({ destinatario, asunto, cuerpo, html }) {
   );
 }
 
+// Revisa todas las reservas futuras con correo y manda los recordatorios
+// que correspondan (24h antes, 1h antes, o lo que se haya configurado en
+// /calendario) — igual que hace Calendly, pero por nuestra cuenta, ya que
+// los recordatorios de Google Calendar solo le avisan al organizador, no
+// al lead (ver la explicación completa que se le dio a Roberto sobre
+// esto). Se apoya en la columna "recordatorios_enviados" de la tabla
+// reservas (un arreglo con las "horas_antes" ya mandadas) para nunca
+// mandar el mismo recordatorio dos veces, incluso si esta función se
+// llama varias veces seguidas. Pensada para llamarse periódicamente
+// desde un cron externo (ver /cron/recordatorios más abajo).
+async function procesarRecordatoriosPendientes() {
+  const recordatoriosConfig = (configActual.agenda_recordatorios || []).filter(r => r.activo && r.horas_antes > 0);
+  if (recordatoriosConfig.length === 0) return { enviados: 0, revisados: 0 };
+
+  const ahora = new Date();
+  const { data: reservas, error } = await supabase
+    .from("reservas")
+    .select("*")
+    .not("email", "is", null)
+    .gte("inicio", ahora.toISOString())
+    .order("inicio", { ascending: true })
+    .limit(200);
+
+  if (error) {
+    console.error("❌ Error consultando reservas para recordatorios:", error.message);
+    return { enviados: 0, revisados: 0, error: error.message };
+  }
+
+  let enviados = 0;
+  for (const reserva of (reservas || [])) {
+    const yaEnviados = Array.isArray(reserva.recordatorios_enviados) ? [...reserva.recordatorios_enviados] : [];
+    const inicioReserva = new Date(reserva.inicio);
+
+    for (const recordatorio of recordatoriosConfig) {
+      if (yaEnviados.includes(recordatorio.horas_antes)) continue; // este ya se mandó
+
+      const momentoDeEnvio = new Date(inicioReserva.getTime() - recordatorio.horas_antes * 60 * 60 * 1000);
+      // Se manda si ya llegó (o pasó) el momento configurado, pero la
+      // llamada TODAVÍA no ha pasado — así, si el cron estuvo caído un
+      // rato, no se manda un recordatorio de algo que ya sucedió.
+      if (ahora < momentoDeEnvio || ahora >= inicioReserva) continue;
+
+      try {
+        const zona = configActual.agenda_zona_horaria || "America/Mexico_City";
+        const fechaTexto = inicioReserva.toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long", timeZone: zona });
+        const horaTexto = inicioReserva.toLocaleTimeString("es-MX", { hour: "numeric", minute: "2-digit", timeZone: zona });
+        const dias = Math.round(recordatorio.horas_antes / 24);
+        const tiempoRestante = recordatorio.horas_antes >= 24
+          ? `en ${dias} día${dias > 1 ? "s" : ""}`
+          : recordatorio.horas_antes === 1 ? "en 1 hora" : `en ${recordatorio.horas_antes} horas`;
+
+        const asunto = (configActual.agenda_recordatorio_asunto || "Recordatorio: tu llamada es {tiempo_restante}")
+          .replace(/\{tiempo_restante\}/g, tiempoRestante);
+        const mensaje = (configActual.agenda_recordatorio_mensaje || "")
+          .replace(/\{nombre\}/g, reserva.nombre || "")
+          .replace(/\{fecha\}/g, fechaTexto)
+          .replace(/\{hora\}/g, horaTexto)
+          .replace(/\{tiempo_restante\}/g, tiempoRestante);
+
+        await enviarCorreoGmail({ destinatario: reserva.email, asunto, cuerpo: mensaje });
+
+        yaEnviados.push(recordatorio.horas_antes);
+        await supabase.from("reservas").update({ recordatorios_enviados: yaEnviados }).eq("id", reserva.id);
+        enviados++;
+        console.log(`⏰ Recordatorio de ${recordatorio.horas_antes}h enviado a ${reserva.email} (reserva #${reserva.id}).`);
+      } catch (err) {
+        console.error(`❌ Error mandando recordatorio a ${reserva.email} (reserva #${reserva.id}):`, err.response?.data || err.message);
+      }
+    }
+  }
+
+  return { enviados, revisados: (reservas || []).length };
+}
+
 // ---------------------------------------------------------------
 // Conexión con Calendly: se usa para saber, con certeza real (no solo
 // porque el lead lo dijo), si alguien ya agendó su llamada. Funciona con
@@ -3740,9 +3814,36 @@ app.get("/favicon-calendario.svg", (req, res) => {
 app.get("/cron/seguimientos", async (req, res) => {
   try {
     const resultado = await procesarSeguimientosPendientesDB();
-    res.json({ status: "ok", ...resultado, timestamp: new Date().toISOString() });
+
+    // Se aprovecha este mismo cron (que ya está configurado y corriendo)
+    // para revisar también los recordatorios pendientes — así no hace
+    // falta configurar un segundo cron aparte para que esto funcione. Un
+    // fallo aquí nunca debe tumbar la respuesta de los seguimientos, que
+    // es lo más importante de este endpoint.
+    let recordatorios = { enviados: 0, revisados: 0 };
+    try {
+      recordatorios = await procesarRecordatoriosPendientes();
+    } catch (errRecordatorios) {
+      console.error("❌ Error procesando recordatorios dentro de /cron/seguimientos:", errRecordatorios.message);
+    }
+
+    res.json({ status: "ok", ...resultado, recordatorios, timestamp: new Date().toISOString() });
   } catch (err) {
     console.error("❌ Error en /cron/seguimientos:", err.message);
+    res.status(500).json({ status: "error", error: err.message });
+  }
+});
+
+// Endpoint aparte para los recordatorios, por si en algún momento se
+// quiere configurar un cron externo separado con su propio horario (por
+// ejemplo, cada 15 minutos en vez de cada 5) — no es obligatorio usarlo,
+// ya que /cron/seguimientos de arriba también los procesa de pasada.
+app.get("/cron/recordatorios", async (req, res) => {
+  try {
+    const resultado = await procesarRecordatoriosPendientes();
+    res.json({ status: "ok", ...resultado, timestamp: new Date().toISOString() });
+  } catch (err) {
+    console.error("❌ Error en /cron/recordatorios:", err.message);
     res.status(500).json({ status: "error", error: err.message });
   }
 });
@@ -6319,6 +6420,18 @@ let configActual = {
   agenda_correo_incluir_correo: true,
   agenda_correo_incluir_fecha_hora: true,
 
+  // Recordatorios por correo al LEAD que agendó (no al coach) — igual que
+  // hace Calendly, cada uno se manda X horas antes de la llamada, solo si
+  // el lead dejó su correo al agendar. Por defecto vienen dos: 24h antes
+  // y 1h antes, ambos activos — se pueden agregar, quitar, o desactivar
+  // desde /calendario.
+  agenda_recordatorios: [
+    { horas_antes: 24, activo: true },
+    { horas_antes: 1, activo: true }
+  ],
+  agenda_recordatorio_asunto: "Recordatorio: tu llamada es {tiempo_restante}",
+  agenda_recordatorio_mensaje: "Hola {nombre}, te escribo para recordarte tu llamada agendada para {fecha} a las {hora} ({tiempo_restante}). ¡Nos vemos ahí!",
+
   // Contenido del panel de perfil que se muestra en /agendar (columna
   // izquierda) — puramente informativo/visual, se puede personalizar sin
   // tocar código.
@@ -7181,7 +7294,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
             agenda_campo_nombre, agenda_campo_correo, agenda_titulo_formulario, agenda_titulo_formulario_tamano,
             agenda_foto_rectangular_url, agenda_whatsapp_confirmar_activo, agenda_whatsapp_confirmar_numero,
             agenda_whatsapp_confirmar_mensaje, agenda_correos_notificacion, agenda_correo_texto_intro,
-            agenda_correo_incluir_nombre, agenda_correo_incluir_correo, agenda_correo_incluir_fecha_hora, boton_texto_intro } = req.body || {};
+            agenda_correo_incluir_nombre, agenda_correo_incluir_correo, agenda_correo_incluir_fecha_hora, boton_texto_intro,
+            agenda_recordatorios, agenda_recordatorio_asunto, agenda_recordatorio_mensaje } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -7213,6 +7327,16 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof no_seguir_si_no_califica === "boolean") nuevaConfig.no_seguir_si_no_califica = no_seguir_si_no_califica;
     if (typeof parar_seguimientos_si_agendo === "boolean") nuevaConfig.parar_seguimientos_si_agendo = parar_seguimientos_si_agendo;
     if (typeof boton_texto_intro === "string") nuevaConfig.boton_texto_intro = boton_texto_intro.trim() || "👇 Toca el botón debajo 👇";
+    if (Array.isArray(agenda_recordatorios)) {
+      nuevaConfig.agenda_recordatorios = agenda_recordatorios
+        .map(r => ({
+          horas_antes: Number.isFinite(Number(r?.horas_antes)) ? Math.max(0, Number(r.horas_antes)) : null,
+          activo: Boolean(r?.activo)
+        }))
+        .filter(r => r.horas_antes !== null && r.horas_antes > 0);
+    }
+    if (typeof agenda_recordatorio_asunto === "string") nuevaConfig.agenda_recordatorio_asunto = agenda_recordatorio_asunto.trim() || "Recordatorio: tu llamada es {tiempo_restante}";
+    if (typeof agenda_recordatorio_mensaje === "string") nuevaConfig.agenda_recordatorio_mensaje = agenda_recordatorio_mensaje.trim() || "Hola {nombre}, te escribo para recordarte tu llamada agendada para {fecha} a las {hora} ({tiempo_restante}). ¡Nos vemos ahí!";
     if (Array.isArray(mensajes_error_audio)) nuevaConfig.mensajes_error_audio = mensajes_error_audio.map(m => String(m).trim()).filter(Boolean);
     if (typeof criterios_calificacion === "string") nuevaConfig.criterios_calificacion = criterios_calificacion.trim();
     if (typeof enlace_calificacion === "string") nuevaConfig.enlace_calificacion = enlace_calificacion.trim();
@@ -8211,6 +8335,19 @@ ${estilosBase()}
     </div>
 
     <div class="card">
+      <p class="cuentas-titulo">Paso 4.7</p>
+      <p class="cuentas-subtitulo">Recordatorios por correo al lead</p>
+      <p class="hint" style="margin-top:-8px;">Igual que hace Calendly — se le manda un correo al lead antes de su llamada, solo si dejó su correo al agendar. Por defecto vienen dos: 24 horas antes, y 1 hora antes.</p>
+      <div id="listaRecordatorios" style="margin-bottom:12px;"></div>
+      <button type="button" class="add-paso" id="btnAgregarRecordatorio">+ Agregar recordatorio</button>
+
+      <label style="margin-top:18px;">Asunto del correo (usa <code>{tiempo_restante}</code>)</label>
+      <input type="text" id="inputRecordatorioAsunto">
+      <label style="margin-top:14px;">Mensaje (usa <code>{nombre}</code>, <code>{fecha}</code>, <code>{hora}</code>, <code>{tiempo_restante}</code>)</label>
+      <textarea id="inputRecordatorioMensaje" rows="4"></textarea>
+    </div>
+
+    <div class="card">
       <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">
         <div>
           <p class="cuentas-titulo">Paso 5</p>
@@ -8653,6 +8790,49 @@ ${estilosBase()}
   // quitar), para que la vista previa de la derecha siempre refleje lo que
   // se está escribiendo ahora mismo.
   let preguntas = [];
+  let recordatorios = [];
+
+  function renderRecordatorios(){
+    const cont = document.getElementById("listaRecordatorios");
+    if(recordatorios.length === 0){
+      cont.innerHTML = '<p class="hint" style="margin:0;">Sin recordatorios configurados — el lead no recibirá ningún correo antes de su llamada.</p>';
+      return;
+    }
+    cont.innerHTML = recordatorios.map((r, i) => \`
+      <div class="row2" style="align-items:center; margin-bottom:8px;" data-i="\${i}">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <input type="number" class="input-recordatorio-horas" data-i="\${i}" min="0" step="0.5" value="\${r.horas_antes}" style="width:90px;">
+          <span style="color:var(--muted); font-size:13px;">horas antes</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:14px; justify-content:flex-end;">
+          <label class="chk" style="margin:0;"><input type="checkbox" class="chk-recordatorio-activo" data-i="\${i}"\${r.activo ? " checked" : ""}> Activo</label>
+          <button type="button" class="quitar btn-recordatorio-quitar" data-i="\${i}">quitar</button>
+        </div>
+      </div>
+    \`).join("");
+
+    cont.querySelectorAll(".input-recordatorio-horas").forEach(input => {
+      input.addEventListener("input", () => {
+        recordatorios[+input.dataset.i].horas_antes = Number(input.value) || 0;
+      });
+    });
+    cont.querySelectorAll(".chk-recordatorio-activo").forEach(chk => {
+      chk.addEventListener("change", () => {
+        recordatorios[+chk.dataset.i].activo = chk.checked;
+      });
+    });
+    cont.querySelectorAll(".btn-recordatorio-quitar").forEach(btn => {
+      btn.addEventListener("click", () => {
+        recordatorios.splice(+btn.dataset.i, 1);
+        renderRecordatorios();
+      });
+    });
+  }
+
+  document.getElementById("btnAgregarRecordatorio").addEventListener("click", () => {
+    recordatorios.push({ horas_antes: 24, activo: true });
+    renderRecordatorios();
+  });
 
   function renderHorarioSemanal(){
     const cont = document.getElementById("horarioSemanalCont");
@@ -8995,6 +9175,11 @@ ${estilosBase()}
     document.getElementById("chkCorreoIncluirCorreo").checked = cfg.agenda_correo_incluir_correo !== false;
     document.getElementById("chkCorreoIncluirFechaHora").checked = cfg.agenda_correo_incluir_fecha_hora !== false;
 
+    recordatorios = Array.isArray(cfg.agenda_recordatorios) ? JSON.parse(JSON.stringify(cfg.agenda_recordatorios)) : [];
+    renderRecordatorios();
+    document.getElementById("inputRecordatorioAsunto").value = cfg.agenda_recordatorio_asunto || "Recordatorio: tu llamada es {tiempo_restante}";
+    document.getElementById("inputRecordatorioMensaje").value = cfg.agenda_recordatorio_mensaje || "Hola {nombre}, te escribo para recordarte tu llamada agendada para {fecha} a las {hora} ({tiempo_restante}). ¡Nos vemos ahí!";
+
     preguntas = Array.isArray(cfg.agenda_preguntas) ? cfg.agenda_preguntas : [];
     renderPreguntas();
   }
@@ -9066,6 +9251,9 @@ ${estilosBase()}
       agenda_correo_incluir_nombre: document.getElementById("chkCorreoIncluirNombre").checked,
       agenda_correo_incluir_correo: document.getElementById("chkCorreoIncluirCorreo").checked,
       agenda_correo_incluir_fecha_hora: document.getElementById("chkCorreoIncluirFechaHora").checked,
+      agenda_recordatorios: recordatorios,
+      agenda_recordatorio_asunto: document.getElementById("inputRecordatorioAsunto").value.trim() || "Recordatorio: tu llamada es {tiempo_restante}",
+      agenda_recordatorio_mensaje: document.getElementById("inputRecordatorioMensaje").value.trim() || "Hola {nombre}, te escribo para recordarte tu llamada agendada para {fecha} a las {hora} ({tiempo_restante}). ¡Nos vemos ahí!",
       agenda_preguntas: preguntas
     });
 
