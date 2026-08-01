@@ -1882,6 +1882,48 @@ function parsearPartes(contenidoCrudo) {
   return partes;
 }
 
+// Red de seguridad a nivel de código: detecta CUALQUIER enlace (no solo
+// YouTube/Loom) que haya quedado como texto plano dentro de una parte de
+// texto — ya sea porque la IA nunca usó el marcador [[boton:...]], o
+// porque es el enlace de /agendar o de Calendly (a esos SIEMPRE se les
+// aplica esto, después de que ya se les agregó el username, para que no
+// se pierda ese dato al convertirlos en botón). Separa cada enlace
+// encontrado en su propia parte de tipo "boton", dejando el texto de
+// alrededor intacto. Se usa DESPUÉS del pre-llenado de username en
+// enviarContenidoConMarcadores, nunca antes.
+const REGEX_CUALQUIER_ENLACE = /https?:\/\/[^\s]+/gi;
+function extraerEnlacesComoBotones(texto) {
+  const subpartes = [];
+  const regex = new RegExp(REGEX_CUALQUIER_ENLACE.source, "gi");
+  let ultimoIndice = 0;
+  let m;
+
+  while ((m = regex.exec(texto)) !== null) {
+    const textoPrevio = texto.slice(ultimoIndice, m.index).trim();
+    if (textoPrevio) subpartes.push({ tipo: "texto", valor: textoPrevio });
+
+    // Se separa cualquier puntuación de fin de oración pegada al enlace.
+    const coincidenciaFinal = m[0].match(/[.,;:!?)\]}>]+$/);
+    const url = coincidenciaFinal ? m[0].slice(0, -coincidenciaFinal[0].length) : m[0];
+
+    // Un texto de botón razonable según el tipo de enlace, en vez de
+    // algo genérico sin sentido para todos los casos.
+    let textoBoton = "Ver más";
+    if (/youtu\.?be/i.test(url)) textoBoton = "Ver video";
+    else if (/loom\.com/i.test(url)) textoBoton = "Ver Loom";
+    else if (/\/agendar\b/i.test(url) || /calendly\.com/i.test(url)) textoBoton = "Agendar";
+    else if (/drive\.google\.com/i.test(url)) textoBoton = "Ver archivo";
+
+    subpartes.push({ tipo: "boton", url, texto: textoBoton });
+    ultimoIndice = m.index + m[0].length;
+  }
+
+  const textoRestante = texto.slice(ultimoIndice).trim();
+  if (textoRestante) subpartes.push({ tipo: "texto", valor: textoRestante });
+
+  return subpartes;
+}
+
 // Manda un contenido crudo (con marcadores [[audio:..]], [[foto:..]],
 // [[pausa:N]] y [[etapa:..]]) como una secuencia de mensajes independientes,
 // respetando las pausas indicadas entre cada uno y aplicando el cambio de
@@ -1966,21 +2008,39 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
         console.warn(`⚠️ Posible marcador mal formado en la respuesta a ${senderId} (se mandó como texto normal): "${valorFinal}"`);
       }
 
-      // Red de seguridad: Instagram rechaza de golpe cualquier mensaje de
-      // más de 1000 caracteres (se pierde la respuesta completa). Si la IA
-      // generó algo más largo de lo esperado, se manda en varias burbujas.
-      const fragmentos = dividirTextoLargo(valorFinal);
-      if (fragmentos.length > 1) {
-        console.warn(`⚠️ La respuesta a ${senderId} tiene ${valorFinal.length} caracteres (arriba del límite de Instagram) — se divide en ${fragmentos.length} mensajes.`);
-      }
+      // Red de seguridad a nivel de código: CUALQUIER enlace que haya
+      // quedado en el texto (ya con el username agregado si aplicaba) se
+      // separa y se manda como botón en vez de como texto plano — esto
+      // incluye el enlace de /agendar, Calendly, YouTube, Loom, o
+      // cualquier otro recurso, sin que la IA tenga que saber usar ningún
+      // marcador especial. Si no hay ningún enlace, esto no cambia nada.
+      const subpartes = extraerEnlacesComoBotones(valorFinal);
 
-      for (let idx = 0; idx < fragmentos.length; idx++) {
-        const fragmento = fragmentos[idx];
-        await agregarAlHistorialDB(senderId, "assistant", fragmento);
-        await enviarMensajeInstagram(senderId, fragmento);
-        textosEnviados.push(fragmento);
-        algoSeMando = true;
-        if (idx < fragmentos.length - 1) await sleep(900); // pausa breve y natural entre burbujas divididas
+      for (const sub of subpartes) {
+        if (sub.tipo === "boton") {
+          console.log(`🔘 Enviando botón con enlace a ${senderId}: "${sub.texto}" -> ${sub.url}`);
+          await agregarAlHistorialDB(senderId, "assistant", `[[boton]]${sub.texto}|${sub.url}`);
+          await conReintento(() => enviarBotonInstagram(senderId, sub.url, sub.texto));
+          algoSeMando = true;
+          continue;
+        }
+
+        // sub.tipo === "texto" — mismo mecanismo de siempre: Instagram
+        // rechaza de golpe cualquier mensaje de más de 1000 caracteres, así
+        // que se divide en varias burbujas si hace falta.
+        const fragmentos = dividirTextoLargo(sub.valor);
+        if (fragmentos.length > 1) {
+          console.warn(`⚠️ La respuesta a ${senderId} tiene ${sub.valor.length} caracteres (arriba del límite de Instagram) — se divide en ${fragmentos.length} mensajes.`);
+        }
+
+        for (let idx = 0; idx < fragmentos.length; idx++) {
+          const fragmento = fragmentos[idx];
+          await agregarAlHistorialDB(senderId, "assistant", fragmento);
+          await enviarMensajeInstagram(senderId, fragmento);
+          textosEnviados.push(fragmento);
+          algoSeMando = true;
+          if (idx < fragmentos.length - 1) await sleep(900); // pausa breve y natural entre burbujas divididas
+        }
       }
       continue;
     }
