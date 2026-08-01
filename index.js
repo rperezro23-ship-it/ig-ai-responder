@@ -1515,7 +1515,7 @@ function estilosBase() {
   /* --- Tarjetas de contenido genéricas --- */
   .card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg); padding:24px 26px; margin-bottom:16px; }
   .pasos-grid{
-    display:grid; grid-template-columns:1fr 1fr; row-gap:0; column-gap:16px; margin-bottom:16px; align-items:start;
+    display:grid; grid-template-columns:1fr 1fr; row-gap:15px; column-gap:16px; margin-bottom:16px; align-items:start;
   }
   .pasos-grid .card{ margin-bottom:0; }
   @media (max-width:960px){
