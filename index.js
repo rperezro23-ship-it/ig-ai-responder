@@ -2012,6 +2012,7 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
       console.log(`🔘 Enviando botón con enlace a ${senderId}: "${parte.texto}" -> ${parte.url}`);
       await agregarAlHistorialDB(senderId, "assistant", `[[boton]]${parte.texto}|${parte.url}`);
       await conReintento(() => enviarBotonInstagram(senderId, parte.url, parte.texto));
+      textosEnviados.push(parte.url); // ver el comentario más abajo sobre por qué hace falta esto
       algoSeMando = true;
       continue;
     }
@@ -2073,6 +2074,13 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
           console.log(`🔘 Enviando botón con enlace a ${senderId}: "${sub.texto}" -> ${sub.url}`);
           await agregarAlHistorialDB(senderId, "assistant", `[[boton]]${sub.texto}|${sub.url}`);
           await conReintento(() => enviarBotonInstagram(senderId, sub.url, sub.texto));
+          // Se agrega la URL a "textosEnviados" aunque no se haya mandado
+          // como texto — esto es justo lo que usan más abajo (y en otros
+          // lugares del código) para detectar si el enlace de calificación
+          // se mandó de verdad, y así marcar "enlace_enviado". Si no se
+          // agregara aquí, esa detección dejaría de funcionar por completo
+          // desde que los enlaces se empezaron a mandar como botón.
+          textosEnviados.push(sub.url);
           algoSeMando = true;
           continue;
         }
