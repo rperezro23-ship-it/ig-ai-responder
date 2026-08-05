@@ -2038,6 +2038,7 @@ async function extraerEnlacesComoBotones(texto) {
     if (/youtu\.?be/i.test(url)) textoBoton = "Ver video";
     else if (/loom\.com/i.test(url)) textoBoton = "Ver Loom";
     else if (/\/agendar\b/i.test(url) || /calendly\.com/i.test(url)) textoBoton = "Agendar";
+    else if (/chat\.whatsapp\.com/i.test(url)) textoBoton = "Acceder a la Comunidad";
     else if (/drive\.google\.com/i.test(url)) {
       // Se intenta usar el nombre REAL del archivo en Drive (ej. "Rutina",
       // si así se llama el PDF) — si no se puede consultar (sin
