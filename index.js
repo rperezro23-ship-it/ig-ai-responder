@@ -52,6 +52,19 @@ const GOOGLE_CLIENT_SECRET = (process.env.GOOGLE_CLIENT_SECRET || "").trim();
 // Si se deja vacía, el botón simplemente dice "Ver archivo" en su lugar.
 const GOOGLE_API_KEY = (process.env.GOOGLE_API_KEY || "").trim();
 
+// Clave de API de Resend, usada para mandar TODOS los correos automáticos
+// del sistema (recordatorios de llamadas, avisos de "no califica",
+// notificación al agendar) — reemplaza al envío por Gmail, que Google
+// empezó a rechazar por tratarse de envío masivo/programático desde una
+// cuenta personal. Se genera en resend.com, dentro de "API Keys". La
+// cuenta de Google conectada sigue haciendo falta igual, pero ya SOLO
+// para el Calendar — el envío de correos ya no depende de ella.
+const RESEND_API_KEY = (process.env.RESEND_API_KEY || "").trim();
+// Dirección desde la que salen todos los correos — no hace falta que
+// exista como buzón real, solo que el dominio (entrenaeficientepro.com)
+// esté verificado en Resend, como ya se hizo.
+const RESEND_FROM_EMAIL = "notificaciones@entrenaeficientepro.com";
+
 const SUPABASE_URL         = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
@@ -881,26 +894,33 @@ function escaparHtml(texto) {
     .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
+// El nombre de la función se dejó igual a propósito (aunque ya no usa
+// Gmail) — así los 5 lugares del código que ya la llaman (recordatorios,
+// avisos de "no califica", notificación al agendar) no necesitan ningún
+// cambio, solo cambió lo que pasa POR DENTRO de la función.
 async function enviarCorreoGmail({ destinatario, asunto, cuerpo, html }) {
-  const accessToken = await obtenerAccessTokenGoogleValido();
-  if (!accessToken) throw new Error("No hay una cuenta de Google conectada para mandar el correo.");
+  if (!RESEND_API_KEY) throw new Error("No hay una clave de Resend configurada (falta RESEND_API_KEY en las variables de entorno de Render) para mandar el correo.");
 
-  const mensaje = [
-    `To: ${destinatario}`,
-    `Subject: =?UTF-8?B?${Buffer.from(asunto, "utf-8").toString("base64")}?=`,
-    `Content-Type: text/${html ? "html" : "plain"}; charset="UTF-8"`,
-    "",
-    cuerpo
-  ].join("\r\n");
+  // "destinatario" puede venir como un solo correo, o como varios
+  // separados por coma (ej. "a@x.com, b@y.com", como arma
+  // agenda_correos_notificacion) — Resend espera un arreglo cuando son
+  // varios destinatarios, así que se separan aquí.
+  const destinatarios = String(destinatario || "")
+    .split(",")
+    .map(d => d.trim())
+    .filter(Boolean);
 
-  // Gmail exige "base64url" (sin + / =), no el base64 normal.
-  const raw = Buffer.from(mensaje, "utf-8").toString("base64")
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  if (destinatarios.length === 0) throw new Error("No se especificó ningún destinatario para el correo.");
 
   await axios.post(
-    "https://www.googleapis.com/gmail/v1/users/me/messages/send",
-    { raw },
-    { headers: { Authorization: `Bearer ${accessToken}` } }
+    "https://api.resend.com/emails",
+    {
+      from: RESEND_FROM_EMAIL,
+      to: destinatarios,
+      subject: asunto,
+      [html ? "html" : "text"]: cuerpo
+    },
+    { headers: { Authorization: `Bearer ${RESEND_API_KEY}`, "Content-Type": "application/json" } }
   );
 }
 
