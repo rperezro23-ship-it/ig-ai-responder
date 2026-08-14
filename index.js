@@ -5017,10 +5017,29 @@ app.post("/oauth/google/desconectar", requireAdminKey, async (req, res) => {
 app.get("/google/estado", requireAdminKey, async (req, res) => {
   const cuenta = await obtenerCuentaGoogleConectada();
   if (!cuenta) return res.json({ conectada: false });
+
+  // A diferencia del token de Instagram (que sí tiene una duración exacta
+  // guardada), Google no nos dice cuándo vence el refresh_token — mientras
+  // la app siga en modo "Testing" en Google Cloud Console, Google lo vence
+  // SIEMPRE a los 7 días exactos desde que se conectó, sin excepción. Esto
+  // es solo una ESTIMACIÓN basada en esa regla fija: si en algún momento
+  // se verifica/publica la app, este cálculo deja de ser preciso (el token
+  // ya no vencería solo por el paso del tiempo).
+  let diasRestantesEstimados = null;
+  let fechaVencimientoEstimada = null;
+  if (cuenta.conectada_en) {
+    const conectadaEnMs = new Date(cuenta.conectada_en).getTime();
+    const vencimientoMs = conectadaEnMs + 7 * 24 * 60 * 60 * 1000;
+    diasRestantesEstimados = Math.ceil((vencimientoMs - Date.now()) / 86400000);
+    fechaVencimientoEstimada = new Date(vencimientoMs).toISOString();
+  }
+
   res.json({
     conectada: true,
     email: cuenta.email || null,
-    conectada_en: cuenta.conectada_en || null
+    conectada_en: cuenta.conectada_en || null,
+    dias_restantes_estimados: diasRestantesEstimados,
+    vence_aproximadamente_en: fechaVencimientoEstimada
   });
 });
 
@@ -8211,6 +8230,8 @@ ${estilosBase()}
   .cuenta-lado{ display:flex; flex-direction:column; align-items:flex-end; gap:10px; flex-shrink:0; }
   .badge{ font-size:12.5px; font-family:var(--mono); padding:6px 13px; border-radius:20px;
     background:var(--green-soft); color:var(--green); border:1px solid rgba(49,217,124,.3); white-space:nowrap; }
+  .badge-aviso{ font-size:12.5px; font-family:var(--mono); padding:6px 13px; border-radius:20px;
+    background:var(--red-soft); color:var(--red); border:1px solid rgba(255,93,93,.35); white-space:nowrap; }
   .btn-eliminar{
     background:var(--red-soft); color:var(--red); border:1px solid rgba(255,93,93,.35);
     border-radius:9px; padding:9px 15px; font-size:13.5px; font-weight:600; cursor:pointer;
@@ -8608,17 +8629,39 @@ ${estilosBase()}
       return;
     }
 
+    // El token de Google no tiene una duración exacta guardada (a
+    // diferencia del de Instagram) — mientras la app siga en modo
+    // "Testing" en Google Cloud Console, Google lo vence SIEMPRE a los 7
+    // días exactos desde que se conectó, así que esto es una ESTIMACIÓN
+    // basada en esa regla fija, no un dato exacto como el de Instagram.
+    let diasRestantesTxt = "";
+    let claseBadge = "badge";
+    if(Number.isFinite(data.dias_restantes_estimados)){
+      const dias = data.dias_restantes_estimados;
+      if(dias > 1){
+        diasRestantesTxt = \` · Vence en aprox. \${dias} días (\${formatearFecha(data.vence_aproximadamente_en)})\`;
+      } else if(dias === 1){
+        diasRestantesTxt = " · Vence mañana (aprox.)";
+      } else if(dias === 0){
+        diasRestantesTxt = " · Vence hoy (aprox.)";
+      } else {
+        diasRestantesTxt = \` · Probablemente ya venció hace \${Math.abs(dias)} día(s) — puede que necesites reconectar\`;
+      }
+      if(dias <= 1) claseBadge = "badge-aviso";
+    }
+
     cont.innerHTML = \`
       <div class="cuenta-item">
         <div class="cuenta-info">
           <div class="nombre">\${data.email || "cuenta conectada"}</div>
-          <div class="detalle">Conectada: <b>\${formatearFecha(data.conectada_en)}</b></div>
+          <div class="detalle">Conectada: <b>\${formatearFecha(data.conectada_en)}</b>\${diasRestantesTxt}</div>
         </div>
         <div class="cuenta-lado">
-          <span class="badge">Conectada</span>
+          <span class="\${claseBadge}">Conectada</span>
           <button class="btn-eliminar" id="btnDesconectarGoogle">Desconectar</button>
         </div>
       </div>
+      <p class="hint" style="margin:14px 0 0;">⏳ El "vence en" es una estimación (Google no da una duración exacta) — mientras tu app siga en modo "Testing" en Google Cloud Console, el token se vence siempre a los 7 días desde que te conectaste. Si en algún momento verificas/publicas la app, esta cuenta ya no aplicaría.</p>
     \`;
 
     document.getElementById("btnDesconectarGoogle").addEventListener("click", async () => {
