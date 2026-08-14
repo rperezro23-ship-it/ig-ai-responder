@@ -4182,17 +4182,19 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
     // inicioDelDiaISO/finDelDiaISO en el cliente), no como fechas "en
     // blanco" — así el servidor no tiene que adivinar en qué zona horaria
     // interpretarlas, evitando que "hoy" se corra un día por la diferencia
-    // horaria entre México y UTC. Filtran por PRIMER MENSAJE del lead
-    // (cuándo empezó la conversación), no por su última actividad, para que
-    // el periodo refleje "leads que llegaron en este rango", aunque hayan
-    // seguido conversando después.
+    // horaria entre México y UTC. Filtran por ACTIVIDAD del lead
+    // (actualizado_en — la última vez que hubo un mensaje real, en
+    // cualquiera de los dos sentidos), no por cuándo escribió por primera
+    // vez — así el periodo refleje "con quién se habló en este rango",
+    // incluyendo continuaciones de conversaciones viejas, no solo leads
+    // completamente nuevos.
     const { desde, hasta } = req.query;
     const desdeMs = desde ? new Date(desde).getTime() : null;
     const hastaMs = hasta ? new Date(hasta).getTime() : null;
 
     const dentroDelPeriodo = (fechaIso) => {
       if (!desdeMs && !hastaMs) return true; // sin filtro, todo cuenta
-      if (!fechaIso) return false; // sin "primer_mensaje_en" no se puede ubicar en ningún periodo
+      if (!fechaIso) return false; // sin "actualizado_en" no se puede ubicar en ningún periodo
       const t = new Date(fechaIso).getTime();
       if (desdeMs && t < desdeMs) return false;
       if (hastaMs && t > hastaMs) return false;
@@ -4201,15 +4203,15 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
 
     // Cada conteo se hace por separado y con su propio manejo de error — así,
     // si alguna columna todavía no existe (ej. no corriste alguna de las
-    // migraciones de etiquetas/monto_pagado/primer_mensaje_en), esa parte en
+    // migraciones de etiquetas/monto_pagado), esa parte en
     // particular se queda en 0 en vez de tumbar TODO el dashboard.
     const contar = async (filtroFn, etiquetaError) => {
       try {
-        let consulta = supabase.from("conversaciones").select("primer_mensaje_en", { count: "exact" });
+        let consulta = supabase.from("conversaciones").select("actualizado_en", { count: "exact" });
         consulta = filtroFn(consulta);
         const { data, error } = await consulta;
         if (error) throw error;
-        return (data || []).filter(c => dentroDelPeriodo(c.primer_mensaje_en)).length;
+        return (data || []).filter(c => dentroDelPeriodo(c.actualizado_en)).length;
       } catch (err) {
         console.error(`❌ Error contando "${etiquetaError}" en el dashboard (¿corriste todas las migraciones?):`, err.message);
         return 0;
@@ -4234,10 +4236,10 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
       if (!nombreEtiqueta) return 0;
       try {
         const objetivo = normalizarParaComparar(nombreEtiqueta);
-        const { data, error } = await supabase.from("conversaciones").select("etiquetas, primer_mensaje_en");
+        const { data, error } = await supabase.from("conversaciones").select("etiquetas, actualizado_en");
         if (error) throw error;
         return (data || []).filter(c =>
-          dentroDelPeriodo(c.primer_mensaje_en) &&
+          dentroDelPeriodo(c.actualizado_en) &&
           Array.isArray(c.etiquetas) && c.etiquetas.some(e => normalizarParaComparar(e) === objetivo)
         ).length;
       } catch (err) {
@@ -4256,11 +4258,11 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
     try {
       const { data: pagos, error: errorPagos } = await supabase
         .from("conversaciones")
-        .select("monto_pagado, primer_mensaje_en")
+        .select("monto_pagado, actualizado_en")
         .gt("monto_pagado", 0);
       if (errorPagos) throw errorPagos;
       cashCollected = (pagos || [])
-        .filter(p => dentroDelPeriodo(p.primer_mensaje_en))
+        .filter(p => dentroDelPeriodo(p.actualizado_en))
         .reduce((suma, p) => suma + (Number(p.monto_pagado) || 0), 0);
     } catch (err) {
       console.error("❌ Error sumando monto_pagado en el dashboard (¿corriste migracion_dashboard.sql?):", err.message);
@@ -9672,7 +9674,7 @@ ${estilosBase()}
       <div class="dash-step step-total">
         <div class="dash-step-left">
           <span class="dash-step-icon">💬</span>
-          <div><div class="dash-step-label">Conversaciones totales</div><div class="dash-step-sub">Todos los leads que le han escrito al bot</div></div>
+          <div><div class="dash-step-label">Conversaciones con actividad</div><div class="dash-step-sub">Leads con quien se habló en el periodo (nuevos o continuando)</div></div>
         </div>
         <div class="dash-step-right">
           <div class="dash-step-value" id="dashTotal">–</div>
