@@ -4519,6 +4519,62 @@ app.post("/chats/marcar-agendo", requireAdminKey, async (req, res) => {
 });
 
 
+// Busca un texto dentro de TODO lo hablado en cualquier conversación (no
+// solo en el nombre de usuario) — usa el registro completo de mensajes
+// (mensajes_chat, sin el recorte que sí tiene "historial"), para que
+// también encuentre coincidencias de hace tiempo, no solo lo reciente.
+// Devuelve, por cada conversación con al menos una coincidencia, el
+// fragmento MÁS RECIENTE que la contiene — así el admin ve de un vistazo
+// por qué esa conversación coincidió con la búsqueda, sin tener que
+// abrirla primero. Limitado a las 1000 coincidencias más recientes en
+// todo el sistema, por rendimiento — de sobra para encontrar algo que se
+// habló hace poco, que es el caso de uso real de este buscador.
+app.get("/chats/buscar-contenido", requireAdminKey, async (req, res) => {
+  try {
+    const q = (req.query.q || "").toString().trim();
+    if (q.length < 2) return res.json({ resultados: [] });
+
+    const { data, error } = await supabase
+      .from("mensajes_chat")
+      .select("sender_id, content, creado_en")
+      .ilike("content", `%${q}%`)
+      .order("creado_en", { ascending: false })
+      .limit(1000);
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    // Se filtran los marcadores internos ([[imagen]]url, [[audio]]url,
+    // [[boton]]texto|url) — no tiene sentido mostrarlos como "fragmento
+    // encontrado" aunque técnicamente contengan el texto buscado (ej. si
+    // alguien busca "http").
+    const filas = (data || []).filter(f =>
+      typeof f.content === "string" &&
+      !f.content.startsWith("[[imagen]]") &&
+      !f.content.startsWith("[[audio]]") &&
+      !f.content.startsWith("[[boton]]")
+    );
+
+    // Nos quedamos con la coincidencia MÁS RECIENTE por cada sender_id —
+    // ya vienen ordenadas de más nueva a más vieja, así que la primera
+    // que se ve de cada uno ya es la correcta.
+    const vistos = new Map();
+    for (const fila of filas) {
+      if (!vistos.has(fila.sender_id)) {
+        vistos.set(fila.sender_id, {
+          sender_id: fila.sender_id,
+          fragmento: fila.content.length > 160 ? fila.content.slice(0, 160) + "…" : fila.content,
+          en: fila.creado_en
+        });
+      }
+    }
+
+    res.json({ resultados: Array.from(vistos.values()) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 // Genera un resumen (edad, cuánto peso quiere perder, obstáculo, y dolores
 // de salud/estética) de UNA conversación en particular — se pide bajo
 // demanda desde el desplegable en /chats. Se GUARDA en Supabase (no solo en
@@ -11917,6 +11973,28 @@ ${estilosBase()}
     align-items:center; justify-content:space-between; flex-shrink:0;
   }
   .chat-list-head-title{ font-family:var(--display); font-weight:600; font-size:15.5px; }
+  .chat-search-bar{
+    position:relative; padding:8px 10px 0; flex-shrink:0;
+  }
+  .chat-search-bar input{
+    width:100%; background:var(--surface-3); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:8px 30px 8px 10px; font-size:13px; font-family:var(--body); outline:none;
+    box-sizing:border-box;
+  }
+  .chat-search-bar input:focus{ border-color:var(--green); }
+  .chat-search-bar input::placeholder{ color:var(--muted-dim); }
+  .chat-search-limpiar{
+    position:absolute; right:20px; top:16px; color:var(--muted); cursor:pointer; font-size:13px;
+    padding:2px 4px;
+  }
+  .chat-search-limpiar:hover{ color:var(--red); }
+  .chat-search-estado{
+    padding:6px 12px 0; font-size:11.5px; color:var(--muted-dim); flex-shrink:0;
+  }
+  .preview-coincidencia{
+    color:#3FC7E8 !important; font-style:italic;
+  }
+  .preview-coincidencia b{ color:#3FC7E8; font-style:normal; }
   .live-tag{
     display:flex; align-items:center; gap:6px; font-family:var(--mono); font-size:11px;
     color:var(--muted-dim); letter-spacing:.03em;
@@ -12222,6 +12300,11 @@ ${estilosBase()}
           <span class="chat-list-head-title">Conversaciones</span>
           <span class="live-tag"><span class="status-dot"></span>en vivo</span>
         </div>
+        <div class="chat-search-bar">
+          <input type="text" id="inputBuscarChat" placeholder="Buscar por usuario o por algo que se haya hablado...">
+          <span id="btnLimpiarBusqueda" class="chat-search-limpiar" title="Limpiar búsqueda" style="display:none;">✕</span>
+        </div>
+        <div id="chatSearchEstado" class="chat-search-estado" style="display:none;"></div>
         <div class="chat-tabs">
           <div class="chat-tab active" id="tabTodas" data-filtro="todas" title="Todas">Todas <span class="count" id="countTodas"></span></div>
           <div class="chat-tab tab-califica" id="tabCalifica" data-filtro="califica" title="Califica">✅ <span class="count" id="countCalifica"></span></div>
@@ -12355,6 +12438,10 @@ ${estilosBase()}
   let filtroActual = "todas";
   let etapasDisponibles = [];
   let etiquetaCompraConfigurada = "";
+  let terminoBusqueda = "";
+  let resultadosBusquedaContenido = new Map(); // sender_id -> { fragmento, en }
+  let buscandoContenido = false;
+  let temporizadorBusqueda = null;
 
   function formatearFecha(iso){
     if(!iso) return "";
@@ -12516,7 +12603,7 @@ ${estilosBase()}
     btn.textContent = "⬇ CSV (" + total + ")";
   }
 
-  function conversacionesFiltradas(){
+  function conversacionesFiltradasPorPestana(){
     if(filtroActual === "handoff") return conversaciones.filter(c => !c.en_ventana_24h);
     if(filtroActual === "califica") return conversaciones.filter(c => c.califica);
     if(filtroActual === "nocalifica") return conversaciones.filter(c => c.no_califica);
@@ -12562,6 +12649,24 @@ ${estilosBase()}
     return conversaciones;
   }
 
+  // El buscador se aplica ENCIMA del filtro de pestaña activo (no en vez
+  // de él) — así se puede, por ejemplo, buscar un nombre dentro de solo
+  // los que ya calificaron. Una conversación coincide si el término
+  // aparece en el username (sin mayúsculas/acentos), O si esa
+  // conversación está entre los resultados de la búsqueda de contenido
+  // (ver buscarContenidoEnServidor).
+  function conversacionesFiltradas(){
+    const base = conversacionesFiltradasPorPestana();
+    if(!terminoBusqueda) return base;
+
+    const terminoNormalizado = normalizarEtiqueta(terminoBusqueda);
+    return base.filter(c => {
+      const coincideUsername = normalizarEtiqueta(nombreMostrar(c)).includes(terminoNormalizado);
+      const coincideContenido = resultadosBusquedaContenido.has(c.sender_id);
+      return coincideUsername || coincideContenido;
+    });
+  }
+
   function renderLista(){
     const cont = document.getElementById("listaChats");
     actualizarContadores();
@@ -12572,11 +12677,17 @@ ${estilosBase()}
       if(filtroActual === "handoff") vacioTxt = '<p class="vacio-lista">🎉 Ninguna conversación en handoff — todas están dentro de la ventana de 24h.</p>';
       if(filtroActual === "califica") vacioTxt = '<p class="vacio-lista">Todavía no hay leads calificados con los criterios actuales.</p>';
       if(filtroActual === "enlace") vacioTxt = '<p class="vacio-lista">Todavía no se le ha mandado el enlace de calificación a nadie.</p>';
+      if(terminoBusqueda) vacioTxt = '<p class="vacio-lista">🔍 Sin resultados para "' + escapar(terminoBusqueda) + '" — ni en nombres de usuario, ni en lo hablado (hasta las últimas 1000 coincidencias del sistema).</p>';
       cont.innerHTML = vacioTxt;
       return;
     }
 
-    cont.innerHTML = lista.map(c => \`
+    cont.innerHTML = lista.map(c => {
+      const coincidenciaContenido = terminoBusqueda ? resultadosBusquedaContenido.get(c.sender_id) : null;
+      const previewHTML = coincidenciaContenido
+        ? \`<div class="preview preview-coincidencia">💬 \${escapar(coincidenciaContenido.fragmento)}</div>\`
+        : \`<div class="preview">\${c.ultimo_role === "assistant" ? "🤖 " : ""}\${escapar(c.ultimo_texto) || "(sin mensajes)"}</div>\`;
+      return \`
       <div class="chat-list-item\${senderSeleccionado === c.sender_id ? " active" : ""}" data-id="\${c.sender_id}">
         \${avatarHTML(c)}
         <div class="chat-list-item-text">
@@ -12590,14 +12701,15 @@ ${estilosBase()}
             \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
             \${c.etapa_nombre ? '<span class="etapa-chip" title="Etapa actual">' + escapar(c.etapa_nombre) + '</span>' : ''}
           </div>
-          <div class="preview">\${c.ultimo_role === "assistant" ? "🤖 " : ""}\${escapar(c.ultimo_texto) || "(sin mensajes)"}</div>
+          \${previewHTML}
           <div class="time">
             \${formatearTiempoRelativo(c.actualizado_en)}
             \${c.en_ventana_24h && formatearCuentaRegresivaHandoff(c.ultimo_mensaje_usuario) ? '<span class="handoff-cuenta-regresiva" title="Tiempo restante antes de entrar en handoff (24h desde su último mensaje)">⏳ ' + formatearCuentaRegresivaHandoff(c.ultimo_mensaje_usuario) + '</span>' : ''}
           </div>
         </div>
       </div>
-    \`).join("");
+    \`;
+    }).join("");
 
     cont.querySelectorAll(".chat-list-item").forEach(el => {
       el.addEventListener("click", () => seleccionarChat(el.dataset.id));
@@ -13392,6 +13504,85 @@ ${estilosBase()}
     document.getElementById("filtroDiasSeguimiento").style.display = (filtroActual === "seguimiento" || filtroActual === "enlace") ? "" : "none";
     document.getElementById("filtroExcluirAgendoWrap").style.display = (filtroActual === "enlace") ? "flex" : "none";
   }
+
+  // --- Buscador (por username y por contenido de lo hablado) ---
+  // Por nombre de usuario se filtra al instante, en el navegador (ya
+  // tenemos la lista cargada). Por contenido hace falta preguntarle al
+  // servidor (revisa TODO lo hablado, no solo la vista previa del último
+  // mensaje que ya tenemos aquí) — eso se hace con un pequeño retraso
+  // (debounce) mientras se escribe, para no mandar una consulta por cada
+  // letra.
+  function actualizarEstadoBusqueda(texto){
+    const el = document.getElementById("chatSearchEstado");
+    if(!texto){
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    el.style.display = "block";
+    el.textContent = texto;
+  }
+
+  async function buscarContenidoEnServidor(termino){
+    buscandoContenido = true;
+    actualizarEstadoBusqueda("🔍 Buscando en lo hablado...");
+
+    const data = await llamarGET("/chats/buscar-contenido?q=" + encodeURIComponent(termino));
+    buscandoContenido = false;
+
+    // Si mientras esperábamos la respuesta el usuario ya cambió lo que
+    // escribió, esta respuesta quedó vieja — se descarta en silencio, para
+    // no pisar un resultado más nuevo con uno que ya no corresponde.
+    if(termino !== terminoBusqueda) return;
+
+    resultadosBusquedaContenido = new Map();
+    (data?.resultados || []).forEach(r => resultadosBusquedaContenido.set(r.sender_id, r));
+
+    const cantidad = resultadosBusquedaContenido.size;
+    actualizarEstadoBusqueda(
+      cantidad > 0
+        ? \`💬 \${cantidad} conversación\${cantidad === 1 ? "" : "es"} con eso en lo hablado\`
+        : "Sin coincidencias en lo hablado (solo se busca por nombre de usuario)"
+    );
+
+    renderLista();
+  }
+
+  document.getElementById("inputBuscarChat").addEventListener("input", (e) => {
+    terminoBusqueda = e.target.value.trim();
+    document.getElementById("btnLimpiarBusqueda").style.display = terminoBusqueda ? "block" : "none";
+
+    clearTimeout(temporizadorBusqueda);
+
+    if(!terminoBusqueda){
+      resultadosBusquedaContenido = new Map();
+      actualizarEstadoBusqueda("");
+      renderLista();
+      return;
+    }
+
+    // El filtro por username se aplica de inmediato (no necesita esperar
+    // al servidor) — la búsqueda por contenido llega un poco después.
+    renderLista();
+
+    if(terminoBusqueda.length < 2){
+      actualizarEstadoBusqueda("Escribe al menos 2 letras para buscar también en lo hablado...");
+      return;
+    }
+
+    temporizadorBusqueda = setTimeout(() => buscarContenidoEnServidor(terminoBusqueda), 400);
+  });
+
+  document.getElementById("btnLimpiarBusqueda").addEventListener("click", () => {
+    const input = document.getElementById("inputBuscarChat");
+    input.value = "";
+    terminoBusqueda = "";
+    resultadosBusquedaContenido = new Map();
+    document.getElementById("btnLimpiarBusqueda").style.display = "none";
+    actualizarEstadoBusqueda("");
+    renderLista();
+    input.focus();
+  });
 
   document.getElementById("tabTodas").addEventListener("click", () => {
     filtroActual = "todas";
