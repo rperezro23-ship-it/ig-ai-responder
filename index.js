@@ -894,6 +894,184 @@ function escaparHtml(texto) {
     .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
+// ---------------------------------------------------------------
+// Detección de cancelaciones / cambios de fecha hechos DIRECTO en
+// Google Calendar (no desde el bot) — avisa por correo al coach y al
+// lead en cualquiera de los dos casos.
+// ---------------------------------------------------------------
+
+// Arma y manda el par de correos (coach + lead) para un evento cancelado
+// o reagendado. "tipo" es "cancelada" o "cambio_fecha". Sigue exactamente
+// el mismo estilo/orden que el correo de "nueva reserva" ya existente,
+// para que se sientan parte del mismo sistema.
+async function avisarCambioDeReserva(reserva, tipo, fechaAnteriorTexto, horaAnteriorTexto) {
+  const zona = configActual.agenda_zona_horaria || "America/Mexico_City";
+  const inicio = new Date(reserva.inicio);
+  const fechaTexto = inicio.toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: zona });
+  const horaTexto = inicio.toLocaleTimeString("es-MX", { hour: "numeric", minute: "2-digit", timeZone: zona });
+  const nombreLead = reserva.nombre || "el lead";
+
+  const asuntoCoach = tipo === "cancelada"
+    ? `❌ Se canceló la llamada con ${nombreLead}`
+    : `📅 Se cambió la fecha de la llamada con ${nombreLead}`;
+
+  const cuerpoCoach = tipo === "cancelada"
+    ? `<b>${escaparHtml(nombreLead)}</b> canceló (o se canceló) su llamada directamente en Google Calendar.<br><br>` +
+      `<b>Estaba agendada para:</b> ${escaparHtml(fechaTexto)}, ${escaparHtml(horaTexto)}<br>` +
+      (reserva.email ? `<b>Correo:</b> ${escaparHtml(reserva.email)}<br>` : "")
+    : `La llamada con <b>${escaparHtml(nombreLead)}</b> cambió de fecha directamente en Google Calendar.<br><br>` +
+      `<b>Antes:</b> ${escaparHtml(fechaAnteriorTexto)}, ${escaparHtml(horaAnteriorTexto)}<br>` +
+      `<b>Ahora:</b> ${escaparHtml(fechaTexto)}, ${escaparHtml(horaTexto)}<br>` +
+      (reserva.email ? `<b>Correo:</b> ${escaparHtml(reserva.email)}<br>` : "");
+
+  try {
+    const cuentaConectada = await obtenerCuentaGoogleConectada();
+    const correosConfigurados = (configActual.agenda_correos_notificacion || "")
+      .split(",").map(c => c.trim()).filter(Boolean);
+    const destinatarioCoach = correosConfigurados.length > 0 ? correosConfigurados.join(", ") : cuentaConectada?.email;
+    if (destinatarioCoach) {
+      await enviarCorreoGmail({ destinatario: destinatarioCoach, asunto: asuntoCoach, cuerpo: cuerpoCoach, html: true });
+    }
+  } catch (err) {
+    console.error(`⚠️ No se pudo mandar el aviso de "${tipo}" al coach (reserva #${reserva.id}):`, err.response?.data || err.message);
+  }
+
+  if (!reserva.email) return; // sin correo del lead, no hay a quién más avisarle
+
+  const asuntoLead = tipo === "cancelada"
+    ? "Tu llamada fue cancelada"
+    : "Cambio de fecha en tu llamada agendada";
+
+  const cuerpoLead = tipo === "cancelada"
+    ? `Hola${reserva.nombre ? " " + escaparHtml(reserva.nombre) : ""},<br><br>` +
+      `Tu llamada que estaba agendada para el <b>${escaparHtml(fechaTexto)}</b> a las <b>${escaparHtml(horaTexto)}</b> fue cancelada.<br><br>` +
+      `Si fue un error o quieres agendar de nuevo, contáctanos para reprogramarla.`
+    : `Hola${reserva.nombre ? " " + escaparHtml(reserva.nombre) : ""},<br><br>` +
+      `Tu llamada cambió de fecha:<br><br>` +
+      `<b>Antes:</b> ${escaparHtml(fechaAnteriorTexto)}, ${escaparHtml(horaAnteriorTexto)}<br>` +
+      `<b>Ahora:</b> ${escaparHtml(fechaTexto)}, ${escaparHtml(horaTexto)}<br><br>` +
+      `Si esta nueva fecha no te funciona, contáctanos para reprogramarla.`;
+
+  try {
+    await enviarCorreoGmail({ destinatario: reserva.email, asunto: asuntoLead, cuerpo: cuerpoLead, html: true });
+  } catch (err) {
+    console.error(`⚠️ No se pudo mandar el aviso de "${tipo}" al lead (reserva #${reserva.id}):`, err.response?.data || err.message);
+  }
+}
+
+// El corazón de la detección: revisa cada reserva futura contra lo que
+// diga Google Calendar EN ESTE MOMENTO, y avisa si encuentra una
+// cancelación o un cambio de fecha. La llaman tanto el webhook en tiempo
+// real como el respaldo periódico — así ambos caminos usan exactamente
+// la misma lógica, sin duplicar código ni arriesgarse a que se
+// comporten distinto.
+async function revisarCambiosEnReservas() {
+  const accessToken = await obtenerAccessTokenGoogleValido();
+  if (!accessToken) return { revisadas: 0, canceladas: 0, cambiadas: 0, error: "Sin cuenta de Google conectada" };
+
+  const ahora = new Date();
+  const { data: reservas, error } = await supabase
+    .from("reservas")
+    .select("*")
+    .not("google_event_id", "is", null)
+    .eq("cancelada", false)
+    .gte("inicio", ahora.toISOString())
+    .order("inicio", { ascending: true })
+    .limit(200);
+
+  if (error) {
+    console.error("❌ Error consultando reservas para revisar cambios en Calendar:", error.message);
+    return { revisadas: 0, canceladas: 0, cambiadas: 0, error: error.message };
+  }
+
+  let canceladas = 0, cambiadas = 0;
+
+  for (const reserva of (reservas || [])) {
+    try {
+      const resp = await axios.get(
+        `https://www.googleapis.com/calendar/v3/calendars/primary/events/${reserva.google_event_id}`,
+        { headers: { Authorization: `Bearer ${accessToken}` }, validateStatus: s => s === 200 || s === 404 || s === 410 }
+      );
+
+      // Un evento borrado del todo (no solo cancelado) responde 404/410 —
+      // se trata igual que una cancelación.
+      const fueCancelado = resp.status === 404 || resp.status === 410 || resp.data?.status === "cancelled";
+
+      if (fueCancelado) {
+        await supabase.from("reservas").update({ cancelada: true }).eq("id", reserva.id);
+        await avisarCambioDeReserva(reserva, "cancelada");
+        canceladas++;
+        continue;
+      }
+
+      const nuevoInicioIso = resp.data?.start?.dateTime;
+      if (nuevoInicioIso && Math.abs(new Date(nuevoInicioIso).getTime() - new Date(reserva.inicio).getTime()) > 60000) {
+        const zona = configActual.agenda_zona_horaria || "America/Mexico_City";
+        const inicioAnterior = new Date(reserva.inicio);
+        const fechaAnteriorTexto = inicioAnterior.toLocaleDateString("es-MX", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: zona });
+        const horaAnteriorTexto = inicioAnterior.toLocaleTimeString("es-MX", { hour: "numeric", minute: "2-digit", timeZone: zona });
+
+        const duracionMin = configActual.agenda_duracion_minutos || 30;
+        const nuevoInicio = new Date(nuevoInicioIso);
+        const nuevoFin = new Date(nuevoInicio.getTime() + duracionMin * 60000);
+
+        const reservaActualizada = { ...reserva, inicio: nuevoInicio.toISOString() };
+        await supabase.from("reservas").update({ inicio: nuevoInicio.toISOString(), fin: nuevoFin.toISOString() }).eq("id", reserva.id);
+        await avisarCambioDeReserva(reservaActualizada, "cambio_fecha", fechaAnteriorTexto, horaAnteriorTexto);
+        cambiadas++;
+      }
+    } catch (err) {
+      console.error(`❌ Error revisando la reserva #${reserva.id} contra Google Calendar:`, err.response?.data || err.message);
+    }
+  }
+
+  return { revisadas: (reservas || []).length, canceladas, cambiadas };
+}
+
+// Registra (o renueva) el canal de avisos en tiempo real de Google
+// Calendar ("push notifications") — le pide a Google que le avise a
+// nuestro servidor apenas algo cambie, en vez de solo depender de la
+// revisión periódica. Se guarda un token propio (secreto, generado aquí)
+// junto con el canal, para poder confirmar que un aviso que llegue de
+// verdad viene de Google y no de cualquiera que le escriba a esta URL.
+async function registrarCanalGoogleCalendarWatch(baseUrl) {
+  const accessToken = await obtenerAccessTokenGoogleValido();
+  if (!accessToken) return null;
+
+  const canalId = crypto.randomUUID();
+  const canalToken = crypto.randomBytes(24).toString("hex");
+
+  try {
+    const resp = await axios.post(
+      "https://www.googleapis.com/calendar/v3/calendars/primary/events/watch",
+      {
+        id: canalId,
+        type: "web_hook",
+        address: `${baseUrl}/webhook/google-calendar`,
+        token: canalToken
+      },
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+
+    const cuentaActual = await obtenerCuentaGoogleConectada();
+    await guardarCuentaGoogleConectada({
+      ...cuentaActual,
+      canal_id: canalId,
+      canal_resource_id: resp.data.resourceId,
+      canal_token: canalToken,
+      canal_expira_en: resp.data.expiration ? new Date(Number(resp.data.expiration)).toISOString() : null
+    });
+
+    console.log(`🔔 Canal de avisos en tiempo real de Google Calendar registrado (vence: ${resp.data.expiration ? new Date(Number(resp.data.expiration)).toISOString() : "?"})`);
+    return resp.data;
+  } catch (err) {
+    // No es crítico — el respaldo periódico sigue funcionando igual sin
+    // esto, así que solo se registra el error, nunca se rompe nada más.
+    console.error("⚠️ No se pudo registrar el canal de avisos en tiempo real de Google Calendar:", err.response?.data || err.message);
+    return null;
+  }
+}
+
 // El nombre de la función se dejó igual a propósito (aunque ya no usa
 // Gmail) — así los 5 lugares del código que ya la llaman (recordatorios,
 // avisos de "no califica", notificación al agendar) no necesitan ningún
@@ -3877,6 +4055,65 @@ app.get("/cron/recordatorios", async (req, res) => {
   }
 });
 
+// Recibe el "ping" de Google Calendar en tiempo real cuando algo cambia
+// (cancelación, cambio de fecha, etc.) — Google NO manda qué cambió, solo
+// avisa que hay que ir a revisar, así que esto dispara la misma revisión
+// que usa el respaldo periódico. Se verifica el token del canal para
+// confirmar que el aviso de verdad viene de Google.
+app.post("/webhook/google-calendar", async (req, res) => {
+  try {
+    const tokenRecibido = req.get("X-Goog-Channel-Token");
+    const estadoRecurso = req.get("X-Goog-Resource-State");
+
+    const cuenta = await obtenerCuentaGoogleConectada();
+    if (!cuenta?.canal_token || tokenRecibido !== cuenta.canal_token) {
+      console.error("⚠️ Webhook de Google Calendar recibido con un token que no coincide — se ignora.");
+      return res.status(200).send("ignorado"); // 200 igual, para que Google no reintente sin sentido
+    }
+
+    // "sync" es el primer aviso, de confirmación del canal recién creado —
+    // no representa ningún cambio real, así que no dispara ninguna revisión.
+    if (estadoRecurso && estadoRecurso !== "sync") {
+      revisarCambiosEnReservas().catch(err =>
+        console.error("❌ Error revisando cambios tras el webhook de Google Calendar:", err.message)
+      );
+    }
+
+    res.status(200).send("ok");
+  } catch (err) {
+    console.error("❌ Error en /webhook/google-calendar:", err.message);
+    res.status(200).send("error manejado"); // 200 de todas formas, Google no necesita saber más
+  }
+});
+
+// Respaldo periódico (además del aviso en tiempo real de arriba) — revisa
+// cancelaciones/cambios de fecha por si algún aviso en tiempo real se
+// llegó a perder por cualquier motivo, y de paso renueva el canal de
+// avisos antes de que venza (Google los da por tiempo limitado). Pensado
+// para llamarse cada 3-4 horas desde un cron externo (cron-job.org).
+app.get("/cron/revisar-calendar", async (req, res) => {
+  try {
+    const resultado = await revisarCambiosEnReservas();
+
+    // Renovación del canal: si no hay uno registrado, o vence en menos de
+    // 24 horas, se registra uno nuevo — así nunca se deja que expire sin
+    // reemplazo, sin necesitar un cron aparte solo para esto.
+    let canalRenovado = false;
+    const cuenta = await obtenerCuentaGoogleConectada();
+    const vencePronto = !cuenta?.canal_expira_en || (new Date(cuenta.canal_expira_en).getTime() - Date.now()) < 24 * 60 * 60 * 1000;
+    if (cuenta && vencePronto) {
+      const baseUrl = process.env.RENDER_EXTERNAL_URL || `${req.protocol}://${req.get("host")}`;
+      const resultadoCanal = await registrarCanalGoogleCalendarWatch(baseUrl);
+      canalRenovado = !!resultadoCanal;
+    }
+
+    res.json({ status: "ok", ...resultado, canal_renovado: canalRenovado, timestamp: new Date().toISOString() });
+  } catch (err) {
+    console.error("❌ Error en /cron/revisar-calendar:", err.message);
+    res.status(500).json({ status: "error", error: err.message });
+  }
+});
+
 app.get("/privacy", (req, res) => {
   res.type("html").send(`
 <!DOCTYPE html>
@@ -5055,6 +5292,15 @@ app.get("/oauth/google/callback", async (req, res) => {
       conectada_en: new Date().toISOString()
     });
     googleAccessTokenCache = null; // se descarta cualquier token viejo en memoria
+
+    // Se registra el canal de avisos en tiempo real justo aquí — cada
+    // reconexión (recuerda: cada 7 días, mientras la app siga en modo
+    // "Testing") de todas formas requiere volver a registrarlo, así que
+    // se aprovecha este mismo momento en vez de necesitar un paso aparte.
+    // No es crítico si falla — el respaldo periódico sigue cubriendo todo
+    // de todas formas.
+    const baseUrl = process.env.RENDER_EXTERNAL_URL || `${req.protocol}://${req.get("host")}`;
+    registrarCanalGoogleCalendarWatch(baseUrl).catch(() => {}); // el error ya se loguea adentro
 
     res.redirect("/calendario");
   } catch (err) {
