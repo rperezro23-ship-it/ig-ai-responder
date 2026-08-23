@@ -4041,6 +4041,41 @@ app.get("/cron/seguimientos", async (req, res) => {
   }
 });
 
+// Como el ping externo de Roberto le pega a /cron/recordatorios cada 5
+// minutos (para evitar que Render lo duerma por inactividad, en el plan
+// gratis), la revisión de cancelaciones/cambios de fecha se monta AQUÍ
+// MISMO en vez de necesitar un ping nuevo aparte — pero con un límite
+// propio, para no llamar a la API de Google cada 5 minutos sin
+// necesidad. Se guarda la fecha de la última revisión real en
+// app_config, y solo se ejecuta de nuevo si ya pasaron al menos 3 horas
+// desde la anterior — así el ping puede seguir llegando cada 5 minutos
+// sin que eso dispare la revisión con esa misma frecuencia.
+const HORAS_ENTRE_REVISIONES_CALENDAR = 3;
+
+async function revisarCambiosEnReservasConLimite(baseUrl) {
+  const { data } = await supabase.from("app_config").select("valor").eq("key", "ultima_revision_calendar").maybeSingle();
+  const ultimaRevision = data?.valor?.en ? new Date(data.valor.en) : null;
+
+  const yaToca = !ultimaRevision || (Date.now() - ultimaRevision.getTime()) >= HORAS_ENTRE_REVISIONES_CALENDAR * 60 * 60 * 1000;
+  if (!yaToca) return { ejecutado: false };
+
+  const resultado = await revisarCambiosEnReservas();
+
+  await supabase.from("app_config").upsert({ key: "ultima_revision_calendar", valor: { en: new Date().toISOString() } });
+
+  // Aprovecha el mismo momento para renovar el canal de avisos en tiempo
+  // real si está por vencer (menos de 24h) — igual que hace
+  // /cron/revisar-calendar, para no tener esa lógica duplicada en dos
+  // lugares con posibilidad de que se desincronicen.
+  const cuenta = await obtenerCuentaGoogleConectada();
+  const vencePronto = !cuenta?.canal_expira_en || (new Date(cuenta.canal_expira_en).getTime() - Date.now()) < 24 * 60 * 60 * 1000;
+  if (cuenta && vencePronto) {
+    await registrarCanalGoogleCalendarWatch(baseUrl).catch(() => {}); // el error ya se loguea adentro
+  }
+
+  return { ejecutado: true, ...resultado };
+}
+
 // Endpoint aparte para los recordatorios, por si en algún momento se
 // quiere configurar un cron externo separado con su propio horario (por
 // ejemplo, cada 15 minutos en vez de cada 5) — no es obligatorio usarlo,
@@ -4048,7 +4083,14 @@ app.get("/cron/seguimientos", async (req, res) => {
 app.get("/cron/recordatorios", async (req, res) => {
   try {
     const resultado = await procesarRecordatoriosPendientes();
-    res.json({ status: "ok", ...resultado, timestamp: new Date().toISOString() });
+
+    const baseUrl = process.env.RENDER_EXTERNAL_URL || `${req.protocol}://${req.get("host")}`;
+    const resultadoCalendar = await revisarCambiosEnReservasConLimite(baseUrl).catch(err => {
+      console.error("❌ Error en la revisión de respaldo del Calendar (montada en /cron/recordatorios):", err.message);
+      return { ejecutado: false, error: err.message };
+    });
+
+    res.json({ status: "ok", ...resultado, revision_calendar: resultadoCalendar, timestamp: new Date().toISOString() });
   } catch (err) {
     console.error("❌ Error en /cron/recordatorios:", err.message);
     res.status(500).json({ status: "error", error: err.message });
