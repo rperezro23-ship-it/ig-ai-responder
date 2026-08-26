@@ -7101,8 +7101,22 @@ async function cargarConfigDesdeDB() {
 // activo, se guarda solo en su propia fila, sin afectar el comportamiento
 // en vivo del bot todavía.
 async function guardarConfigDB(nuevaConfig, agenteId) {
-  const idObjetivo = agenteId || agenteActivoId;
+  // Defensa contra que "agenteId" llegue como el TEXTO "null" o
+  // "undefined" (en vez del valor real null/undefined) desde algún
+  // llamado — un texto no vacío siempre es "verdadero" en JavaScript, así
+  // que sin este chequeo se colaba como si fuera un id válido, y Postgres
+  // lo rechazaba con "invalid input syntax for type bigint" al intentar
+  // usarlo en la consulta — dejando la configuración SIN guardarse, en
+  // silencio, cada vez que esto pasaba.
+  if (agenteId === "null" || agenteId === "undefined" || agenteId === "") agenteId = null;
+  const idNumerico = (agenteId !== null && agenteId !== undefined) ? Number(agenteId) : null;
+  const idObjetivo = (idNumerico !== null && !Number.isNaN(idNumerico)) ? idNumerico : agenteActivoId;
   const esElActivo = idObjetivo === agenteActivoId;
+
+  if (idObjetivo === null || idObjetivo === undefined) {
+    console.error("❌ Error guardando configuración: no hay ningún agente activo ni ningún agente indicado (agenteActivoId también está vacío) — esto no debería pasar salvo justo al arrancar el servidor.");
+    return null;
+  }
 
   const { data: agenteExistente, error: errorLeyendo } = await supabase
     .from("agentes")
@@ -7111,7 +7125,7 @@ async function guardarConfigDB(nuevaConfig, agenteId) {
     .maybeSingle();
 
   if (errorLeyendo || !agenteExistente) {
-    console.error("❌ Error guardando configuración: no se encontró el agente indicado.", errorLeyendo?.message || "");
+    console.error(`❌ Error guardando configuración: no se encontró el agente indicado (id buscado: ${JSON.stringify(idObjetivo)}, agenteId recibido: ${JSON.stringify(agenteId)}, agenteActivoId: ${JSON.stringify(agenteActivoId)}).`, errorLeyendo?.message || "");
     return esElActivo ? configActual : null;
   }
 
