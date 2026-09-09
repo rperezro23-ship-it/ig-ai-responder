@@ -3266,10 +3266,15 @@ async function procesarBuffer(senderId) {
 
     // Si la transición que coincidió pide verificación con Calendly (el
     // lead dijo algo como "ya agendé"), se consulta EN VIVO si de verdad
-    // existe esa reserva antes de creerle — en vez de aplicar la transición
-    // a ciegas solo porque lo dijo. Si no se encuentra, se cancela la
-    // transición (se sigue en la misma etapa) y se le pide al modelo, más
-    // abajo, que pida confirmación del día y la hora en vez de asumir nada.
+    // existe esa reserva — pero YA NO se usa para bloquear la entrada a la
+    // etapa destino. La transición se aplica igual (línea ~3306 más abajo),
+    // así el lead entra SIEMPRE a la etapa (ej. "Agendo") en cuanto la IA
+    // detecta que dijo que ya agendó; la verificación solo decide qué nota
+    // se le agrega al prompt de esa etapa ya con el lead adentro: si se
+    // encontró la reserva, se le confirma día y hora; si no, se le pide que
+    // confirme día y hora en vez de asumir nada — y es el prompt propio de
+    // la etapa destino el que se encarga de esa conversación, no el prompt
+    // en el que estaba antes de la transición.
     let eventoCalendlyConfirmado = null;
     let timezoneInvitadoCalendly = null;
     let pedirConfirmacionCalendly = false;
@@ -3280,15 +3285,14 @@ async function procesarBuffer(senderId) {
         eventoCalendlyConfirmado = resultado.event;
         timezoneInvitadoCalendly = resultado.timezoneInvitado;
       } else {
-        console.log(`❌ No se encontró ninguna reserva en Calendly para ${senderId} (@${conv.username || "sin username"}): ${resultado.motivo}`);
-        transicion = null; // no se aplica el cambio de etapa todavía
+        console.log(`❌ No se encontró ninguna reserva en Calendly para ${senderId} (@${conv.username || "sin username"}): ${resultado.motivo} — se entra a la etapa igual, la nota se agrega al prompt de destino.`);
         pedirConfirmacionCalendly = true;
       }
     }
 
     // Mismo mecanismo que arriba, pero contra nuestra propia tabla de
     // reservas (el calendario propio en /agendar) — para cuando ya no se
-    // usa Calendly en absoluto.
+    // usa Calendly en absoluto. Tampoco bloquea la transición.
     let eventoReservaPropiaConfirmado = null;
     let pedirConfirmacionReservaPropia = false;
     if (transicion?.verificar_reserva_propia) {
@@ -3297,8 +3301,7 @@ async function procesarBuffer(senderId) {
         console.log(`✅ Reserva propia confirmada para ${senderId} (@${conv.username}): ${resultado.reserva.inicio}${resultado.viaFecha ? " — confirmado por fecha/hora, no por username" : ""}`);
         eventoReservaPropiaConfirmado = resultado.reserva;
       } else {
-        console.log(`❌ No se encontró ninguna reserva propia para ${senderId} (@${conv.username || "sin username"}): ${resultado.motivo}`);
-        transicion = null;
+        console.log(`❌ No se encontró ninguna reserva propia para ${senderId} (@${conv.username || "sin username"}): ${resultado.motivo} — se entra a la etapa igual, la nota se agrega al prompt de destino.`);
         pedirConfirmacionReservaPropia = true;
       }
     }
