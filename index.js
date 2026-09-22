@@ -2353,8 +2353,14 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
       for (const sub of subpartes) {
         if (sub.tipo === "boton") {
           console.log(`🔘 Enviando botón con enlace a ${senderId}: "${sub.texto}" -> ${sub.url}`);
-          await agregarAlHistorialDB(senderId, "assistant", `[[boton]]${sub.texto}|${sub.url}`);
+          // Se manda PRIMERO y se registra en el historial recién si Instagram
+          // confirmó el envío — así el historial nunca dice "enviado" cuando en
+          // realidad Instagram rechazó el mensaje (ventana de 24h vencida,
+          // usuario bloqueado, etc.). Antes se guardaba en el historial antes
+          // de intentar el envío real, lo que hacía que /chats mostrara el
+          // mensaje como mandado aunque nunca hubiera llegado a Instagram.
           await conReintento(() => enviarBotonInstagram(senderId, sub.url, sub.texto));
+          await agregarAlHistorialDB(senderId, "assistant", `[[boton]]${sub.texto}|${sub.url}`);
           // Se agrega la URL a "textosEnviados" aunque no se haya mandado
           // como texto — esto es justo lo que usan más abajo (y en otros
           // lugares del código) para detectar si el enlace de calificación
@@ -2376,8 +2382,12 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
 
         for (let idx = 0; idx < fragmentos.length; idx++) {
           const fragmento = fragmentos[idx];
+          // Mismo orden que arriba: primero se intenta el envío real (con un
+          // reintento, igual que audio/foto/archivo/botón) y solo si Instagram
+          // lo confirma se guarda en el historial — así "enviado" en /chats
+          // siempre refleja lo que de verdad llegó al lead.
+          await conReintento(() => enviarMensajeInstagram(senderId, fragmento));
           await agregarAlHistorialDB(senderId, "assistant", fragmento);
-          await enviarMensajeInstagram(senderId, fragmento);
           textosEnviados.push(fragmento);
           algoSeMando = true;
           if (idx < fragmentos.length - 1) await sleep(900); // pausa breve y natural entre burbujas divididas
@@ -2399,16 +2409,16 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
 
     if (parte.tipo === "audio") {
       console.log(`🎤 Enviando audio pregrabado "${parte.clave}" a ${senderId}`);
-      await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${item.url}`);
       await conReintento(() => enviarAudioInstagram(senderId, item.url));
+      await agregarAlHistorialDB(senderId, "assistant", `[[audio]]${item.url}`);
     } else if (parte.tipo === "archivo") {
       console.log(`📄 Enviando archivo pregrabado "${parte.clave}" a ${senderId} (como adjunto, no como enlace)`);
-      await agregarAlHistorialDB(senderId, "assistant", `[[archivo]]${item.url}`);
       await conReintento(() => enviarArchivoInstagram(senderId, item.url));
+      await agregarAlHistorialDB(senderId, "assistant", `[[archivo]]${item.url}`);
     } else {
       console.log(`📷 Enviando foto pregrabada "${parte.clave}" a ${senderId}`);
-      await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${item.url}`);
       await conReintento(() => enviarImagenInstagram(senderId, item.url));
+      await agregarAlHistorialDB(senderId, "assistant", `[[imagen]]${item.url}`);
     }
     algoSeMando = true;
   }
@@ -3689,7 +3699,7 @@ async function procesarBuffer(senderId) {
       }
     }
   } catch (err) {
-    console.error(`❌ Error al responder:`, err.response?.data || err.message);
+    console.error(`❌ Error al responder a ${senderId}:`, err.response?.data || err.message);
   }
 
   buffer.enProceso = false;
@@ -3840,8 +3850,8 @@ app.post("/webhook", async (req, res) => {
             console.warn(`⚠️ No se pudo transcribir el audio de ${senderId} — se le avisa y se le pide que lo mande de nuevo.`);
             const listaMensajesError = (configActual.mensajes_error_audio?.length > 0) ? configActual.mensajes_error_audio : MENSAJES_ERROR_AUDIO_DEFECTO;
             const mensajeError = listaMensajesError[Math.floor(Math.random() * listaMensajesError.length)];
+            await conReintento(() => enviarMensajeInstagram(senderId, mensajeError));
             await agregarAlHistorialDB(senderId, "assistant", mensajeError);
-            await enviarMensajeInstagram(senderId, mensajeError);
             continue;
           }
 
