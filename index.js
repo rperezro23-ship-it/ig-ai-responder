@@ -1843,20 +1843,65 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
+// Le pide a Meta el control del hilo con este lead — hace falta cuando OTRA
+// app conectada a la misma cuenta de Instagram (ej. ManyChat, si fue la que
+// abrió el chat a partir de un comentario) todavía lo tiene. Instagram (igual
+// que Messenger) solo deja que UNA app a la vez escriba en cada conversación
+// — esto es el "Handover Protocol" de Meta. Si el envío normal falla con el
+// error "not the thread owner", se intenta esto una vez y se reintenta el
+// envío; si falla incluso esto, el error original es el que se propaga (es
+// más útil para diagnosticar que el error de "no se pudo tomar el control").
+async function tomarControlDelHilo(cuenta, senderId) {
+  try {
+    await axios.post(
+      `https://graph.instagram.com/v25.0/${cuenta.ig_id}/take_thread_control`,
+      { recipient: { id: senderId } },
+      { headers: { "Authorization": `Bearer ${cuenta.access_token}` } }
+    );
+    console.log(`🔓 Se tomó el control del hilo con ${senderId} (lo tenía otra app conectada, ej. ManyChat).`);
+    return true;
+  } catch (err) {
+    console.error(`❌ No se pudo tomar el control del hilo con ${senderId}:`, err.response?.data || err.message);
+    return false;
+  }
+}
+
+// Punto único desde el que TODOS los envíos (texto, audio, foto, archivo,
+// botón) llaman a "POST .../messages" — centraliza el reintento automático
+// de "tomar el control del hilo" descrito arriba, para no repetir esa lógica
+// en cada función de envío.
+async function postMensajeInstagram(cuenta, payload) {
+  try {
+    return await axios.post(
+      `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
+      payload,
+      { headers: { "Authorization": `Bearer ${cuenta.access_token}` } }
+    );
+  } catch (err) {
+    const mensajeError = err.response?.data?.error?.message || "";
+    if (/not the thread owner/i.test(mensajeError) && payload.recipient?.id) {
+      console.warn(`⚠️ No se tiene el control del hilo con ${payload.recipient.id} (posible conflicto con otra app, ej. ManyChat) — se intenta tomar el control y reintentar.`);
+      const tomado = await tomarControlDelHilo(cuenta, payload.recipient.id);
+      if (tomado) {
+        return await axios.post(
+          `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
+          payload,
+          { headers: { "Authorization": `Bearer ${cuenta.access_token}` } }
+        );
+      }
+    }
+    throw err;
+  }
+}
+
 async function enviarMensajeInstagram(senderId, texto) {
   const cuenta = await obtenerCuentaActiva();
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
-  const resp = await axios.post(
-    `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
-    {
-      recipient: { id: senderId },
-      message:   { text: texto }
-    },
-    {
-      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
-    }
-  );
+  const resp = await postMensajeInstagram(cuenta, {
+    recipient: { id: senderId },
+    message:   { text: texto }
+  });
   registrarMidBot(resp.data?.message_id);
 }
 
@@ -1895,21 +1940,15 @@ async function enviarAudioInstagram(senderId, urlAudio) {
   const cuenta = await obtenerCuentaActiva();
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
-  const resp = await axios.post(
-    `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
-    {
-      recipient: { id: senderId },
-      message: {
-        attachment: {
-          type: "audio",
-          payload: { url: urlAudio }
-        }
+  const resp = await postMensajeInstagram(cuenta, {
+    recipient: { id: senderId },
+    message: {
+      attachment: {
+        type: "audio",
+        payload: { url: urlAudio }
       }
-    },
-    {
-      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
     }
-  );
+  });
   registrarMidBot(resp.data?.message_id);
 }
 
@@ -1920,21 +1959,15 @@ async function enviarImagenInstagram(senderId, urlImagen) {
   const cuenta = await obtenerCuentaActiva();
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
-  const resp = await axios.post(
-    `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
-    {
-      recipient: { id: senderId },
-      message: {
-        attachment: {
-          type: "image",
-          payload: { url: urlImagen }
-        }
+  const resp = await postMensajeInstagram(cuenta, {
+    recipient: { id: senderId },
+    message: {
+      attachment: {
+        type: "image",
+        payload: { url: urlImagen }
       }
-    },
-    {
-      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
     }
-  );
+  });
   registrarMidBot(resp.data?.message_id);
 }
 
@@ -1948,21 +1981,15 @@ async function enviarArchivoInstagram(senderId, urlArchivo) {
   const cuenta = await obtenerCuentaActiva();
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
-  const resp = await axios.post(
-    `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
-    {
-      recipient: { id: senderId },
-      message: {
-        attachment: {
-          type: "file",
-          payload: { url: urlArchivo }
-        }
+  const resp = await postMensajeInstagram(cuenta, {
+    recipient: { id: senderId },
+    message: {
+      attachment: {
+        type: "file",
+        payload: { url: urlArchivo }
       }
-    },
-    {
-      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
     }
-  );
+  });
   registrarMidBot(resp.data?.message_id);
 }
 
@@ -1984,27 +2011,21 @@ async function enviarBotonInstagram(senderId, urlBoton, textoBoton) {
   // simplemente repetir el título del botón.
   const textoArriba = (configActual.boton_texto_intro || "👇 Toca el botón debajo 👇").slice(0, 640);
 
-  const resp = await axios.post(
-    `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
-    {
-      recipient: { id: senderId },
-      message: {
-        attachment: {
-          type: "template",
-          payload: {
-            template_type: "button",
-            text: textoArriba,
-            buttons: [
-              { type: "web_url", url: urlBoton, title: tituloRecortado }
-            ]
-          }
+  const resp = await postMensajeInstagram(cuenta, {
+    recipient: { id: senderId },
+    message: {
+      attachment: {
+        type: "template",
+        payload: {
+          template_type: "button",
+          text: textoArriba,
+          buttons: [
+            { type: "web_url", url: urlBoton, title: tituloRecortado }
+          ]
         }
       }
-    },
-    {
-      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
     }
-  );
+  });
   registrarMidBot(resp.data?.message_id);
 }
 
