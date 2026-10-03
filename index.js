@@ -3163,6 +3163,109 @@ function sanitizarHistorialParaIA(historial) {
   });
 }
 
+// Memoria de "lead que regresa": si un lead que ya había conversado vuelve
+// después de un rato (ej. comenta otro video y pide otro lead magnet), la
+// IA recibe un resumen de lo que ya sabe de él y de dónde se quedó, para
+// continuar en ese punto en vez de empezar de cero y volver a preguntarle
+// la edad, el peso, etc. Se activa cuando pasaron al menos
+// "regreso_horas" (config, por defecto 6) desde su último mensaje, y se
+// puede apagar con memoria_lead_regreso: false en la config.
+const REGRESO_HORAS_DEFAULT = 6;
+
+function textoTiempoTranscurrido(ms) {
+  const horas = ms / 3600000;
+  if (horas < 24) return `${Math.max(1, Math.round(horas))} hora(s)`;
+  return `${Math.round(horas / 24)} día(s)`;
+}
+
+// Regenera el resumen del lead (mismo análisis que usa /chats/resumen) y lo
+// guarda — así, al regresar, la memoria incluye también lo que dijo la
+// última vez, no solo lo de la primera.
+async function generarYGuardarResumenLead(senderId) {
+  const { data: mensajes, error } = await supabase
+    .from("mensajes_chat")
+    .select("role, content")
+    .eq("sender_id", senderId)
+    .order("creado_en", { ascending: false })
+    .limit(200);
+  if (error || !mensajes?.some(m => m.role === "user")) return null;
+
+  // Se piden los 200 más RECIENTES (orden descendente) y luego se voltean
+  // para que la transcripción quede en orden cronológico.
+  const transcripcion = [...mensajes].reverse()
+    .filter(m => typeof m.content === "string" && !m.content.startsWith("[[imagen]]") && !m.content.startsWith("[[audio]]"))
+    .map(m => `${m.role === "user" ? "Cliente" : "Asistente"}: ${m.content}`)
+    .join("\n");
+  if (!transcripcion.trim()) return null;
+
+  const resumen = await analizarDoloresYObstaculos(transcripcion);
+  await guardarConversacion(senderId, { resumen_lead: resumen, resumen_lead_generado_en: new Date().toISOString() });
+  return resumen;
+}
+
+async function obtenerMemoriaLeadQueRegresa(senderId, conv, etapaConfig) {
+  if (configActual.memoria_lead_regreso === false) return "";
+
+  try {
+    // Todavía no se ha guardado el mensaje actual en mensajes_chat (eso pasa
+    // al final del turno), así que el último "user" aquí es el anterior.
+    const { data: ultimo, error } = await supabase
+      .from("mensajes_chat")
+      .select("creado_en")
+      .eq("sender_id", senderId)
+      .eq("role", "user")
+      .order("creado_en", { ascending: false })
+      .limit(1);
+    if (error || !ultimo?.length) return "";
+
+    const ultimoMs = new Date(ultimo[0].creado_en).getTime();
+    const hace = Date.now() - ultimoMs;
+    const horasMin = Number(configActual.regreso_horas) > 0 ? Number(configActual.regreso_horas) : REGRESO_HORAS_DEFAULT;
+    if (hace < horasMin * 3600000) return "";
+
+    let resumen = conv.resumen_lead;
+    const resumenMs = conv.resumen_lead_generado_en ? new Date(conv.resumen_lead_generado_en).getTime() : 0;
+    if (!resumen || resumenMs < ultimoMs) resumen = (await generarYGuardarResumenLead(senderId)) || resumen;
+
+    const datos = [];
+    if (resumen?.edad) datos.push(`edad: ${resumen.edad}`);
+    if (resumen?.peso_actual) datos.push(`peso actual: ${resumen.peso_actual}`);
+    if (resumen?.peso_objetivo) datos.push(`peso al que quiere llegar: ${resumen.peso_objetivo}`);
+    if (resumen?.peso_a_perder) datos.push(`cuánto quiere bajar: ${resumen.peso_a_perder}`);
+    if (resumen?.obstaculo) datos.push(`obstáculo principal: ${resumen.obstaculo}`);
+    if (resumen?.dolor_salud) datos.push(`problema de salud: ${resumen.dolor_salud}`);
+    if (resumen?.dolor_estetico) datos.push(`motivo estético: ${resumen.dolor_estetico}`);
+    if (resumen?.detalle) datos.push(`en sus palabras: ${resumen.detalle}`);
+
+    const ultimoMensajeBot = [...(conv.historial || [])].reverse()
+      .find(m => m.role === "assistant" && typeof m.content === "string" && !m.content.startsWith("[["));
+
+    const enlace = configActual.enlace_calificacion?.trim();
+    let situacion;
+    if (conv.agendo) {
+      situacion = "YA agendó su llamada. No le empujes a agendar de nuevo; si viene al caso, solo menciona que quedas atento a la llamada.";
+    } else if (conv.no_califica) {
+      situacion = "Está marcado como que NO califica. No le ofrezcas la llamada ni el calendario; solo atiende lo que pide ahora.";
+    } else if (conv.enlace_enviado && enlace) {
+      situacion = `Ya se le mandó el enlace para agendar su llamada y todavía NO ha agendado. Después de atender lo que pide ahora, recuérdale con UNA frase corta y natural que su espacio para la llamada sigue pendiente, y reenvíale el enlace: ${enlace}`;
+    } else {
+      situacion = "Todavía no se le ha mandado el enlace para agendar. Después de atender lo que pide ahora, retoma el flujo desde la siguiente pregunta que le faltaba, sin repetir las ya contestadas.";
+    }
+
+    return (
+      `MEMORIA DEL LEAD — ESTE LEAD YA CONVERSÓ CONTIGO ANTES (hace ${textoTiempoTranscurrido(hace)}) Y AHORA REGRESA, probablemente por otro video o recurso.\n` +
+      `- Datos que YA te dio: ${datos.length ? datos.join("; ") : "(no quedó ningún dato registrado)"}.\n` +
+      `- Dónde se quedó: etapa "${etapaConfig?.nombre || etapaConfig?.clave || "general"}".` +
+      (ultimoMensajeBot ? ` Tu último mensaje antes de que se fuera fue: "${ultimoMensajeBot.content.slice(0, 250)}".` : "") + `\n` +
+      `- Situación actual: ${situacion}\n` +
+      `REGLAS PARA ESTE MENSAJE: (1) NO lo trates como lead nuevo ni vuelvas a preguntarle NADA de lo que ya te dio arriba (edad, peso, objetivo, obstáculo...); si te dice "eso ya me lo preguntaste", discúlpate en una frase y sigue. (2) Atiende primero lo que pide ahora (ej. el recurso del video por el que comentó). (3) Después retoma el hilo según la situación actual. (4) Solo pregunta un dato si no aparece arriba Y de verdad lo necesitas para su siguiente paso.`
+    );
+  } catch (err) {
+    console.error(`⚠️ No se pudo armar la memoria de lead que regresa para ${senderId}:`, err.message);
+    return "";
+  }
+}
+
 async function procesarBuffer(senderId) {
   const buffer = buffers.get(senderId);
   if (!buffer || buffer.mensajes.length === 0) return;
@@ -3538,6 +3641,12 @@ async function procesarBuffer(senderId) {
     // ese mensaje ya no esté visible en el historial reciente.
     if (conv.primer_mensaje_texto) {
       promptSistema += `\n\nCONTEXTO: el PRIMER mensaje que este lead mandó, el que inició toda esta conversación, fue textualmente: "${conv.primer_mensaje_texto}". Úsalo como referencia cuando necesites saber cómo empezó todo esto (ej. qué recurso pidió), aunque ya no aparezca en los mensajes recientes de abajo.`;
+    }
+
+    const memoriaRegreso = await obtenerMemoriaLeadQueRegresa(senderId, conv, etapaConfig);
+    if (memoriaRegreso) {
+      console.log(`🔁 ${senderId} es un lead que regresa — se le pasa su memoria a la IA para continuar donde se quedó.`);
+      promptSistema += `\n\n${memoriaRegreso}`;
     }
 
     if (etapaConfig) {
