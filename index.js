@@ -4503,36 +4503,45 @@ app.get("/eventos", requireAdminKey, (req, res) => {
 
 app.get("/conversaciones", requireAdminKey, async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from("conversaciones")
-      // IMPORTANTE: aquí ya NO se pide "historial" (el arreglo completo de
-      // mensajes) — antes se traía completo para las 200 conversaciones en
-      // CADA refresco de /chats (cada 4 segundos), lo cual disparaba
-      // muchísimo el consumo de datos de Supabase sin necesidad, ya que
-      // solo hacía falta el último mensaje de cada una para la vista
-      // previa. Ahora se usan los campos livianos "ultimo_mensaje_texto" /
-      // "ultimo_mensaje_role" en su lugar (ver agregarAlHistorialDB).
-      .select("sender_id, ultimo_mensaje_texto, ultimo_mensaje_role, ultimo_mensaje_usuario, ultimo_mensaje_bot_en, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado, bot_pausado, username, visto_hasta")
-      // Solo se muestran conversaciones donde el LEAD escribió algo alguna
-      // vez — "ultimo_mensaje_usuario" únicamente se actualiza cuando llega
-      // un mensaje DE la persona, nunca cuando se le manda algo a ella (ni
-      // el bot, ni un mensaje manual, ni la bienvenida automática de
-      // ManyChat a nuevos seguidores). Así, alguien que solo recibió esa
-      // bienvenida y nunca respondió (nunca se abrió la ventana de 24h) no
-      // aparece en ningún lado de /chats — pero si en algún momento SÍ
-      // respondió (aunque haya sido una sola vez, y ahora la ventana ya
-      // esté cerrada), sigue apareciendo normal, incluyendo en "Handoff",
-      // para poder darle seguimiento.
-      .not("ultimo_mensaje_usuario", "is", null)
-      .order("actualizado_en", { ascending: false })
-      .limit(200);
-
-    if (error) return res.status(500).json({ error: error.message });
+    // Se traen TODAS las conversaciones (antes solo las 200 más recientes),
+    // en páginas de 1000 porque Supabase corta cada consulta en ese máximo.
+    // Así en /chats se puede encontrar un cliente antiguo y ver su historial.
+    const TAM_PAGINA = 1000;
+    let data = [];
+    for (let desde = 0; ; desde += TAM_PAGINA) {
+      const { data: pagina, error } = await supabase
+        .from("conversaciones")
+        // IMPORTANTE: aquí ya NO se pide "historial" (el arreglo completo de
+        // mensajes) — traerlo en CADA refresco de /chats (cada 4 segundos)
+        // disparaba el consumo de datos de Supabase; solo hace falta el
+        // último mensaje de cada una ("ultimo_mensaje_texto" /
+        // "ultimo_mensaje_role", ver agregarAlHistorialDB).
+        .select("sender_id, ultimo_mensaje_texto, ultimo_mensaje_role, ultimo_mensaje_usuario, ultimo_mensaje_bot_en, actualizado_en, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etapa, etiquetas, monto_pagado, bot_pausado, username, visto_hasta")
+        // Solo se muestran conversaciones donde el LEAD escribió algo alguna
+        // vez ("ultimo_mensaje_usuario" solo se actualiza con mensajes DE la
+        // persona). Quien solo recibió la bienvenida automática de ManyChat
+        // y nunca respondió no aparece; quien respondió aunque sea una vez
+        // sigue apareciendo, también en "Handoff".
+        .not("ultimo_mensaje_usuario", "is", null)
+        .order("actualizado_en", { ascending: false })
+        .order("sender_id", { ascending: true }) // desempate estable entre páginas
+        .range(desde, desde + TAM_PAGINA - 1);
+      if (error) return res.status(500).json({ error: error.message });
+      data = data.concat(pagina || []);
+      if (!pagina || pagina.length < TAM_PAGINA) break;
+    }
 
     const totalPasosEnlace = (configActual.seguimientos_enlace || []).length;
 
-    const resumen = await mapConLimite(data || [], 5, async (c) => {
-      const perfil = await obtenerPerfilInstagram(c.sender_id);
+    // El perfil en vivo de Instagram (foto/username) solo se consulta para las
+    // 200 conversaciones más recientes; las más viejas usan el username ya
+    // guardado en Supabase (o la caché), para no disparar miles de llamadas a Meta.
+    const idsConPerfilEnVivo = new Set(data.slice(0, 200).map(c => c.sender_id));
+
+    const resumen = await mapConLimite(data, 5, async (c) => {
+      const perfil = idsConPerfilEnVivo.has(c.sender_id)
+        ? await obtenerPerfilInstagram(c.sender_id)
+        : (perfilesCache.get(c.sender_id) || null);
 
       const enVentana24h = c.ultimo_mensaje_usuario
         ? (Date.now() - new Date(c.ultimo_mensaje_usuario).getTime()) < VENTANA_24H_MS
