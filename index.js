@@ -166,10 +166,11 @@ const SEGUIMIENTOS_DEFAULT = [
   },
   {
     horas: 20,
+    reformular_pregunta: true,
     mensajes: [
-      "Última oportunidad de platicar hoy — si te interesa seguimos, aquí ando 😊",
-      "Antes de que se cierre por hoy: ¿te gustaría que te comparta los horarios disponibles?",
-      "Cierro por hoy, pero si quieres retomar mañana aquí estoy 💪"
+      "Oye, ¿viste mi pregunta de arriba? Con que me digas en una línea es suficiente, y con eso veo si de verdad te puedo ayudar.",
+      "Hermano, no quiero llenarte de mensajes, así que este es el último de hoy. Si te hace sentido lo que hablamos, respóndeme lo que te pregunté y lo vemos con calma.",
+      "Se nos quedó a medias la conversación. ¿Quieres que la retomemos o prefieres que lo dejemos por ahora? Cualquiera de las dos está bien, solo avísame."
     ]
   }
 ];
@@ -445,6 +446,65 @@ async function programarSeguimientosDB(senderId) {
   if (error) console.error("❌ Error programando seguimientos en Supabase:", error.message);
 }
 
+// Busca la última pregunta que hizo el bot después del último mensaje del
+// lead (o sea, la que quedó sin respuesta) y pide a OpenAI que la vuelva a
+// plantear de forma ligeramente distinta, corta y sin tono de despedida.
+// Devuelve null si no hay pregunta pendiente o si algo falla — en ese caso
+// el llamador usa el mensaje fijo configurado.
+async function reformularPreguntaPendiente(senderId) {
+  try {
+    const { data: mensajes, error } = await supabase
+      .from("mensajes_chat")
+      .select("role, content")
+      .eq("sender_id", senderId)
+      .order("creado_en", { ascending: false })
+      .limit(8);
+    if (error || !mensajes?.length) return null;
+
+    const esTextoReal = (m) => typeof m.content === "string" && m.content.trim() &&
+      !m.content.startsWith("[[imagen]]") && !m.content.startsWith("[[audio]]");
+
+    // Mensajes del bot posteriores al último mensaje del lead (la lista
+    // viene del más reciente al más antiguo).
+    const pendientes = [];
+    for (const m of mensajes) {
+      if (m.role === "user") break;
+      if (m.role === "assistant" && esTextoReal(m)) pendientes.push(m.content.trim());
+    }
+    const preguntaOriginal = pendientes.find(t => t.includes("?"));
+    if (!preguntaOriginal) return null;
+
+    // Si el mensaje es largo, solo se usa la última frase que sea pregunta.
+    const frasePregunta = (preguntaOriginal.match(/[^.!?\n]*\?/g) || []).map(s => s.trim()).filter(Boolean).pop() || preguntaOriginal;
+
+    const resp = await openaiClient.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.7,
+      max_tokens: 120,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Eres un vendedor por Instagram DM que escribe en español neutro, tuteando, con tono cercano y natural (puedes decir 'hermano' si encaja). " +
+            "El lead dejó SIN RESPONDER la pregunta que te voy a pasar. Escribe UN solo mensaje corto (máximo 2 frases) que vuelva a plantear esa misma pregunta con otras palabras, " +
+            "fácil de contestar en una línea. Reglas: no te despidas, no digas 'cierro por hoy' ni 'última oportunidad', no presiones, no uses más de un emoji, " +
+            "no inventes datos ni agregues preguntas nuevas. Responde SOLO con el mensaje."
+        },
+        { role: "user", content: "Pregunta sin responder: " + frasePregunta }
+      ]
+    });
+
+    let texto = (resp.choices?.[0]?.message?.content || "").trim().replace(/^["“]|["”]$/g, "");
+    if (!texto || texto.length > 280 || !texto.includes("?") || texto.includes("[[")) return null;
+    const norm = (s) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9 ]/g, "").trim();
+    if (norm(texto) === norm(frasePregunta)) return null;
+    return texto;
+  } catch (err) {
+    console.error("⚠️ No se pudo reformular la pregunta pendiente:", err.message);
+    return null;
+  }
+}
+
 async function procesarSeguimientosPendientesDB() {
   const botActivo = await estaBotActivo();
   if (!botActivo) {
@@ -561,8 +621,20 @@ async function procesarSeguimientosPendientesDB() {
     const claveRotacion = `${tipo}_${pasoIndex}`;
     const rotacion = conv.rotacion || {};
     const indiceActual = rotacion[claveRotacion] || 0;
-    const mensaje = pasoConfig.mensajes[indiceActual % pasoConfig.mensajes.length];
+    let mensaje = pasoConfig.mensajes[indiceActual % pasoConfig.mensajes.length];
     rotacion[claveRotacion] = (indiceActual + 1) % pasoConfig.mensajes.length;
+
+    // Si el paso lo tiene activado, en vez del texto fijo se re-pregunta,
+    // con otras palabras, la última pregunta del bot que el lead no
+    // respondió. Si no hay pregunta pendiente o la IA falla, se queda el
+    // mensaje fijo de arriba.
+    if (pasoConfig.reformular_pregunta) {
+      const reformulado = await reformularPreguntaPendiente(senderId);
+      if (reformulado) {
+        console.log(`🔁 Seguimiento (${tipo}, paso ${pasoIndex}) para ${senderId}: usando la pregunta pendiente reformulada.`);
+        mensaje = reformulado;
+      }
+    }
 
     try {
       console.log(`🔔 Enviando seguimiento (${tipo}, paso ${pasoIndex}, ${pasoConfig.horas} h) a ${senderId}: "${mensaje}"`);
@@ -11098,6 +11170,10 @@ ${estilosBase()}
           <input type="checkbox" class="paso-solo-visto" data-i="\${i}"\${paso.solo_si_visto ? " checked" : ""} style="width:16px; height:16px; accent-color:var(--green); cursor:pointer; margin-top:1px; flex-shrink:0;">
           <span style="color:var(--text); font-size:13.5px; font-weight:500; line-height:1.45;">👁️ Solo enviar si el mensaje anterior ya está visto (si no, espera y lo reintenta después)</span>
         </label>
+        <label style="display:flex; align-items:flex-start; gap:9px; cursor:pointer; margin:10px 0 0;">
+          <input type="checkbox" class="paso-reformular" data-i="\${i}"\${paso.reformular_pregunta ? " checked" : ""} style="width:16px; height:16px; accent-color:var(--green); cursor:pointer; margin-top:1px; flex-shrink:0;">
+          <span style="color:var(--text); font-size:13.5px; font-weight:500; line-height:1.45;">🔁 Re-preguntar con otras palabras la última pregunta que el lead no respondió (si no hay ninguna, se usan los mensajes de arriba)</span>
+        </label>
       \`;
       cont.appendChild(div);
     });
@@ -11117,6 +11193,7 @@ ${estilosBase()}
       pasos[i].mensajes = ta.value.split("\\n").map(m => m.trim()).filter(Boolean);
     });
     document.querySelectorAll(".paso-solo-visto").forEach((chk, i) => { pasos[i].solo_si_visto = chk.checked; });
+    document.querySelectorAll(".paso-reformular").forEach((chk, i) => { pasos[i].reformular_pregunta = chk.checked; });
   }
 
   // --- Seguimiento especial al enlace: mismo patrón, otro contenedor ---
