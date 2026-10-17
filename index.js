@@ -12472,6 +12472,7 @@ ${estilosBase()}
   .chat-tab.tab-agendo.active{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.4); }
   .chat-tab.tab-enlace.active{ background:rgba(63,199,232,.14); color:#3FC7E8; border-color:rgba(63,199,232,.4); }
   .chat-tab.tab-seguimiento.active{ background:rgba(255,197,66,.14); color:#FFC542; border-color:rgba(255,197,66,.4); }
+  .chat-tab.tab-compro.active{ background:rgba(255,197,66,.14); color:#FFC542; border-color:rgba(255,197,66,.4); }
   .chat-tab .count{ font-family:var(--mono); font-size:10.5px; opacity:.85; margin-left:2px; }
   .califica-badge{
     font-size:11px; margin-left:7px; flex-shrink:0;
@@ -12770,6 +12771,7 @@ ${estilosBase()}
           <div class="chat-tab tab-nocalifica" id="tabNoCalifica" data-filtro="nocalifica" title="No Califica">🚫 <span class="count" id="countNoCalifica"></span></div>
           <div class="chat-tab tab-agendo" id="tabAgendo" data-filtro="agendo" title="Agendó">📅 <span class="count" id="countAgendo"></span></div>
           <div class="chat-tab tab-enlace" id="tabEnlace" data-filtro="enlace" title="Enlace enviado">🔗 <span class="count" id="countEnlace"></span></div>
+          <div class="chat-tab tab-compro" id="tabCompro" data-filtro="compro" title="Compró (según la etiqueta configurada en el Dashboard)">💰 <span class="count" id="countCompro"></span></div>
           <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff" title="Handoff (+24h)">⏰ <span class="count" id="countHandoff"></span></div>
           <div class="chat-tab tab-seguimiento" id="tabSeguimiento" data-filtro="seguimiento" title="Seguimiento pendiente (handoff, sin contar los que ya agendaron o no califican)">🔁 <span class="count" id="countSeguimiento"></span></div>
           <select id="filtroDiasSeguimiento" class="select-mini" style="display:none;" title="Filtra por cuánto tiempo hace que se le mandó el último mensaje del bot — útil para hacer seguimiento con tu propia cadencia (cada 3er día, cada semana, etc.)">
@@ -12989,6 +12991,7 @@ ${estilosBase()}
     const totalNoCalifica = conversaciones.filter(c => c.no_califica).length;
     const totalAgendo = conversaciones.filter(c => c.agendo).length;
     const totalEnlace = conversaciones.filter(c => c.enlace_enviado).length;
+    const totalCompro = conversaciones.filter(c => tieneEtiqueta(c, etiquetaCompraConfigurada)).length;
     const totalSeguimiento = conversaciones.filter(c => !c.en_ventana_24h && !c.no_califica && !c.agendo && !tieneEtiqueta(c, etiquetaCompraConfigurada)).length;
     // El número que se MUESTRA en la pestaña respeta el filtro de días
     // activo (si hay uno elegido) — así siempre coincide con lo que
@@ -13010,10 +13013,11 @@ ${estilosBase()}
     document.getElementById("countNoCalifica").textContent = totalNoCalifica;
     document.getElementById("countAgendo").textContent = totalAgendo;
     document.getElementById("countEnlace").textContent = totalEnlaceMostrado;
+    document.getElementById("countCompro").textContent = totalCompro;
     document.getElementById("countSeguimiento").textContent = totalSeguimientoMostrado;
     actualizarBotonExportar({
       todas: conversaciones.length, handoff: totalHandoff, califica: totalCalifica,
-      nocalifica: totalNoCalifica, agendo: totalAgendo, enlace: totalEnlaceMostrado, seguimiento: totalSeguimientoMostrado
+      nocalifica: totalNoCalifica, agendo: totalAgendo, enlace: totalEnlaceMostrado, compro: totalCompro, seguimiento: totalSeguimientoMostrado
     });
   }
 
@@ -13030,11 +13034,13 @@ ${estilosBase()}
       nocalifica: "border-color:rgba(255,93,93,.35); color:var(--red);",
       agendo: "border-color:rgba(49,217,124,.3); color:var(--green);",
       enlace: "border-color:rgba(63,199,232,.35); color:#3FC7E8;",
+      compro: "border-color:rgba(255,197,66,.4); color:#FFC542;",
       seguimiento: "border-color:rgba(255,197,66,.4); color:#FFC542;"
     };
     const titulos = {
       todas: "Exportar todos los leads", handoff: "Exportar handoff", califica: "Exportar calificados",
       nocalifica: "Exportar no califican", agendo: "Exportar agendaron", enlace: "Exportar enlace enviado",
+      compro: "Exportar los que compraron",
       seguimiento: "Exportar seguimiento pendiente"
     };
 
@@ -13067,6 +13073,7 @@ ${estilosBase()}
     if(filtroActual === "califica") return conversaciones.filter(c => c.califica);
     if(filtroActual === "nocalifica") return conversaciones.filter(c => c.no_califica);
     if(filtroActual === "agendo") return conversaciones.filter(c => c.agendo);
+    if(filtroActual === "compro") return conversaciones.filter(c => tieneEtiqueta(c, etiquetaCompraConfigurada));
     if(filtroActual === "enlace") {
       let base = conversaciones.filter(c => c.enlace_enviado);
       if(document.getElementById("filtroExcluirAgendo").checked) base = base.filter(c => !c.agendo);
@@ -13136,6 +13143,9 @@ ${estilosBase()}
       if(filtroActual === "handoff") vacioTxt = '<p class="vacio-lista">🎉 Ninguna conversación en handoff — todas están dentro de la ventana de 24h.</p>';
       if(filtroActual === "califica") vacioTxt = '<p class="vacio-lista">Todavía no hay leads calificados con los criterios actuales.</p>';
       if(filtroActual === "enlace") vacioTxt = '<p class="vacio-lista">Todavía no se le ha mandado el enlace de calificación a nadie.</p>';
+      if(filtroActual === "compro") vacioTxt = etiquetaCompraConfigurada
+        ? '<p class="vacio-lista">Nadie tiene todavía la etiqueta "' + escapar(etiquetaCompraConfigurada) + '".</p>'
+        : '<p class="vacio-lista">Primero elige en el Dashboard cuál etiqueta representa "Compró".</p>';
       if(terminoBusqueda) vacioTxt = '<p class="vacio-lista">🔍 Sin resultados para "' + escapar(terminoBusqueda) + '" — ni en nombres de usuario, ni en lo hablado (hasta las últimas 1000 coincidencias del sistema).</p>';
       cont.innerHTML = vacioTxt;
       return;
@@ -13157,6 +13167,7 @@ ${estilosBase()}
             \${c.no_califica ? '<span class="califica-badge" title="No Califica' + (c.razon_no_califica ? ": " + escapar(c.razon_no_califica) : "") + '">🚫</span>' : ''}
             \${c.agendo ? '<span class="califica-badge" title="Agendó">📅</span>' : ''}
             \${c.enlace_enviado ? '<span class="enlace-badge" title="Enlace enviado">🔗</span>' : ''}
+            \${tieneEtiqueta(c, etiquetaCompraConfigurada) ? '<span class="califica-badge" title="Compró">💰</span>' : ''}
             \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
             \${c.etapa_nombre ? '<span class="etapa-chip" title="Etapa actual">' + escapar(c.etapa_nombre) + '</span>' : ''}
           </div>
@@ -14085,6 +14096,13 @@ ${estilosBase()}
     actualizarVisibilidadFiltroDias();
     renderLista();
   });
+  document.getElementById("tabCompro").addEventListener("click", () => {
+    filtroActual = "compro";
+    document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
+    document.getElementById("tabCompro").classList.add("active");
+    actualizarVisibilidadFiltroDias();
+    renderLista();
+  });
   document.getElementById("tabEnlace").addEventListener("click", () => {
     filtroActual = "enlace";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
@@ -14685,6 +14703,13 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
     if (filtro === "califica") filtradas = filtradas.filter(c => c.califica);
     else if (filtro === "nocalifica") filtradas = filtradas.filter(c => c.no_califica);
     else if (filtro === "agendo") filtradas = filtradas.filter(c => c.agendo);
+    else if (filtro === "compro") {
+      const etiquetaCompraExp = configActual.dashboard_etiqueta_compro?.trim();
+      const objetivoExp = etiquetaCompraExp ? normalizarParaComparar(etiquetaCompraExp) : null;
+      filtradas = filtradas.filter(c =>
+        objetivoExp && Array.isArray(c.etiquetas) && c.etiquetas.some(e => normalizarParaComparar(e) === objetivoExp)
+      );
+    }
     else if (filtro === "enlace") {
       filtradas = filtradas.filter(c => c.enlace_enviado);
       // Igual que en pantalla: si se pide excluir a quienes ya agendaron
