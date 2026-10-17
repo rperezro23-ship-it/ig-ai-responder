@@ -381,6 +381,77 @@ async function registrarMensajeUsuario(senderId, textoMensaje) {
   await guardarConversacion(senderId, campos);
 }
 
+// Etiqueta manual/automática para leads que pidieron que no se les escriba
+// más (ej. respondieron "lo dejamos" a la pregunta de retomar). Mientras la
+// tengan, NO se les programa ni se les envía ningún seguimiento. Se puede
+// quitar a mano desde /chats si el lead vuelve a mostrar interés.
+const ETIQUETA_NO_CONTACTAR = "No contactar";
+
+function tieneEtiquetaNoContactar(conv) {
+  const objetivo = ETIQUETA_NO_CONTACTAR.toLowerCase();
+  return Array.isArray(conv?.etiquetas) &&
+    conv.etiquetas.some(e => String(e).toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").trim() === objetivo);
+}
+
+// Mira los últimos mensajes y decide si el lead acaba de decir que quiere
+// dejar la conversación / que no le escriban más. Solo analiza mensajes
+// cortos del lead (una respuesta tipo "lo dejamos" no es un texto largo).
+// Si lo detecta, pone la etiqueta y devuelve true.
+async function marcarNoContactarSiRechazo(senderId) {
+  try {
+    const conv = await obtenerConversacion(senderId);
+    if (tieneEtiquetaNoContactar(conv)) return true;
+
+    const { data: mensajes, error } = await supabase
+      .from("mensajes_chat")
+      .select("role, content")
+      .eq("sender_id", senderId)
+      .order("creado_en", { ascending: false })
+      .limit(6);
+    if (error || !mensajes?.length) return false;
+
+    const texto = (m) => (typeof m.content === "string" && !m.content.startsWith("[[")) ? m.content.trim() : "";
+    const ultimoLead = mensajes.find(m => m.role === "user" && texto(m));
+    if (!ultimoLead || texto(ultimoLead).length > 160) return false;
+
+    const ultimoBot = mensajes.find(m => m.role === "assistant" && texto(m));
+    const contexto = [...mensajes].reverse().filter(m => texto(m))
+      .map(m => `${m.role === "user" ? "Lead" : "Bot"}: ${texto(m)}`).join("\n");
+
+    const resp = await openaiClient.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      max_tokens: 40,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "Analizas el último mensaje del Lead en un chat de ventas por Instagram. Responde SOLO JSON: {\"rechaza\": true|false}. " +
+            "rechaza=true únicamente si el Lead dice de forma clara que no quiere continuar la conversación o que no le sigan escribiendo " +
+            "(ej. 'lo dejamos', 'dejémoslo así', 'no me interesa', 'ya no quiero', 'no me escribas más', 'prefiero dejarlo'). " +
+            "rechaza=false para dudas, objeciones, 'luego te aviso', 'ahorita no puedo', saludos, agradecimientos o cualquier respuesta que deje la puerta abierta."
+        },
+        { role: "user", content: contexto }
+      ]
+    });
+
+    let rechaza = false;
+    try { rechaza = JSON.parse(resp.choices?.[0]?.message?.content || "{}").rechaza === true; } catch (_) {}
+    if (!rechaza) return false;
+
+    console.log(`🚷 ${senderId} pidió dejar la conversación — se le pone la etiqueta "${ETIQUETA_NO_CONTACTAR}" y no recibirá seguimientos.`);
+    const etiquetasActuales = Array.isArray(conv.etiquetas) ? conv.etiquetas : [];
+    await guardarConversacion(senderId, { etiquetas: [...etiquetasActuales, ETIQUETA_NO_CONTACTAR] });
+    try { await registrarEtiquetaCreada(ETIQUETA_NO_CONTACTAR); } catch (_) {}
+    await cancelarSeguimientosPendientesDB(senderId);
+    return true;
+  } catch (err) {
+    console.error("⚠️ No se pudo evaluar si el lead pidió no ser contactado:", err.message);
+    return false;
+  }
+}
+
 async function cancelarSeguimientosPendientesDB(senderId) {
   const { error } = await supabase
     .from("seguimientos_programados")
@@ -406,6 +477,7 @@ async function programarSeguimientosDB(senderId) {
 
   const conv = await obtenerConversacion(senderId);
   if (!conv.ultimo_mensaje_usuario) return;
+  if (tieneEtiquetaNoContactar(conv)) return; // pidió no ser contactado
 
   const ultimoMsg = new Date(conv.ultimo_mensaje_usuario).getTime();
   const limiteVentana = ultimoMsg + VENTANA_24H_MS - COLCHON_SEGURIDAD_MS;
@@ -537,6 +609,12 @@ async function procesarSeguimientosPendientesDB() {
 
     if (!sigueVigente) {
       console.log(`⏭️ Seguimiento (${tipo}, paso ${pasoIndex}) para ${senderId} descartado: fuera de la ventana de 24h.`);
+      await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
+      continue;
+    }
+
+    if (tieneEtiquetaNoContactar(conv)) {
+      console.log(`🚷 Seguimiento (${tipo}, paso ${pasoIndex}) para ${senderId} descartado: tiene la etiqueta "${ETIQUETA_NO_CONTACTAR}".`);
       await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
       continue;
     }
@@ -3913,6 +3991,7 @@ async function procesarBuffer(senderId) {
     buffer.timer = setTimeout(() => procesarBuffer(senderId), delay);
   } else {
     buffers.delete(senderId);
+    await marcarNoContactarSiRechazo(senderId);
     await programarSeguimientosDB(senderId);
   }
 }
