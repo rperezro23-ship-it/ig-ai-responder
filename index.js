@@ -5478,6 +5478,7 @@ function interpretarConversacion(c, yo) {
     ultimoTexto: ultimo.message || "",
     ultimoMensajeEn: ultimo.created_time || c.updated_time,
     ultimoDelLeadEn: ultimoDelLead?.created_time || null,
+    ultimoDelLeadTexto: ultimoDelLead?.message || "",
     ultimosMensajes: mensajes.slice(0, 6).reverse().map(m => ({
       de: esMiCuenta(m.from, yo) ? "tú" : "lead",
       texto: (m.message || "[foto, audio u otro adjunto]").slice(0, 160)
@@ -5629,6 +5630,16 @@ app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
     };
     if (simular) return res.json({ ok: true, simulacion: true, ...detalle });
 
+    // Último mensaje de la persona (si lo conocemos): es lo que hace que el chat
+    // aparezca en la lista de /chats.
+    const chatDelLead = chat.ultimoDelLeadEn
+      ? { senderId: chat.senderId, username: chat.username, texto: chat.ultimoDelLeadTexto || "", ultimoMensajeEn: chat.ultimoDelLeadEn }
+      : null;
+    // Aunque no se mande nada, si el último mensaje del chat es tuyo se guarda el
+    // de la persona para que el chat salga en /chats (si está sin responder, ya
+    // lo guardan las ramas de abajo).
+    if (chatDelLead && !chat.sinResponder && !req.body?.mensaje) await registrarChatRecuperado(chatDelLead);
+
     // Mensaje escrito por ti: se manda tal cual (no lo genera la IA). Al enviarlo,
     // el bot toma el control del chat, y queda en el historial de /chats.
     const mensajeManual = typeof req.body?.mensaje === "string" ? req.body.mensaje.trim() : "";
@@ -5636,9 +5647,10 @@ app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
       if (!dentroVentana) {
         return res.status(400).json({ error: "Ese lead no ha escrito en las últimas 24 horas: Instagram no deja enviarle mensajes." });
       }
-      // Se guarda primero su último mensaje (si está sin responder) para que el
-      // chat aparezca en /chats con el contexto completo.
-      if (chat.sinResponder) await registrarChatRecuperado(chat);
+      // Se guarda primero el último mensaje DE LA PERSONA (aunque después le
+      // hayas escrito tú): /chats solo lista conversaciones donde quedó
+      // registrado un mensaje del lead, y sin esto el chat no aparecería.
+      if (chatDelLead) await registrarChatRecuperado(chatDelLead);
       for (const fragmento of dividirTextoLargo(mensajeManual)) {
         await enviarMensajeInstagram(chat.senderId, fragmento);
         await agregarAlHistorialDB(chat.senderId, "assistant", fragmento);
