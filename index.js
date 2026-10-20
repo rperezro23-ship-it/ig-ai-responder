@@ -2001,6 +2001,7 @@ setInterval(() => {
 // error "not the thread owner", se intenta esto una vez y se reintenta el
 // envío; si falla incluso esto, el error original es el que se propaga (es
 // más útil para diagnosticar que el error de "no se pudo tomar el control").
+let ultimoErrorControl = ""; // último motivo por el que Instagram rechazó tomar el control (para mostrarlo en el panel)
 async function tomarControlDelHilo(cuenta, senderId) {
   try {
     await axios.post(
@@ -2012,6 +2013,8 @@ async function tomarControlDelHilo(cuenta, senderId) {
     return true;
   } catch (err) {
     console.error(`❌ No se pudo tomar el control del hilo con ${senderId}:`, err.response?.data || err.message);
+    const e = err.response?.data?.error;
+    ultimoErrorControl = e ? `${e.message || "error"} (código ${e.code ?? "?"}${e.error_subcode ? "/" + e.error_subcode : ""})` : String(err.message);
     return false;
   }
 }
@@ -5607,7 +5610,7 @@ app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
       await registrarChatRecuperado(chat);
       console.log(`📥 Chat de ${chat.username} guardado en /chats para atenderlo a mano.`);
     }
-    res.json({ ok: true, ...detalle, controlTomado: tomado });
+    res.json({ ok: true, ...detalle, controlTomado: tomado, errorControl: tomado ? null : ultimoErrorControl });
   } catch (err) {
     res.status(500).json({ error: err.response?.data?.error?.message || err.message });
   }
@@ -15196,7 +15199,7 @@ ${estilosBase()}
 
       btn.textContent = "⏳ Recuperando…";
       const real = await pedir(false);
-      if(real) alert("Listo. " + (real.controlTomado ? "Se tomó el control del chat." : "No se pudo tomar el control (puede que ya lo tuviera el bot).") + (real.accion === "responder" ? " El bot le responderá en unos segundos." : (real.registrar ? " Ya puedes buscarlo en la lista de chats." : "")));
+      if(real) alert("Listo. " + (real.controlTomado ? "Se tomó el control del chat." : "No se pudo tomar el control" + (real.errorControl ? ". Motivo que da Instagram: " + real.errorControl : " (puede que ya lo tuviera el bot).")) + (real.accion === "responder" ? " El bot le responderá en unos segundos." : (real.registrar ? " Ya puedes buscarlo en la lista de chats." : "")));
     } catch (err) {
       alert("Error de conexión: " + err.message);
     } finally {
