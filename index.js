@@ -2002,7 +2002,15 @@ setInterval(() => {
 // envío; si falla incluso esto, el error original es el que se propaga (es
 // más útil para diagnosticar que el error de "no se pudo tomar el control").
 let ultimoErrorControl = ""; // último motivo por el que Instagram rechazó tomar el control (para mostrarlo en el panel)
+// Con una conexión de "Instagram Login" (graph.instagram.com) Meta NO ofrece el
+// endpoint take_thread_control — solo existe en graph.facebook.com con el token
+// de la Página (error 100/33 "Unsupported post request"). Cuando se detecta,
+// se deja de intentar. No es grave: con la opción "Toma el control de las
+// conversaciones" activa en la Página, el bot toma el control del hilo al
+// ENVIAR un mensaje (así se resolvió el error de "thread owner" en septiembre).
+let controlHiloNoSoportado = false;
 async function tomarControlDelHilo(cuenta, senderId) {
+  if (controlHiloNoSoportado) { ultimoErrorControl = "Unsupported post request (take_thread_control no existe con esta conexión)"; return false; }
   try {
     await axios.post(
       `https://graph.instagram.com/v25.0/${cuenta.ig_id}/take_thread_control`,
@@ -2015,6 +2023,10 @@ async function tomarControlDelHilo(cuenta, senderId) {
     console.error(`❌ No se pudo tomar el control del hilo con ${senderId}:`, err.response?.data || err.message);
     const e = err.response?.data?.error;
     ultimoErrorControl = e ? `${e.message || "error"} (código ${e.code ?? "?"}${e.error_subcode ? "/" + e.error_subcode : ""})` : String(err.message);
+    if (e && e.code === 100 && (e.error_subcode === 33 || /Unsupported post request/i.test(e.message || ""))) {
+      controlHiloNoSoportado = true;
+      console.warn("ℹ️ take_thread_control no existe con esta conexión (Instagram Login): se deja de intentar. El bot toma el control al enviar un mensaje si 'Toma el control de las conversaciones' está activa en la Página.");
+    }
     return false;
   }
 }
@@ -4088,13 +4100,12 @@ app.post("/webhook", async (req, res) => {
         const esMensajeDelLead = (ev.message && !ev.message.is_echo) || ev.reaction;
         if (!esMensajeDelLead) continue;
 
+        // Se intenta tomar el control, pero NO se bloquea el mensaje si falla:
+        // con esta conexión ese método no existe, y de todos modos el bot toma
+        // el control al enviar su respuesta (si la opción está activa en Meta).
         const tomado = await tomarControlSiLlegoEnStandby(idLead);
-        if (tomado) {
-          console.log(`🔓 Mensaje de ${idLead} llegó en STANDBY — se tomó el control del hilo y se procesa normalmente.`);
-          eventos.push(ev);
-        } else {
-          console.warn(`⚠️ Mensaje de ${idLead} llegó en STANDBY y NO se pudo tomar el control del hilo — no se responderá.`);
-        }
+        console.log(`🔓 Mensaje de ${idLead} llegó en STANDBY — ${tomado ? "se tomó el control del hilo y " : ""}se procesa normalmente (el bot toma el control al responder).`);
+        eventos.push(ev);
       }
     }
 
@@ -5453,13 +5464,24 @@ function interpretarConversacion(c, yo) {
     Boolean(ultimo.from?.username && lead.username && String(ultimo.from.username).toLowerCase() === String(lead.username).toLowerCase());
   if (deMiCuenta === deLead) return null; // ambiguo (ninguno o ambos): no se arriesga
   const sinResponder = deLead;
+  // Si la consulta trajo varios mensajes (la búsqueda de un solo usuario sí),
+  // se saca cuándo escribió el lead por última vez — la ventana de 24 horas de
+  // Instagram se cuenta desde AHÍ, aunque después le hayas escrito tú — y los
+  // últimos mensajes en orden, para poder redactar algo natural.
+  const mensajes = c.messages?.data || [];
+  const ultimoDelLead = mensajes.find(m => !esMiCuenta(m.from, yo));
   return {
     senderId: lead.id,
     username: lead.username || null,
     sinResponder,
     texto: sinResponder ? (ultimo.message || "") : "",
     ultimoTexto: ultimo.message || "",
-    ultimoMensajeEn: ultimo.created_time || c.updated_time
+    ultimoMensajeEn: ultimo.created_time || c.updated_time,
+    ultimoDelLeadEn: ultimoDelLead?.created_time || null,
+    ultimosMensajes: mensajes.slice(0, 6).reverse().map(m => ({
+      de: esMiCuenta(m.from, yo) ? "tú" : "lead",
+      texto: (m.message || "[foto, audio u otro adjunto]").slice(0, 160)
+    }))
   };
 }
 
@@ -5517,7 +5539,7 @@ async function buscarChatPorUsuario(usuarioBuscado) {
   const objetivo = String(usuarioBuscado || "").trim().replace(/^@/, "").toLowerCase();
   if (!objetivo) throw new Error("Escribe un nombre de usuario.");
   const cabeceras = { "Authorization": `Bearer ${cuenta.access_token}` };
-  const campos = "id,updated_time,participants,messages.limit(1){id,message,from,created_time,attachments}";
+  const campos = "id,updated_time,participants,messages.limit(6){id,message,from,created_time,attachments}";
   const base = `https://graph.instagram.com/v25.0/${cuenta.ig_id}/conversations`;
 
   const yo = await obtenerIdentidadCuenta(cuenta);
@@ -5592,13 +5614,39 @@ app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
     else if (conv.ultimo_mensaje_bot_en && new Date(conv.ultimo_mensaje_bot_en) > new Date(chat.ultimoMensajeEn)) { accion = "solo_control"; motivo = "el bot ya respondió después de ese mensaje"; }
     const registrar = chat.sinResponder && accion === "solo_control";
 
+    // La ventana de 24 h de Instagram se cuenta desde el ÚLTIMO mensaje del lead
+    // (aunque después le hayas escrito tú). Se deja 1 h de margen.
+    const horasDesdeLead = chat.ultimoDelLeadEn ? (Date.now() - new Date(chat.ultimoDelLeadEn).getTime()) / 3600000 : null;
+    const dentroVentana = horasDesdeLead !== null && horasDesdeLead <= 23;
+
     const detalle = {
       encontrado: true, username: chat.username, senderId: chat.senderId,
       sinResponder: chat.sinResponder, horas: Math.round(horas * 10) / 10,
       ultimoMensaje: (chat.ultimoTexto || "").slice(0, 120),
-      accion, motivo, registrar, enBase: Boolean(conv.ultimo_mensaje_usuario)
+      accion, motivo, registrar, enBase: Boolean(conv.ultimo_mensaje_usuario),
+      dentroVentana, horasDesdeLead: horasDesdeLead === null ? null : Math.round(horasDesdeLead * 10) / 10,
+      ultimosMensajes: chat.ultimosMensajes || []
     };
     if (simular) return res.json({ ok: true, simulacion: true, ...detalle });
+
+    // Mensaje escrito por ti: se manda tal cual (no lo genera la IA). Al enviarlo,
+    // el bot toma el control del chat, y queda en el historial de /chats.
+    const mensajeManual = typeof req.body?.mensaje === "string" ? req.body.mensaje.trim() : "";
+    if (mensajeManual) {
+      if (!dentroVentana) {
+        return res.status(400).json({ error: "Ese lead no ha escrito en las últimas 24 horas: Instagram no deja enviarle mensajes." });
+      }
+      // Se guarda primero su último mensaje (si está sin responder) para que el
+      // chat aparezca en /chats con el contexto completo.
+      if (chat.sinResponder) await registrarChatRecuperado(chat);
+      for (const fragmento of dividirTextoLargo(mensajeManual)) {
+        await enviarMensajeInstagram(chat.senderId, fragmento);
+        await agregarAlHistorialDB(chat.senderId, "assistant", fragmento);
+      }
+      await cancelarSeguimientosPendientesDB(chat.senderId);
+      console.log(`✍️ Mensaje manual enviado a ${chat.username} desde "Recuperar un usuario": "${mensajeManual.slice(0, 80)}"`);
+      return res.json({ ok: true, ...detalle, mensajeEnviado: true });
+    }
 
     const tomado = await tomarControlDelHilo(cuenta, chat.senderId);
     if (accion === "responder") {
@@ -15157,11 +15205,11 @@ ${estilosBase()}
     btn.disabled = true;
     btn.textContent = "⏳ Buscando…";
     try {
-      const pedir = async (simular) => {
+      const pedir = async (simular, mensaje) => {
         const res = await fetch("/chats/recuperar-usuario", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ usuario: usuario, simular: simular })
+          body: JSON.stringify({ usuario: usuario, simular: simular, mensaje: mensaje || "" })
         });
         if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
         const data = await res.json().catch(() => ({}));
@@ -15187,6 +15235,26 @@ ${estilosBase()}
         return;
       }
 
+      // Si el lead escribió en las últimas 24 h, se puede mandar un mensaje
+      // escrito por ti: sale natural y, al enviarlo, el bot retoma el control.
+      if(prueba.dentroVentana){
+        const hist = (prueba.ultimosMensajes || []).map((m) => (m.de === "tú" ? "Tú: " : "@" + prueba.username + ": ") + m.texto).join("\\n");
+        const mensajeEscrito = prompt(
+          "Encontrado: @" + prueba.username + ". Escribió por última vez hace " + prueba.horasDesdeLead + " h (dentro de las 24 h: se le puede escribir).\\n\\n" +
+          "Últimos mensajes:\\n" + hist + "\\n\\n" +
+          "Escribe el mensaje que quieres enviarle. Al enviarlo, el bot retoma el control del chat.\\n" +
+          "(Déjalo vacío para no mandar nada a mano y seguir con la opción automática. Cancelar para salir.)", "");
+        if(mensajeEscrito === null) return;
+        const mensajeFinal = mensajeEscrito.trim();
+        if(mensajeFinal){
+          if(!confirm("Se enviará a @" + prueba.username + ":\\n\\n«" + mensajeFinal + "»\\n\\n¿Enviar?")) return;
+          btn.textContent = "⏳ Enviando…";
+          const enviado = await pedir(false, mensajeFinal);
+          if(enviado) alert("Mensaje enviado. El bot retomó el control de este chat y ya puedes verlo en tu lista de chats.");
+          return;
+        }
+      }
+
       const queHara = prueba.accion === "responder"
         ? "El bot tomará el control y le contestará a su último mensaje."
         : "El bot tomará el control pero NO escribirá (" + prueba.motivo + ")." + (prueba.registrar ? " Se guardará en la lista de /chats para que lo atiendas a mano." : "");
@@ -15199,7 +15267,7 @@ ${estilosBase()}
 
       btn.textContent = "⏳ Recuperando…";
       const real = await pedir(false);
-      if(real) alert("Listo. " + (real.controlTomado ? "Se tomó el control del chat." : "No se pudo tomar el control" + (real.errorControl ? ". Motivo que da Instagram: " + real.errorControl : " (puede que ya lo tuviera el bot).")) + (real.accion === "responder" ? " El bot le responderá en unos segundos." : (real.registrar ? " Ya puedes buscarlo en la lista de chats." : "")));
+      if(real) alert("Listo. " + (real.controlTomado ? "Se tomó el control del chat." : (real.errorControl && real.errorControl.indexOf("Unsupported post request") !== -1 ? "Con tu tipo de conexión Instagram no permite pedir el control por este método (es normal y no hace falta: el bot toma el control al enviar un mensaje)." : "No se pudo tomar el control" + (real.errorControl ? ". Motivo que da Instagram: " + real.errorControl : "."))) + (real.accion === "responder" ? " El bot le responderá en unos segundos." : (real.registrar ? " Ya puedes buscarlo en la lista de chats." : "")));
     } catch (err) {
       alert("Error de conexión: " + err.message);
     } finally {
