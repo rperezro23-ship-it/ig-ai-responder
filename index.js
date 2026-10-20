@@ -5409,9 +5409,61 @@ async function registrarChatRecuperado(ch) {
   return true;
 }
 
+// Identifica cuál de los dos participantes de una conversación es la PROPIA
+// cuenta del negocio. IMPORTANTE: comparar solo con "ig_id" NO basta — el ID
+// con el que Instagram lista a tu cuenta en las conversaciones puede ser otro
+// distinto al de la URL de la API. Una versión anterior hacía eso y confundía
+// tu propia cuenta con el lead (tomaba tus propios mensajes como si fueran
+// del lead). Ahora se comparan todos los IDs conocidos de la cuenta Y su
+// nombre de usuario, y si no se puede estar seguro, la conversación se salta.
+async function obtenerIdentidadCuenta(cuenta) {
+  const ids = new Set([String(cuenta.ig_id)]);
+  let username = String(cuenta.username || "").toLowerCase();
+  try {
+    const r = await axios.get("https://graph.instagram.com/v25.0/me", {
+      params: { fields: "id,user_id,username" },
+      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
+    });
+    for (const k of ["id", "user_id"]) if (r.data?.[k]) ids.add(String(r.data[k]));
+    if (r.data?.username) username = String(r.data.username).toLowerCase();
+  } catch (err) {
+    console.warn("⚠️ No se pudo consultar /me para identificar la cuenta:", err.response?.data?.error?.message || err.message);
+  }
+  return { ids, username };
+}
+
+function esMiCuenta(p, yo) {
+  if (!p) return false;
+  if (p.id && yo.ids.has(String(p.id))) return true;
+  return Boolean(p.username && yo.username && String(p.username).toLowerCase() === yo.username);
+}
+
+function interpretarConversacion(c, yo) {
+  const participantes = c.participants?.data || [];
+  const mia = participantes.find(p => esMiCuenta(p, yo));
+  const lead = participantes.find(p => !esMiCuenta(p, yo));
+  if (!mia || !lead) return null;
+  const ultimo = c.messages?.data?.[0];
+  if (!ultimo) return null;
+  const deMiCuenta = esMiCuenta(ultimo.from, yo);
+  const deLead = String(ultimo.from?.id) === String(lead.id) ||
+    Boolean(ultimo.from?.username && lead.username && String(ultimo.from.username).toLowerCase() === String(lead.username).toLowerCase());
+  if (deMiCuenta === deLead) return null; // ambiguo (ninguno o ambos): no se arriesga
+  const sinResponder = deLead;
+  return {
+    senderId: lead.id,
+    username: lead.username || null,
+    sinResponder,
+    texto: sinResponder ? (ultimo.message || "") : "",
+    ultimoTexto: ultimo.message || "",
+    ultimoMensajeEn: ultimo.created_time || c.updated_time
+  };
+}
+
 async function revisarChatsRecuperables(dias) {
   const cuenta = await obtenerCuentaActiva();
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
+  const yo = await obtenerIdentidadCuenta(cuenta);
   const desde = Date.now() - dias * 86400000;
   const cabeceras = { "Authorization": `Bearer ${cuenta.access_token}` };
   const resultado = [];
@@ -5436,20 +5488,9 @@ async function revisarChatsRecuperables(dias) {
       if (!Number.isFinite(fechaChat) || fechaChat < desde) continue;
       huboRecientes = true;
 
-      const participantes = c.participants?.data || [];
-      const lead = participantes.find(p => String(p.id) !== String(cuenta.ig_id));
-      if (!lead) continue;
-
-      const ultimo = c.messages?.data?.[0];
-      // Si el último mensaje NO lo mandó la cuenta de negocio, es del lead.
-      const sinResponder = Boolean(ultimo) && String(ultimo.from?.id) !== String(cuenta.ig_id);
-      resultado.push({
-        senderId: lead.id,
-        username: lead.username || null,
-        sinResponder,
-        texto: sinResponder ? (ultimo.message || "") : "",
-        ultimoMensajeEn: ultimo?.created_time || c.updated_time
-      });
+      const ch = interpretarConversacion(c, yo);
+      if (!ch) continue; // no se puede saber con seguridad quién es quién: se salta
+      resultado.push(ch);
     }
 
     // Instagram devuelve las conversaciones de la más reciente a la más
@@ -5476,20 +5517,8 @@ async function buscarChatPorUsuario(usuarioBuscado) {
   const campos = "id,updated_time,participants,messages.limit(1){id,message,from,created_time,attachments}";
   const base = `https://graph.instagram.com/v25.0/${cuenta.ig_id}/conversations`;
 
-  const aChat = (c) => {
-    const lead = (c.participants?.data || []).find(p => String(p.id) !== String(cuenta.ig_id));
-    if (!lead) return null;
-    const ultimo = c.messages?.data?.[0];
-    const sinResponder = Boolean(ultimo) && String(ultimo.from?.id) !== String(cuenta.ig_id);
-    return {
-      senderId: lead.id,
-      username: lead.username || null,
-      sinResponder,
-      texto: sinResponder ? (ultimo.message || "") : "",
-      ultimoTexto: ultimo?.message || "",
-      ultimoMensajeEn: ultimo?.created_time || c.updated_time
-    };
-  };
+  const yo = await obtenerIdentidadCuenta(cuenta);
+  const aChat = (c) => interpretarConversacion(c, yo);
 
   // 0) Si en vez de un usuario se escribió un ID numérico de Instagram, se pide
   // su conversación directamente por ese ID (no depende de la lista general).
