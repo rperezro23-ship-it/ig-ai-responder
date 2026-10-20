@@ -5491,6 +5491,14 @@ async function buscarChatPorUsuario(usuarioBuscado) {
     };
   };
 
+  // 0) Si en vez de un usuario se escribió un ID numérico de Instagram, se pide
+  // su conversación directamente por ese ID (no depende de la lista general).
+  if (/^\d{8,}$/.test(objetivo)) {
+    const r = await axios.get(base, { params: { platform: "instagram", user_id: objetivo, fields: campos }, headers: cabeceras });
+    const ch = aChat(r.data?.data?.[0] || {});
+    return { chat: ch, escaneados: 1, masReciente: null, sinUsername: 0, porId: true, recientes: [], parecidos: [] };
+  }
+
   // 1) Si ya lo conocemos en la base, se pide su conversación por ID.
   const { data: filas } = await supabase.from("conversaciones").select("sender_id").ilike("username", objetivo).limit(1);
   if (filas && filas[0]) {
@@ -5507,6 +5515,9 @@ async function buscarChatPorUsuario(usuarioBuscado) {
   let url = base;
   let params = { platform: "instagram", fields: campos, limit: 25 };
   let escaneados = 0, masReciente = null, sinUsername = 0;
+  const recientes = [], parecidos = [];
+  const prefijo = objetivo.slice(0, 6);
+  const descr = (ch) => `${ch.username || ch.senderId} (${Math.round((Date.now() - new Date(ch.ultimoMensajeEn).getTime()) / 360000) / 10} h, último: ${ch.sinResponder ? "lead" : "tú"})`;
   for (let pagina = 0; pagina < 40; pagina++) {
     const resp = await axios.get(url, { params, headers: cabeceras });
     const lista = resp.data?.data || [];
@@ -5516,14 +5527,17 @@ async function buscarChatPorUsuario(usuarioBuscado) {
       const ch = aChat(c);
       if (!ch) continue;
       if (!ch.username) sinUsername++;
-      if (ch.username && ch.username.toLowerCase() === objetivo) return { chat: ch, escaneados, masReciente, sinUsername };
+      if (recientes.length < 10) recientes.push(descr(ch));
+      const u = (ch.username || "").toLowerCase();
+      if (u && parecidos.length < 8 && (u.includes(prefijo) || (u.length >= 6 && objetivo.includes(u.slice(0, 6))))) parecidos.push(descr(ch));
+      if (u && u === objetivo) return { chat: ch, escaneados, masReciente, sinUsername, recientes, parecidos };
     }
     const siguiente = resp.data?.paging?.next;
     if (!siguiente || lista.length === 0) break;
     url = siguiente;
     params = undefined;
   }
-  return { chat: null, escaneados, masReciente, sinUsername };
+  return { chat: null, escaneados, masReciente, sinUsername, recientes, parecidos };
 }
 
 app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
@@ -5532,8 +5546,8 @@ app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
     const cuenta = await obtenerCuentaActiva();
     if (!cuenta) return res.status(404).json({ error: "No hay ninguna cuenta de Instagram conectada." });
 
-    const { chat, escaneados, masReciente, sinUsername } = await buscarChatPorUsuario(req.body?.usuario);
-    if (!chat) return res.json({ ok: true, encontrado: false, escaneados, masReciente, sinUsername });
+    const { chat, escaneados, masReciente, sinUsername, recientes, parecidos, porId } = await buscarChatPorUsuario(req.body?.usuario);
+    if (!chat) return res.json({ ok: true, encontrado: false, escaneados, masReciente, sinUsername, recientes: recientes || [], parecidos: parecidos || [], porId: Boolean(porId) });
 
     const conv = await obtenerConversacion(chat.senderId);
     const horas = (Date.now() - new Date(chat.ultimoMensajeEn).getTime()) / 3600000;
@@ -15127,10 +15141,17 @@ ${estilosBase()}
       if(!prueba) return;
 
       if(!prueba.encontrado){
-        alert("No encontré a @" + usuario + " entre los " + prueba.escaneados + " chats más recientes que lista Instagram." + "\\n\\n" +
-          "El chat más reciente que Instagram lista es de: " + (prueba.masReciente ? new Date(prueba.masReciente).toLocaleString() : "(sin datos)") + "\\n" +
-          (prueba.sinUsername ? "Chats sin nombre de usuario en la lista: " + prueba.sinUsername + "\\n" : "") + "\\n" +
-          "Si ese chat es de hoy y no aparece, Instagram no está listando esa conversación por su API (pasa con algunos chats abiertos por comentarios o por otra app). Comprueba que el usuario esté bien escrito.");
+        if(prueba.porId){
+          alert("Instagram no devuelve ninguna conversación para el ID " + usuario + ". Comprueba que el ID sea el correcto.");
+          return;
+        }
+        const listaRec = (prueba.recientes || []).length ? "\\n\\nLos chats más recientes que lista Instagram:\\n• " + prueba.recientes.join("\\n• ") : "";
+        const listaPar = (prueba.parecidos || []).length ? "\\n\\nUsuarios parecidos al que buscas:\\n• " + prueba.parecidos.join("\\n• ") : "";
+        alert("No encontré a @" + usuario + " entre los " + prueba.escaneados + " chats más recientes que lista Instagram." + "\\n" +
+          "El chat más reciente que lista es de: " + (prueba.masReciente ? new Date(prueba.masReciente).toLocaleString() : "(sin datos)") +
+          (prueba.sinUsername ? "\\nChats sin nombre de usuario en la lista: " + prueba.sinUsername : "") +
+          listaPar + listaRec + "\\n\\n" +
+          "Si tu chat con esa persona es reciente y no está en esa lista, Instagram no lo está devolviendo por su API. También puedes pegar su ID numérico de Instagram en vez del usuario.");
         return;
       }
 
