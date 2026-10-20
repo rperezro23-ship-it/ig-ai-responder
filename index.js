@@ -5373,6 +5373,42 @@ app.post("/chats/pausar", requireAdminKey, async (req, res) => {
 // Esto le pregunta a Instagram por las conversaciones recientes (última
 // actividad dentro de los últimos "dias") y devuelve, por cada una, si el
 // ÚLTIMO mensaje es del lead (= sin responder) o de la cuenta (= ya atendido).
+// Para los chats que el bot NO puede contestar solo (fuera de las 24 horas,
+// mensaje que no es texto, bot pausado, "No contactar"...) pero que tienen un
+// mensaje del lead sin responder: se guardan en la base con la fecha REAL de
+// ese mensaje, para que aparezcan en /chats y los puedas atender a mano. Sin
+// esto, un chat que el bot nunca vio (porque otra app tenía el hilo) no existe
+// en la base y /chats no lo muestra — /chats solo lista conversaciones con
+// "ultimo_mensaje_usuario". No toca el bot ni programa ninguna respuesta.
+async function registrarChatRecuperado(ch) {
+  const conv = await obtenerConversacion(ch.senderId);
+  const fecha = new Date(ch.ultimoMensajeEn).toISOString();
+  // Si ya hay algo igual o más nuevo guardado, no se pisa.
+  if (conv.ultimo_mensaje_usuario && new Date(conv.ultimo_mensaje_usuario) >= new Date(fecha)) return false;
+
+  const texto = ch.texto || "[mensaje sin texto: foto, audio u otro adjunto]";
+  const historial = [...(conv.historial || []), { role: "user", content: texto }];
+  while (historial.length > configActual.max_historial) historial.shift();
+
+  const campos = {
+    ultimo_mensaje_usuario: fecha,
+    actualizado_en: fecha,
+    ultimo_mensaje_texto: texto.slice(0, 300),
+    ultimo_mensaje_role: "user",
+    historial
+  };
+  if (!conv.primer_mensaje_en) campos.primer_mensaje_en = fecha;
+  if (!conv.primer_mensaje_texto && ch.texto) campos.primer_mensaje_texto = ch.texto;
+  if (ch.username && !conv.username) campos.username = ch.username;
+
+  await guardarConversacion(ch.senderId, campos);
+  const { error } = await supabase.from("mensajes_chat")
+    .insert({ sender_id: ch.senderId, role: "user", content: texto, creado_en: fecha });
+  if (error) console.error("❌ Error guardando mensaje recuperado en mensajes_chat:", error.message);
+  notificarCambioDeChat(ch.senderId);
+  return true;
+}
+
 async function revisarChatsRecuperables(dias) {
   const cuenta = await obtenerCuentaActiva();
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
@@ -5386,13 +5422,18 @@ async function revisarChatsRecuperables(dias) {
     limit: 25
   };
 
+  let truncado = false;
   for (let pagina = 0; pagina < 20; pagina++) {
     const resp = await axios.get(url, { params, headers: cabeceras });
     const lista = resp.data?.data || [];
     let huboRecientes = false;
 
     for (const c of lista) {
-      if (new Date(c.updated_time).getTime() < desde) continue;
+      // Si Instagram no manda "updated_time", se usa la fecha del último mensaje;
+      // si no hay ninguna fecha válida, el chat se salta (antes se contaba como
+      // reciente, lo que podía inflar la lista hasta el tope).
+      const fechaChat = new Date(c.updated_time || c.messages?.data?.[0]?.created_time).getTime();
+      if (!Number.isFinite(fechaChat) || fechaChat < desde) continue;
       huboRecientes = true;
 
       const participantes = c.participants?.data || [];
@@ -5415,10 +5456,11 @@ async function revisarChatsRecuperables(dias) {
     // antigua: si una página entera ya es más vieja que la ventana, se acaba.
     const siguiente = resp.data?.paging?.next;
     if (!siguiente || !huboRecientes) break;
+    if (pagina === 19) { truncado = true; break; } // llegó al tope de 500 chats
     url = siguiente;
     params = undefined;
   }
-  return resultado;
+  return { chats: resultado, truncado };
 }
 
 // Botón "Recuperar chats" de /chats. Dos pasos desde el panel: primero
@@ -5427,14 +5469,39 @@ async function revisarChatsRecuperables(dias) {
 // SOLO escribe en los que tienen un mensaje del lead sin responder (y solo
 // si es texto, el bot no está pausado en ese chat, no tiene la etiqueta "No
 // contactar" y el bot no le había respondido ya después de ese mensaje).
+let recuperacionChats = null; // { total, hechos, cancelar, terminada, encolados:Set }
+
+app.post("/chats/recuperar-standby/cancelar", requireAdminKey, (req, res) => {
+  if (!recuperacionChats || recuperacionChats.terminada) {
+    return res.json({ ok: true, mensaje: "No hay ninguna recuperación en curso." });
+  }
+  recuperacionChats.cancelar = true;
+  // También se anulan las respuestas que ya estaban en espera (aún sin enviar).
+  let respuestasCanceladas = 0;
+  for (const id of recuperacionChats.encolados) {
+    const b = buffers.get(id);
+    if (b && !b.enProceso) {
+      if (b.timer) clearTimeout(b.timer);
+      if (b.intervaloEscribiendo) clearInterval(b.intervaloEscribiendo);
+      buffers.delete(id);
+      respuestasCanceladas++;
+    }
+  }
+  console.log(`🛑 Recuperación de chats cancelada por el usuario (${recuperacionChats.hechos} de ${recuperacionChats.total} ya procesados, ${respuestasCanceladas} respuestas en espera anuladas).`);
+  res.json({ ok: true, cancelada: true, hechos: recuperacionChats.hechos, total: recuperacionChats.total, respuestasCanceladas });
+});
+
 app.post("/chats/recuperar-standby", requireAdminKey, async (req, res) => {
   try {
     const dias = Math.min(Math.max(parseInt(req.body?.dias, 10) || 3, 1), 14);
     const simular = Boolean(req.body?.simular);
+    if (!simular && recuperacionChats && !recuperacionChats.terminada) {
+      return res.status(409).json({ enCurso: true, error: `Ya hay una recuperación en curso (${recuperacionChats.hechos} de ${recuperacionChats.total} chats).` });
+    }
     const cuenta = await obtenerCuentaActiva();
     if (!cuenta) return res.status(404).json({ error: "No hay ninguna cuenta de Instagram conectada." });
 
-    const chats = await revisarChatsRecuperables(dias);
+    const { chats, truncado } = await revisarChatsRecuperables(dias);
     const plan = [];
     for (const ch of chats) {
       let accion = ch.sinResponder ? "responder" : "solo_control";
@@ -5453,12 +5520,14 @@ app.post("/chats/recuperar-standby", requireAdminKey, async (req, res) => {
           accion = "solo_control"; motivo = "el bot ya respondió después de ese mensaje";
         }
       }
-      plan.push({ ...ch, accion, motivo });
+      // Sin responder y el bot no va a contestar: se guarda en /chats para atenderlo a mano.
+      plan.push({ ...ch, accion, motivo, registrar: ch.sinResponder && accion === "solo_control" });
     }
 
     const aResponder = plan.filter(p => p.accion === "responder").length;
     const fueraDeVentana = plan.filter(p => p.fueraDeVentana);
-    const resumen = { dias, revisados: plan.length, aResponder, soloControl: plan.length - aResponder, fueraDeVentana: fueraDeVentana.length };
+    const paraRevisar = plan.filter(p => p.registrar).length;
+    const resumen = { dias, revisados: plan.length, aResponder, soloControl: plan.length - aResponder, fueraDeVentana: fueraDeVentana.length, paraRevisar, truncado };
 
     if (simular) {
       return res.json({ ok: true, simulacion: true, ...resumen,
@@ -5470,9 +5539,12 @@ app.post("/chats/recuperar-standby", requireAdminKey, async (req, res) => {
     // de una petición web); el resultado final queda en los registros.
     res.json({ ok: true, enSegundoPlano: true, ...resumen });
 
+    const estado = { total: plan.length, hechos: 0, cancelar: false, terminada: false, encolados: new Set() };
+    recuperacionChats = estado;
     (async () => {
-      let tomados = 0, fallos = 0, respondidos = 0;
+      let tomados = 0, fallos = 0, respondidos = 0, guardadosParaRevisar = 0;
       for (const p of plan) {
+        if (estado.cancelar) break;
         const tomado = await tomarControlDelHilo(cuenta, p.senderId);
         if (tomado) tomados++; else fallos++;
 
@@ -5481,14 +5553,21 @@ app.post("/chats/recuperar-standby", requireAdminKey, async (req, res) => {
           await registrarMensajeUsuario(p.senderId, p.texto);
           await cancelarSeguimientosPendientesDB(p.senderId);
           encolarMensaje(p.senderId, p.texto);
+          estado.encolados.add(p.senderId);
           respondidos++;
         } else {
           console.log(`🔓 Chat de ${p.username || p.senderId}: solo se toma el control (${p.motivo}).`);
+          if (p.registrar) {
+            const guardado = await registrarChatRecuperado(p);
+            if (guardado) { guardadosParaRevisar++; console.log(`📥 Chat de ${p.username || p.senderId} guardado en /chats para atenderlo a mano (mensaje sin responder: "${(p.texto || "sin texto").slice(0, 80)}").`); }
+          }
         }
+        estado.hechos++;
         await new Promise(r => setTimeout(r, 1500)); // sin ráfagas hacia Instagram / la IA
       }
-      console.log(`✅ Recuperación de chats terminada: ${plan.length} revisados, control tomado en ${tomados} (sin cambio o error en ${fallos}), ${respondidos} encolados para responder.`);
-    })().catch(err => console.error("❌ Error recuperando chats:", err.response?.data || err.message));
+      estado.terminada = true;
+      console.log(`✅ Recuperación de chats terminada: ${plan.length} revisados, control tomado en ${tomados} (sin cambio o error en ${fallos}), ${respondidos} encolados para responder, ${guardadosParaRevisar} guardados en /chats para atender a mano.`);
+    })().catch(err => { estado.terminada = true; console.error("❌ Error recuperando chats:", err.response?.data || err.message); });
   } catch (err) {
     res.status(500).json({ error: err.response?.data?.error?.message || err.message });
   }
@@ -14875,7 +14954,17 @@ ${estilosBase()}
         });
         if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
         const data = await res.json().catch(() => ({}));
-        if(!res.ok){ alert("No se pudo: " + (data.error || "error desconocido")); return null; }
+        if(!res.ok){
+          if(data.enCurso){
+            if(confirm(data.error + "\\n\\n¿Quieres cancelarla? (detiene el proceso y anula las respuestas que aún no se han enviado)")){
+              const c = await fetch("/chats/recuperar-standby/cancelar", { method: "POST" });
+              const cd = await c.json().catch(() => ({}));
+              alert(cd.cancelada ? "Cancelada. Se alcanzaron a procesar " + cd.hechos + " de " + cd.total + " chats; se anularon " + cd.respuestasCanceladas + " respuestas en espera." : (cd.mensaje || "No se pudo cancelar."));
+            }
+            return null;
+          }
+          alert("No se pudo: " + (data.error || "error desconocido")); return null;
+        }
         return data;
       };
 
@@ -14883,11 +14972,13 @@ ${estilosBase()}
       if(!prueba) return;
       if(prueba.revisados === 0){ alert("No hay chats con actividad en los últimos " + dias + " días."); return; }
 
-      const resumenTxt = "Chats revisados (últimos " + dias + " días): " + prueba.revisados + "\\n\\n" +
+      const avisoTope = prueba.truncado ? "OJO: hay más de 500 chats con actividad en ese periodo; solo se revisaron los 500 más recientes. Prueba con menos días.\\n\\n" : "";
+      const resumenTxt = avisoTope + "Chats revisados (últimos " + dias + " días): " + prueba.revisados + "\\n\\n" +
         "• Sin responder, el bot les contestará: " + prueba.aResponder + "\\n" +
         "• Solo se toma el control, sin escribir: " + prueba.soloControl + "\\n" +
         "   (de esos, " + prueba.fueraDeVentana + " tienen un mensaje sin responder pero FUERA de las 24 horas: Instagram no deja que el bot les escriba, respóndelos tú a mano" +
-        (prueba.sinResponderFueraDeVentana && prueba.sinResponderFueraDeVentana.length ? ": " + prueba.sinResponderFueraDeVentana.slice(0, 15).join(", ") + (prueba.sinResponderFueraDeVentana.length > 15 ? "…" : "") : "") + ")\\n\\n" +
+        (prueba.sinResponderFueraDeVentana && prueba.sinResponderFueraDeVentana.length ? ": " + prueba.sinResponderFueraDeVentana.slice(0, 15).join(", ") + (prueba.sinResponderFueraDeVentana.length > 15 ? "…" : "") : "") + ")\\n" +
+        "• Chats sin responder que se guardarán en la lista de /chats para que los veas: " + prueba.paraRevisar + "\\n\\n" +
         "¿Continuar?";
       if(!confirm(resumenTxt)) return;
 
