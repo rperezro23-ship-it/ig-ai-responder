@@ -5368,6 +5368,125 @@ app.post("/chats/pausar", requireAdminKey, async (req, res) => {
   }
 });
 
+// Recuperar chats "perdidos": cuando otra app (ej. ManyChat) tenía el control
+// del hilo, el mensaje del lead llegaba en "standby" y el bot ni lo veía.
+// Esto le pregunta a Instagram por las conversaciones recientes (última
+// actividad dentro de los últimos "dias") y devuelve, por cada una, si el
+// ÚLTIMO mensaje es del lead (= sin responder) o de la cuenta (= ya atendido).
+async function revisarChatsRecuperables(dias) {
+  const cuenta = await obtenerCuentaActiva();
+  if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
+  const desde = Date.now() - dias * 86400000;
+  const cabeceras = { "Authorization": `Bearer ${cuenta.access_token}` };
+  const resultado = [];
+  let url = `https://graph.instagram.com/v25.0/${cuenta.ig_id}/conversations`;
+  let params = {
+    platform: "instagram",
+    fields: "id,updated_time,participants,messages.limit(1){id,message,from,created_time,attachments}",
+    limit: 25
+  };
+
+  for (let pagina = 0; pagina < 20; pagina++) {
+    const resp = await axios.get(url, { params, headers: cabeceras });
+    const lista = resp.data?.data || [];
+    let huboRecientes = false;
+
+    for (const c of lista) {
+      if (new Date(c.updated_time).getTime() < desde) continue;
+      huboRecientes = true;
+
+      const participantes = c.participants?.data || [];
+      const lead = participantes.find(p => String(p.id) !== String(cuenta.ig_id));
+      if (!lead) continue;
+
+      const ultimo = c.messages?.data?.[0];
+      // Si el último mensaje NO lo mandó la cuenta de negocio, es del lead.
+      const sinResponder = Boolean(ultimo) && String(ultimo.from?.id) !== String(cuenta.ig_id);
+      resultado.push({
+        senderId: lead.id,
+        username: lead.username || null,
+        sinResponder,
+        texto: sinResponder ? (ultimo.message || "") : "",
+        ultimoMensajeEn: ultimo?.created_time || c.updated_time
+      });
+    }
+
+    // Instagram devuelve las conversaciones de la más reciente a la más
+    // antigua: si una página entera ya es más vieja que la ventana, se acaba.
+    const siguiente = resp.data?.paging?.next;
+    if (!siguiente || !huboRecientes) break;
+    url = siguiente;
+    params = undefined;
+  }
+  return resultado;
+}
+
+// Botón "Recuperar chats" de /chats. Dos pasos desde el panel: primero
+// "simular" (solo cuenta qué haría, no toca nada) y, si confirmas, la
+// ejecución real: toma el control del hilo de TODOS esos chats, pero el bot
+// SOLO escribe en los que tienen un mensaje del lead sin responder (y solo
+// si es texto, el bot no está pausado en ese chat, no tiene la etiqueta "No
+// contactar" y el bot no le había respondido ya después de ese mensaje).
+app.post("/chats/recuperar-standby", requireAdminKey, async (req, res) => {
+  try {
+    const dias = Math.min(Math.max(parseInt(req.body?.dias, 10) || 3, 1), 14);
+    const simular = Boolean(req.body?.simular);
+    const cuenta = await obtenerCuentaActiva();
+    if (!cuenta) return res.status(404).json({ error: "No hay ninguna cuenta de Instagram conectada." });
+
+    const chats = await revisarChatsRecuperables(dias);
+    const plan = [];
+    for (const ch of chats) {
+      let accion = ch.sinResponder ? "responder" : "solo_control";
+      let motivo = ch.sinResponder ? "" : "ya estaba atendido";
+      if (ch.sinResponder) {
+        const conv = await obtenerConversacion(ch.senderId);
+        if (!ch.texto) { accion = "solo_control"; motivo = "el último mensaje no es de texto"; }
+        else if (conv.bot_pausado) { accion = "solo_control"; motivo = "bot pausado en este chat"; }
+        else if (tieneEtiquetaNoContactar(conv)) { accion = "solo_control"; motivo = "tiene la etiqueta No contactar"; }
+        else if (conv.ultimo_mensaje_bot_en && new Date(conv.ultimo_mensaje_bot_en) > new Date(ch.ultimoMensajeEn)) {
+          accion = "solo_control"; motivo = "el bot ya respondió después de ese mensaje";
+        }
+      }
+      plan.push({ ...ch, accion, motivo });
+    }
+
+    const aResponder = plan.filter(p => p.accion === "responder").length;
+    const resumen = { dias, revisados: plan.length, aResponder, soloControl: plan.length - aResponder };
+
+    if (simular) {
+      return res.json({ ok: true, simulacion: true, ...resumen,
+        responderA: plan.filter(p => p.accion === "responder").map(p => p.username || p.senderId) });
+    }
+
+    // Ejecución real en segundo plano (puede tardar más que el tiempo máximo
+    // de una petición web); el resultado final queda en los registros.
+    res.json({ ok: true, enSegundoPlano: true, ...resumen });
+
+    (async () => {
+      let tomados = 0, fallos = 0, respondidos = 0;
+      for (const p of plan) {
+        const tomado = await tomarControlDelHilo(cuenta, p.senderId);
+        if (tomado) tomados++; else fallos++;
+
+        if (p.accion === "responder") {
+          console.log(`🔄 Recuperando chat de ${p.username || p.senderId}: se responde a su último mensaje sin contestar: "${p.texto}"`);
+          await registrarMensajeUsuario(p.senderId, p.texto);
+          await cancelarSeguimientosPendientesDB(p.senderId);
+          encolarMensaje(p.senderId, p.texto);
+          respondidos++;
+        } else {
+          console.log(`🔓 Chat de ${p.username || p.senderId}: solo se toma el control (${p.motivo}).`);
+        }
+        await new Promise(r => setTimeout(r, 1500)); // sin ráfagas hacia Instagram / la IA
+      }
+      console.log(`✅ Recuperación de chats terminada: ${plan.length} revisados, control tomado en ${tomados} (sin cambio o error en ${fallos}), ${respondidos} encolados para responder.`);
+    })().catch(err => console.error("❌ Error recuperando chats:", err.response?.data || err.message));
+  } catch (err) {
+    res.status(500).json({ error: err.response?.data?.error?.message || err.message });
+  }
+});
+
 // Envía un mensaje manual desde /chats (respuesta humana, fuera del flujo de la IA).
 // Se guarda en el mismo historial que usa la IA, para que si el bot retoma la
 // conversación más adelante tenga contexto de lo que ya se le contestó a mano.
@@ -13092,6 +13211,7 @@ ${estilosBase()}
             <option value="enlace">🔗 Enlace enviado</option>
           </select>
           <button type="button" class="btn-mini" id="btnReporteDolores" title="Analiza tus conversaciones y descarga un CSV con las frecuencias de dolores y obstáculos que mencionaron tus leads.">📊 Resumen</button>
+          <button type="button" class="btn-mini" id="btnRecuperarChats" title="Toma el control de los chats recientes que otra app (ej. ManyChat) tenía, y el bot solo escribe en los que tienen un mensaje del lead sin responder.">🔓 Recuperar chats</button>
           <div class="chat-export" id="chatExportWrap" style="display:none;">
             <a id="btnExportar" href="#" class="btn-mini">⬇ CSV</a>
           </div>
@@ -14728,6 +14848,50 @@ ${estilosBase()}
   if(document.visibilityState === "visible"){
     iniciarRefrescoPeriodico();
   }
+
+  document.getElementById("btnRecuperarChats").addEventListener("click", async () => {
+    const btn = document.getElementById("btnRecuperarChats");
+    const textoOriginal = btn.textContent;
+    const entrada = prompt("¿De cuántos días atrás quieres revisar los chats? (1 a 14)", "3");
+    if(entrada === null) return;
+    const dias = parseInt(entrada, 10);
+    if(!dias || dias < 1 || dias > 14){ alert("Escribe un número de días entre 1 y 14."); return; }
+
+    btn.disabled = true;
+    btn.textContent = "⏳ Revisando chats…";
+    try {
+      const pedir = async (simular) => {
+        const res = await fetch("/chats/recuperar-standby", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dias: dias, simular: simular })
+        });
+        if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
+        const data = await res.json().catch(() => ({}));
+        if(!res.ok){ alert("No se pudo: " + (data.error || "error desconocido")); return null; }
+        return data;
+      };
+
+      const prueba = await pedir(true);
+      if(!prueba) return;
+      if(prueba.revisados === 0){ alert("No hay chats con actividad en los últimos " + dias + " días."); return; }
+
+      const resumenTxt = "Chats revisados (últimos " + dias + " días): " + prueba.revisados + "\\n\\n" +
+        "• Sin responder, el bot les contestará: " + prueba.aResponder + "\\n" +
+        "• Solo se toma el control, sin escribir: " + prueba.soloControl + "\\n\\n" +
+        "¿Continuar?";
+      if(!confirm(resumenTxt)) return;
+
+      btn.textContent = "⏳ Recuperando…";
+      const real = await pedir(false);
+      if(real) alert("Listo, en proceso. Se está tomando el control de " + real.revisados + " chats y el bot responderá a " + real.aResponder + ". El detalle queda en los registros del servidor.");
+    } catch (err) {
+      alert("Error de conexión: " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = textoOriginal;
+    }
+  });
 
   document.getElementById("btnReporteDolores").addEventListener("click", async () => {
     const btn = document.getElementById("btnReporteDolores");
