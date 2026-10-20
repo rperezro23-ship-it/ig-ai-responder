@@ -13226,7 +13226,7 @@ ${estilosBase()}
   }
 
   .chat-list-panel{
-    width:400px; flex-shrink:0; background:var(--surface); border:1px solid var(--border);
+    width:440px; flex-shrink:0; background:var(--surface); border:1px solid var(--border);
     border-radius:var(--radius-lg); display:flex; flex-direction:column; overflow:hidden;
   }
   .chat-list-head{
@@ -13405,6 +13405,16 @@ ${estilosBase()}
   .btn-mini:hover:not(:disabled){ background:rgba(63,199,232,.18); }
   .btn-mini:disabled{ opacity:.6; cursor:default; }
   .chat-export{ flex-shrink:0; }
+  /* Barra en UNA sola línea: segmento + Resumen + Recuperar chats + Recuperar un
+     usuario + CSV. Botones más pequeños; si en alguna pantalla no cupieran, el
+     texto se recorta con "…" en vez de saltar a otra línea. */
+  .chat-toolbar{ flex-wrap:nowrap; gap:4px; padding:8px 8px; }
+  .chat-toolbar .select-mini{ flex:1 1 56px; min-width:0; padding:4px 2px; font-size:10.5px; }
+  .chat-toolbar .btn-mini{
+    flex-shrink:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+    padding:4px 6px; font-size:10.5px; border-radius:6px;
+  }
+  .chat-toolbar .chat-export{ flex-shrink:1; min-width:0; }
   .chat-input-bar{
     display:none; gap:10px; padding:14px 18px; border-top:1px solid var(--border);
     align-items:flex-end; flex-shrink:0;
