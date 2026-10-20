@@ -5463,6 +5463,113 @@ async function revisarChatsRecuperables(dias) {
   return { chats: resultado, truncado };
 }
 
+// Busca UN chat en Instagram por nombre de usuario (botón "Recuperar un
+// usuario" de /chats). Primero intenta por el ID si ya lo conocemos en la base
+// (consulta exacta) y, si no, recorre las conversaciones más recientes de
+// Instagram (hasta ~1000) hasta dar con ese usuario.
+async function buscarChatPorUsuario(usuarioBuscado) {
+  const cuenta = await obtenerCuentaActiva();
+  if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
+  const objetivo = String(usuarioBuscado || "").trim().replace(/^@/, "").toLowerCase();
+  if (!objetivo) throw new Error("Escribe un nombre de usuario.");
+  const cabeceras = { "Authorization": `Bearer ${cuenta.access_token}` };
+  const campos = "id,updated_time,participants,messages.limit(1){id,message,from,created_time,attachments}";
+  const base = `https://graph.instagram.com/v25.0/${cuenta.ig_id}/conversations`;
+
+  const aChat = (c) => {
+    const lead = (c.participants?.data || []).find(p => String(p.id) !== String(cuenta.ig_id));
+    if (!lead) return null;
+    const ultimo = c.messages?.data?.[0];
+    const sinResponder = Boolean(ultimo) && String(ultimo.from?.id) !== String(cuenta.ig_id);
+    return {
+      senderId: lead.id,
+      username: lead.username || null,
+      sinResponder,
+      texto: sinResponder ? (ultimo.message || "") : "",
+      ultimoTexto: ultimo?.message || "",
+      ultimoMensajeEn: ultimo?.created_time || c.updated_time
+    };
+  };
+
+  // 1) Si ya lo conocemos en la base, se pide su conversación por ID.
+  const { data: filas } = await supabase.from("conversaciones").select("sender_id").ilike("username", objetivo).limit(1);
+  if (filas && filas[0]) {
+    try {
+      const r = await axios.get(base, { params: { platform: "instagram", user_id: filas[0].sender_id, fields: campos }, headers: cabeceras });
+      const ch = aChat(r.data?.data?.[0] || {});
+      if (ch) return { chat: ch, escaneados: 1, masReciente: null, sinUsername: 0 };
+    } catch (err) {
+      console.warn("⚠️ Búsqueda por ID falló, se recorre la lista:", err.response?.data?.error?.message || err.message);
+    }
+  }
+
+  // 2) Se recorre la lista de conversaciones (de la más reciente a la más antigua).
+  let url = base;
+  let params = { platform: "instagram", fields: campos, limit: 25 };
+  let escaneados = 0, masReciente = null, sinUsername = 0;
+  for (let pagina = 0; pagina < 40; pagina++) {
+    const resp = await axios.get(url, { params, headers: cabeceras });
+    const lista = resp.data?.data || [];
+    for (const c of lista) {
+      escaneados++;
+      if (!masReciente) masReciente = c.updated_time || null;
+      const ch = aChat(c);
+      if (!ch) continue;
+      if (!ch.username) sinUsername++;
+      if (ch.username && ch.username.toLowerCase() === objetivo) return { chat: ch, escaneados, masReciente, sinUsername };
+    }
+    const siguiente = resp.data?.paging?.next;
+    if (!siguiente || lista.length === 0) break;
+    url = siguiente;
+    params = undefined;
+  }
+  return { chat: null, escaneados, masReciente, sinUsername };
+}
+
+app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
+  try {
+    const simular = Boolean(req.body?.simular);
+    const cuenta = await obtenerCuentaActiva();
+    if (!cuenta) return res.status(404).json({ error: "No hay ninguna cuenta de Instagram conectada." });
+
+    const { chat, escaneados, masReciente, sinUsername } = await buscarChatPorUsuario(req.body?.usuario);
+    if (!chat) return res.json({ ok: true, encontrado: false, escaneados, masReciente, sinUsername });
+
+    const conv = await obtenerConversacion(chat.senderId);
+    const horas = (Date.now() - new Date(chat.ultimoMensajeEn).getTime()) / 3600000;
+    let accion = "responder", motivo = "";
+    if (!chat.sinResponder) { accion = "solo_control"; motivo = "el último mensaje del chat lo mandaste tú, ya está atendido"; }
+    else if (horas > 23) { accion = "solo_control"; motivo = "fuera de la ventana de 24 horas"; }
+    else if (!chat.texto) { accion = "solo_control"; motivo = "el último mensaje no es de texto"; }
+    else if (conv.bot_pausado) { accion = "solo_control"; motivo = "bot pausado en este chat"; }
+    else if (tieneEtiquetaNoContactar(conv)) { accion = "solo_control"; motivo = "tiene la etiqueta No contactar"; }
+    else if (conv.ultimo_mensaje_bot_en && new Date(conv.ultimo_mensaje_bot_en) > new Date(chat.ultimoMensajeEn)) { accion = "solo_control"; motivo = "el bot ya respondió después de ese mensaje"; }
+    const registrar = chat.sinResponder && accion === "solo_control";
+
+    const detalle = {
+      encontrado: true, username: chat.username, senderId: chat.senderId,
+      sinResponder: chat.sinResponder, horas: Math.round(horas * 10) / 10,
+      ultimoMensaje: (chat.ultimoTexto || "").slice(0, 120),
+      accion, motivo, registrar, enBase: Boolean(conv.ultimo_mensaje_usuario)
+    };
+    if (simular) return res.json({ ok: true, simulacion: true, ...detalle });
+
+    const tomado = await tomarControlDelHilo(cuenta, chat.senderId);
+    if (accion === "responder") {
+      console.log(`🔄 Recuperando chat de ${chat.username}: se responde a su último mensaje sin contestar: "${chat.texto}"`);
+      await registrarMensajeUsuario(chat.senderId, chat.texto);
+      await cancelarSeguimientosPendientesDB(chat.senderId);
+      encolarMensaje(chat.senderId, chat.texto);
+    } else if (registrar) {
+      await registrarChatRecuperado(chat);
+      console.log(`📥 Chat de ${chat.username} guardado en /chats para atenderlo a mano.`);
+    }
+    res.json({ ok: true, ...detalle, controlTomado: tomado });
+  } catch (err) {
+    res.status(500).json({ error: err.response?.data?.error?.message || err.message });
+  }
+});
+
 // Botón "Recuperar chats" de /chats. Dos pasos desde el panel: primero
 // "simular" (solo cuenta qué haría, no toca nada) y, si confirmas, la
 // ejecución real: toma el control del hilo de TODOS esos chats, pero el bot
@@ -13298,6 +13405,7 @@ ${estilosBase()}
           </select>
           <button type="button" class="btn-mini" id="btnReporteDolores" title="Analiza tus conversaciones y descarga un CSV con las frecuencias de dolores y obstáculos que mencionaron tus leads.">📊 Resumen</button>
           <button type="button" class="btn-mini" id="btnRecuperarChats" title="Toma el control de los chats recientes que otra app (ej. ManyChat) tenía, y el bot solo escribe en los que tienen un mensaje del lead sin responder.">🔓 Recuperar chats</button>
+          <button type="button" class="btn-mini" id="btnRecuperarUsuario" title="Busca UN chat por su nombre de usuario de Instagram, te dice cuándo escribió y si está sin responder, y lo recupera.">🔎 Recuperar un usuario</button>
           <div class="chat-export" id="chatExportWrap" style="display:none;">
             <a id="btnExportar" href="#" class="btn-mini">⬇ CSV</a>
           </div>
@@ -14985,6 +15093,60 @@ ${estilosBase()}
       btn.textContent = "⏳ Recuperando…";
       const real = await pedir(false);
       if(real) alert("Listo, en proceso. Se está tomando el control de " + real.revisados + " chats y el bot responderá a " + real.aResponder + ". El detalle queda en los registros del servidor.");
+    } catch (err) {
+      alert("Error de conexión: " + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = textoOriginal;
+    }
+  });
+
+  document.getElementById("btnRecuperarUsuario").addEventListener("click", async () => {
+    const btn = document.getElementById("btnRecuperarUsuario");
+    const textoOriginal = btn.textContent;
+    const entrada = prompt("Nombre de usuario de Instagram del chat que quieres recuperar (con o sin @):", "");
+    if(entrada === null || !entrada.trim()) return;
+    const usuario = entrada.trim().replace(/^@/, "");
+
+    btn.disabled = true;
+    btn.textContent = "⏳ Buscando…";
+    try {
+      const pedir = async (simular) => {
+        const res = await fetch("/chats/recuperar-usuario", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ usuario: usuario, simular: simular })
+        });
+        if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
+        const data = await res.json().catch(() => ({}));
+        if(!res.ok){ alert("No se pudo: " + (data.error || "error desconocido")); return null; }
+        return data;
+      };
+
+      const prueba = await pedir(true);
+      if(!prueba) return;
+
+      if(!prueba.encontrado){
+        alert("No encontré a @" + usuario + " entre los " + prueba.escaneados + " chats más recientes que lista Instagram." + "\\n\\n" +
+          "El chat más reciente que Instagram lista es de: " + (prueba.masReciente ? new Date(prueba.masReciente).toLocaleString() : "(sin datos)") + "\\n" +
+          (prueba.sinUsername ? "Chats sin nombre de usuario en la lista: " + prueba.sinUsername + "\\n" : "") + "\\n" +
+          "Si ese chat es de hoy y no aparece, Instagram no está listando esa conversación por su API (pasa con algunos chats abiertos por comentarios o por otra app). Comprueba que el usuario esté bien escrito.");
+        return;
+      }
+
+      const queHara = prueba.accion === "responder"
+        ? "El bot tomará el control y le contestará a su último mensaje."
+        : "El bot tomará el control pero NO escribirá (" + prueba.motivo + ")." + (prueba.registrar ? " Se guardará en la lista de /chats para que lo atiendas a mano." : "");
+      const txt = "Encontrado: @" + prueba.username + "\\n" +
+        "Último mensaje: " + (prueba.sinResponder ? "del lead, SIN responder" : "tuyo (ya atendido)") + ", hace " + prueba.horas + " h\\n" +
+        "«" + prueba.ultimoMensaje + "»\\n" +
+        "¿Ya está en tu lista de chats?: " + (prueba.enBase ? "sí" : "no") + "\\n\\n" +
+        queHara + "\\n\\n¿Continuar?";
+      if(!confirm(txt)) return;
+
+      btn.textContent = "⏳ Recuperando…";
+      const real = await pedir(false);
+      if(real) alert("Listo. " + (real.controlTomado ? "Se tomó el control del chat." : "No se pudo tomar el control (puede que ya lo tuviera el bot).") + (real.accion === "responder" ? " El bot le responderá en unos segundos." : (real.registrar ? " Ya puedes buscarlo en la lista de chats." : "")));
     } catch (err) {
       alert("Error de conexión: " + err.message);
     } finally {
