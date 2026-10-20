@@ -2016,6 +2016,24 @@ async function tomarControlDelHilo(cuenta, senderId) {
   }
 }
 
+// Cuando otra app (ej. ManyChat) tiene el control del hilo, Meta NO manda el
+// mensaje del lead como un evento normal sino como "standby" — y el bot, sin
+// este paso, solo lo anotaba en el registro y nunca respondía. Esto toma el
+// control del hilo en cuanto llega un mensaje en standby, para que el bot lo
+// procese como cualquier otro. Se recuerda cuándo se tomó cada hilo para no
+// repetir la petición en una ráfaga de mensajes seguidos del mismo lead.
+const hilosTomadosRecientemente = new Map(); // senderId -> timestamp ms
+async function tomarControlSiLlegoEnStandby(senderId) {
+  const ahora = Date.now();
+  const ultimo = hilosTomadosRecientemente.get(senderId) || 0;
+  if (ahora - ultimo < 30000) return true;
+  const cuenta = await obtenerCuentaActiva();
+  if (!cuenta) return false;
+  const tomado = await tomarControlDelHilo(cuenta, senderId);
+  if (tomado) hilosTomadosRecientemente.set(senderId, ahora);
+  return tomado;
+}
+
 // Punto único desde el que TODOS los envíos (texto, audio, foto, archivo,
 // botón) llaman a "POST .../messages" — centraliza el reintento automático
 // de "tomar el control del hilo" descrito arriba, para no repetir esa lógica
@@ -4056,6 +4074,25 @@ app.post("/webhook", async (req, res) => {
 
     if (entry.standby) {
       console.log("⚠️ Evento recibido en STANDBY (otra app tiene el control principal):", JSON.stringify(entry.standby));
+
+      // Se procesan SOLO los mensajes/reacciones que manda el lead (no los
+      // "echoes" de lo que mandó la otra app, ni "visto"/entregado): se toma
+      // el control del hilo y el evento sigue el flujo normal de abajo, igual
+      // que un mensaje recibido sin conflicto.
+      for (const ev of entry.standby) {
+        const idLead = ev?.sender?.id;
+        if (!idLead || String(idLead) === String(entry.id)) continue;
+        const esMensajeDelLead = (ev.message && !ev.message.is_echo) || ev.reaction;
+        if (!esMensajeDelLead) continue;
+
+        const tomado = await tomarControlSiLlegoEnStandby(idLead);
+        if (tomado) {
+          console.log(`🔓 Mensaje de ${idLead} llegó en STANDBY — se tomó el control del hilo y se procesa normalmente.`);
+          eventos.push(ev);
+        } else {
+          console.warn(`⚠️ Mensaje de ${idLead} llegó en STANDBY y NO se pudo tomar el control del hilo — no se responderá.`);
+        }
+      }
     }
 
     for (const event of eventos) {
@@ -4313,6 +4350,108 @@ app.get("/favicon-calendario.svg", (req, res) => {
   <path d="M29 39l2.2 2.4L36 36.5" stroke="#FFFFFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
 </svg>
   `.trim());
+});
+
+// Para la extensión de Chrome que hace el seguimiento manual de los leads que
+// ya pasaron la ventana de 24h: dado el @usuario (o el sender_id), devuelve un
+// mensaje que re-plantea con otras palabras la pregunta que el lead dejó sin
+// responder, ajustado a los días que lleva en silencio. Si no hay nada bueno
+// que sugerir, "mensaje" viene en null y la extensión usa su mensaje fijo.
+// Lleva CORS abierto porque lo llama el service worker de la extensión; está
+// protegido por la clave de admin (header x-admin-key).
+function corsSeguimientoSugerido(req, res, next) {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Headers", "x-admin-key, content-type");
+  res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+}
+
+async function generarSeguimientoDiasSinResponder(senderId, diasSinResponder) {
+  const { data: mensajes, error } = await supabase
+    .from("mensajes_chat")
+    .select("role, content")
+    .eq("sender_id", senderId)
+    .order("creado_en", { ascending: false })
+    .limit(12);
+  if (error || !mensajes?.length) return null;
+
+  const texto = (m) => (typeof m.content === "string" && m.content.trim() &&
+    !m.content.startsWith("[[imagen]]") && !m.content.startsWith("[[audio]]")) ? m.content.trim() : "";
+
+  // Mensajes del bot posteriores al último mensaje del lead, en orden cronológico.
+  const pendientes = [];
+  for (const m of mensajes) {
+    if (m.role === "user") break;
+    if (m.role === "assistant" && texto(m)) pendientes.unshift(texto(m));
+  }
+  if (!pendientes.some(t => t.includes("?"))) return null;
+
+  const ultimoLead = mensajes.find(m => m.role === "user" && texto(m));
+  const dias = Math.max(1, Math.round(diasSinResponder || 3));
+
+  const resp = await openaiClient.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.7,
+    max_tokens: 140,
+    messages: [
+      {
+        role: "system",
+        content:
+          "Eres un vendedor por Instagram DM que escribe en español neutro, tuteando, con tono cercano y natural (puedes decir 'hermano' si encaja). " +
+          "Un lead lleva unos " + dias + " días sin responder. Abajo tienes los mensajes tuyos que quedaron sin respuesta (en orden) y, si existe, lo último que el lead escribió. " +
+          "Escribe UN solo mensaje corto (máximo 2 frases) para reactivar la conversación volviendo a plantear la PREGUNTA CLAVE que el lead no respondió " +
+          "(la primera pregunta real, no los recordatorios posteriores), con otras palabras y fácil de contestar en una línea. " +
+          "Puedes aludir de forma natural al tiempo ('hace unos días'), sin reclamar ni presionar. " +
+          "Reglas: no te despidas, no uses 'última oportunidad', máximo un emoji, no inventes datos, no agregues preguntas nuevas, no repitas textual. " +
+          "Responde SOLO con el mensaje."
+      },
+      {
+        role: "user",
+        content:
+          (ultimoLead ? "Último mensaje del lead: " + texto(ultimoLead) + "\n\n" : "") +
+          "Mensajes tuyos sin respuesta:\n" + pendientes.map(t => "- " + t).join("\n")
+      }
+    ]
+  });
+
+  const resultado = (resp.choices?.[0]?.message?.content || "").trim().replace(/^["“]|["”]$/g, "");
+  if (!resultado || resultado.length > 300 || !resultado.includes("?") || resultado.includes("[[")) return null;
+  return resultado;
+}
+
+app.options("/api/seguimiento-sugerido", corsSeguimientoSugerido);
+app.get("/api/seguimiento-sugerido", corsSeguimientoSugerido, requireAdminKey, async (req, res) => {
+  try {
+    let senderId = (req.query.sender_id || "").toString().trim();
+    const username = (req.query.username || "").toString().trim().replace(/^@/, "");
+
+    if (!senderId && username) {
+      const { data, error } = await supabase
+        .from("conversaciones")
+        .select("sender_id")
+        .ilike("username", username)
+        .order("actualizado_en", { ascending: false })
+        .limit(1);
+      if (error) return res.status(500).json({ error: error.message });
+      senderId = data?.[0]?.sender_id || "";
+    }
+    if (!senderId) return res.json({ mensaje: null, motivo: "lead_no_encontrado" });
+
+    const conv = await obtenerConversacion(senderId);
+    if (tieneEtiquetaNoContactar(conv)) return res.json({ mensaje: null, motivo: "no_contactar" });
+
+    const ultimo = conv.ultimo_mensaje_usuario ? new Date(conv.ultimo_mensaje_usuario).getTime() : null;
+    const dias = req.query.dias
+      ? Number(req.query.dias)
+      : (ultimo ? (Date.now() - ultimo) / 86400000 : 3);
+
+    const mensaje = await generarSeguimientoDiasSinResponder(senderId, dias);
+    res.json({ mensaje, motivo: mensaje ? "ok" : "sin_pregunta_pendiente", dias_sin_responder: Math.round(dias * 10) / 10 });
+  } catch (err) {
+    console.error("❌ Error en /api/seguimiento-sugerido:", err.message);
+    res.json({ mensaje: null, motivo: "error" });
+  }
 });
 
 app.get("/cron/seguimientos", async (req, res) => {
