@@ -5477,6 +5477,7 @@ function interpretarConversacion(c, yo) {
     texto: sinResponder ? (ultimo.message || "") : "",
     ultimoTexto: ultimo.message || "",
     ultimoMensajeEn: ultimo.created_time || c.updated_time,
+    conversacionId: c.id || null,
     ultimoDelLeadEn: ultimoDelLead?.created_time || null,
     ultimoDelLeadTexto: ultimoDelLead?.message || "",
     ultimosMensajes: mensajes.slice(0, 6).reverse().map(m => ({
@@ -5484,6 +5485,81 @@ function interpretarConversacion(c, yo) {
       texto: (m.message || "[foto, audio u otro adjunto]").slice(0, 160)
     }))
   };
+}
+
+// Trae de Instagram la conversación COMPLETA (de principio a fin) y la guarda
+// en el historial que muestra /chats ("mensajes_chat") con las fechas reales,
+// sin duplicar mensajes que ya estuvieran guardados. También actualiza el
+// historial que usa la IA (los últimos mensajes) para que el bot tenga el
+// contexto real si retoma la conversación.
+function fechaIso(s) {
+  const t = Date.parse(String(s).replace(/([+-]\d{2})(\d{2})$/, "$1:$2"));
+  return Number.isNaN(t) ? null : new Date(t).toISOString();
+}
+
+async function importarHistorialCompleto(cuenta, yo, chat) {
+  if (!chat.conversacionId) throw new Error("Instagram no devolvió el ID de la conversación.");
+  const cabeceras = { "Authorization": `Bearer ${cuenta.access_token}` };
+  const todos = [];
+  const resp = await axios.get(`https://graph.instagram.com/v25.0/${chat.conversacionId}`, {
+    params: { fields: "messages.limit(50){id,message,from,created_time,attachments}" },
+    headers: cabeceras
+  });
+  let bloque = resp.data?.messages;
+  for (let pagina = 0; pagina < 40 && bloque; pagina++) {
+    for (const m of bloque.data || []) todos.push(m);
+    const siguiente = bloque.paging?.next;
+    if (!siguiente) break;
+    bloque = (await axios.get(siguiente, { headers: cabeceras })).data;
+  }
+
+  const msgs = todos
+    .map(m => ({
+      role: esMiCuenta(m.from, yo) ? "assistant" : "user",
+      content: (m.message && m.message.trim()) ? m.message : "[foto, audio, reel u otro adjunto]",
+      creado_en: fechaIso(m.created_time)
+    }))
+    .filter(m => m.creado_en)
+    .sort((a, b) => (a.creado_en < b.creado_en ? -1 : a.creado_en > b.creado_en ? 1 : 0));
+  if (msgs.length === 0) return { total: 0, insertados: 0 };
+
+  // No se duplica lo que ya estuviera guardado (mismo rol, mismo texto y a menos de 5 min).
+  const { data: existentes } = await supabase.from("mensajes_chat")
+    .select("role, content, creado_en").eq("sender_id", chat.senderId).limit(5000);
+  const yaEsta = (m) => (existentes || []).some(e =>
+    e.role === m.role && String(e.content).trim() === m.content.trim() &&
+    Math.abs(new Date(e.creado_en).getTime() - new Date(m.creado_en).getTime()) < 5 * 60 * 1000);
+  const nuevos = msgs.filter(m => !yaEsta(m));
+  for (let i = 0; i < nuevos.length; i += 100) {
+    const { error } = await supabase.from("mensajes_chat").insert(
+      nuevos.slice(i, i + 100).map(m => ({ sender_id: chat.senderId, role: m.role, content: m.content, creado_en: m.creado_en }))
+    );
+    if (error) throw new Error("No se pudo guardar el historial: " + error.message);
+  }
+
+  // Resumen de la conversación en la tabla principal (lo que usa la lista y la IA).
+  const conv = await obtenerConversacion(chat.senderId);
+  const ultimo = msgs[msgs.length - 1];
+  const delLead = msgs.filter(m => m.role === "user");
+  const delBot = msgs.filter(m => m.role === "assistant");
+  const mayor = (a, b) => (!a ? b : !b ? a : (new Date(a) > new Date(b) ? a : b));
+  const campos = {
+    historial: msgs.slice(-configActual.max_historial).map(m => ({ role: m.role, content: m.content })),
+    ultimo_mensaje_texto: ultimo.content.slice(0, 300),
+    ultimo_mensaje_role: ultimo.role,
+    actualizado_en: mayor(conv.actualizado_en, ultimo.creado_en)
+  };
+  if (delLead.length) campos.ultimo_mensaje_usuario = mayor(conv.ultimo_mensaje_usuario, delLead[delLead.length - 1].creado_en);
+  if (delBot.length) campos.ultimo_mensaje_bot_en = mayor(conv.ultimo_mensaje_bot_en, delBot[delBot.length - 1].creado_en);
+  if (!conv.primer_mensaje_en && delLead.length) campos.primer_mensaje_en = delLead[0].creado_en;
+  // El "primer mensaje" sirve de referencia al bot (ej. qué regalo pidió): se usa
+  // el primero con texto real, no un adjunto.
+  const primerConTexto = delLead.find(m => !m.content.startsWith("[foto, audio"));
+  if (!conv.primer_mensaje_texto && primerConTexto) campos.primer_mensaje_texto = primerConTexto.content;
+  if (chat.username && !conv.username) campos.username = chat.username;
+  await guardarConversacion(chat.senderId, campos);
+  notificarCambioDeChat(chat.senderId);
+  return { total: msgs.length, insertados: nuevos.length };
 }
 
 async function revisarChatsRecuperables(dias) {
@@ -5638,7 +5714,20 @@ app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
     // Aunque no se mande nada, si el último mensaje del chat es tuyo se guarda el
     // de la persona para que el chat salga en /chats (si está sin responder, ya
     // lo guardan las ramas de abajo).
-    if (chatDelLead && !chat.sinResponder && !req.body?.mensaje) await registrarChatRecuperado(chatDelLead);
+    // Se trae la conversación COMPLETA de Instagram a /chats (salvo cuando el bot
+    // va a responder solo, para no duplicar el mensaje que él mismo registra).
+    let importados = null;
+    const mensajeAutomatico = accion === "responder" && !(typeof req.body?.mensaje === "string" && req.body.mensaje.trim());
+    if (!mensajeAutomatico) {
+      try {
+        const yoImport = await obtenerIdentidadCuenta(cuenta);
+        importados = await importarHistorialCompleto(cuenta, yoImport, chat);
+        console.log(`📚 Conversación de ${chat.username} importada: ${importados.total} mensajes (${importados.insertados} nuevos).`);
+      } catch (err) {
+        console.error(`❌ No se pudo importar la conversación completa de ${chat.username}:`, err.response?.data || err.message);
+        if (chatDelLead && !chat.sinResponder) await registrarChatRecuperado(chatDelLead);
+      }
+    }
 
     // Mensaje escrito por ti: se manda tal cual (no lo genera la IA). Al enviarlo,
     // el bot toma el control del chat, y queda en el historial de /chats.
@@ -5650,14 +5739,14 @@ app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
       // Se guarda primero el último mensaje DE LA PERSONA (aunque después le
       // hayas escrito tú): /chats solo lista conversaciones donde quedó
       // registrado un mensaje del lead, y sin esto el chat no aparecería.
-      if (chatDelLead) await registrarChatRecuperado(chatDelLead);
+      if (importados === null && chatDelLead) await registrarChatRecuperado(chatDelLead);
       for (const fragmento of dividirTextoLargo(mensajeManual)) {
         await enviarMensajeInstagram(chat.senderId, fragmento);
         await agregarAlHistorialDB(chat.senderId, "assistant", fragmento);
       }
       await cancelarSeguimientosPendientesDB(chat.senderId);
       console.log(`✍️ Mensaje manual enviado a ${chat.username} desde "Recuperar un usuario": "${mensajeManual.slice(0, 80)}"`);
-      return res.json({ ok: true, ...detalle, mensajeEnviado: true });
+      return res.json({ ok: true, ...detalle, mensajeEnviado: true, importados });
     }
 
     const tomado = await tomarControlDelHilo(cuenta, chat.senderId);
@@ -5670,7 +5759,7 @@ app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
       await registrarChatRecuperado(chat);
       console.log(`📥 Chat de ${chat.username} guardado en /chats para atenderlo a mano.`);
     }
-    res.json({ ok: true, ...detalle, controlTomado: tomado, errorControl: tomado ? null : ultimoErrorControl });
+    res.json({ ok: true, ...detalle, controlTomado: tomado, errorControl: tomado ? null : ultimoErrorControl, importados });
   } catch (err) {
     res.status(500).json({ error: err.response?.data?.error?.message || err.message });
   }
@@ -15262,7 +15351,7 @@ ${estilosBase()}
           if(!confirm("Se enviará a @" + prueba.username + ":\\n\\n«" + mensajeFinal + "»\\n\\n¿Enviar?")) return;
           btn.textContent = "⏳ Enviando…";
           const enviado = await pedir(false, mensajeFinal);
-          if(enviado) alert("Mensaje enviado. El bot retomó el control de este chat y ya puedes verlo en tu lista de chats.");
+          if(enviado) alert("Mensaje enviado. El bot retomó el control de este chat y ya puedes verlo en tu lista de chats." + (enviado.importados ? " Se guardó la conversación completa (" + enviado.importados.total + " mensajes)." : ""));
           return;
         }
       }
@@ -15279,7 +15368,7 @@ ${estilosBase()}
 
       btn.textContent = "⏳ Recuperando…";
       const real = await pedir(false);
-      if(real) alert("Listo. " + (real.controlTomado ? "Se tomó el control del chat." : (real.errorControl && real.errorControl.indexOf("Unsupported post request") !== -1 ? "Con tu tipo de conexión Instagram no permite pedir el control por este método (es normal y no hace falta: el bot toma el control al enviar un mensaje)." : "No se pudo tomar el control" + (real.errorControl ? ". Motivo que da Instagram: " + real.errorControl : "."))) + (real.accion === "responder" ? " El bot le responderá en unos segundos." : (real.registrar ? " Ya puedes buscarlo en la lista de chats." : "")));
+      if(real) alert("Listo. " + (real.controlTomado ? "Se tomó el control del chat." : (real.errorControl && real.errorControl.indexOf("Unsupported post request") !== -1 ? "Con tu tipo de conexión Instagram no permite pedir el control por este método (es normal y no hace falta: el bot toma el control al enviar un mensaje)." : "No se pudo tomar el control" + (real.errorControl ? ". Motivo que da Instagram: " + real.errorControl : "."))) + (real.accion === "responder" ? " El bot le responderá en unos segundos." : (real.registrar || real.importados ? " Ya puedes buscarlo en la lista de chats." : "")) + (real.importados ? " Se guardó la conversación completa (" + real.importados.total + " mensajes)." : ""));
     } catch (err) {
       alert("Error de conexión: " + err.message);
     } finally {
