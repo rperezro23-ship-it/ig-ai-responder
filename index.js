@@ -5441,7 +5441,12 @@ app.post("/chats/recuperar-standby", requireAdminKey, async (req, res) => {
       let motivo = ch.sinResponder ? "" : "ya estaba atendido";
       if (ch.sinResponder) {
         const conv = await obtenerConversacion(ch.senderId);
-        if (!ch.texto) { accion = "solo_control"; motivo = "el último mensaje no es de texto"; }
+        // Instagram solo deja responder dentro de las 24 horas siguientes al
+        // último mensaje del lead (se usa 23 h para tener margen). Pasado ese
+        // tiempo el envío falla, así que ahí solo se toma el control.
+        const horasDesdeMensaje = (Date.now() - new Date(ch.ultimoMensajeEn).getTime()) / 3600000;
+        if (horasDesdeMensaje > 23) { accion = "solo_control"; motivo = "fuera de la ventana de 24 horas"; ch.fueraDeVentana = true; }
+        else if (!ch.texto) { accion = "solo_control"; motivo = "el último mensaje no es de texto"; }
         else if (conv.bot_pausado) { accion = "solo_control"; motivo = "bot pausado en este chat"; }
         else if (tieneEtiquetaNoContactar(conv)) { accion = "solo_control"; motivo = "tiene la etiqueta No contactar"; }
         else if (conv.ultimo_mensaje_bot_en && new Date(conv.ultimo_mensaje_bot_en) > new Date(ch.ultimoMensajeEn)) {
@@ -5452,11 +5457,13 @@ app.post("/chats/recuperar-standby", requireAdminKey, async (req, res) => {
     }
 
     const aResponder = plan.filter(p => p.accion === "responder").length;
-    const resumen = { dias, revisados: plan.length, aResponder, soloControl: plan.length - aResponder };
+    const fueraDeVentana = plan.filter(p => p.fueraDeVentana);
+    const resumen = { dias, revisados: plan.length, aResponder, soloControl: plan.length - aResponder, fueraDeVentana: fueraDeVentana.length };
 
     if (simular) {
       return res.json({ ok: true, simulacion: true, ...resumen,
-        responderA: plan.filter(p => p.accion === "responder").map(p => p.username || p.senderId) });
+        responderA: plan.filter(p => p.accion === "responder").map(p => p.username || p.senderId),
+        sinResponderFueraDeVentana: fueraDeVentana.map(p => p.username || p.senderId) });
     }
 
     // Ejecución real en segundo plano (puede tardar más que el tiempo máximo
@@ -14878,7 +14885,9 @@ ${estilosBase()}
 
       const resumenTxt = "Chats revisados (últimos " + dias + " días): " + prueba.revisados + "\\n\\n" +
         "• Sin responder, el bot les contestará: " + prueba.aResponder + "\\n" +
-        "• Solo se toma el control, sin escribir: " + prueba.soloControl + "\\n\\n" +
+        "• Solo se toma el control, sin escribir: " + prueba.soloControl + "\\n" +
+        "   (de esos, " + prueba.fueraDeVentana + " tienen un mensaje sin responder pero FUERA de las 24 horas: Instagram no deja que el bot les escriba, respóndelos tú a mano" +
+        (prueba.sinResponderFueraDeVentana && prueba.sinResponderFueraDeVentana.length ? ": " + prueba.sinResponderFueraDeVentana.slice(0, 15).join(", ") + (prueba.sinResponderFueraDeVentana.length > 15 ? "…" : "") : "") + ")\\n\\n" +
         "¿Continuar?";
       if(!confirm(resumenTxt)) return;
 
