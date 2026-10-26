@@ -4930,81 +4930,68 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
     const desdeMs = desde ? new Date(desde).getTime() : null;
     const hastaMs = hasta ? new Date(hasta).getTime() : null;
 
-    const dentroDelPeriodo = (fechaIso) => {
+    const enPeriodo = (fechaIso) => {
       if (!desdeMs && !hastaMs) return true; // sin filtro, todo cuenta
-      if (!fechaIso) return false; // sin "actualizado_en" no se puede ubicar en ningún periodo
+      if (!fechaIso) return false;
       const t = new Date(fechaIso).getTime();
+      if (isNaN(t)) return false;
       if (desdeMs && t < desdeMs) return false;
       if (hastaMs && t > hastaMs) return false;
       return true;
     };
 
-    // Cada conteo se hace por separado y con su propio manejo de error — así,
-    // si alguna columna todavía no existe (ej. no corriste alguna de las
-    // migraciones de etiquetas/monto_pagado), esa parte en
-    // particular se queda en 0 en vez de tumbar TODO el dashboard.
-    const contar = async (filtroFn, etiquetaError) => {
-      try {
-        let consulta = supabase.from("conversaciones").select("actualizado_en", { count: "exact" });
-        consulta = filtroFn(consulta);
-        const { data, error } = await consulta;
-        if (error) throw error;
-        return (data || []).filter(c => dentroDelPeriodo(c.actualizado_en)).length;
-      } catch (err) {
-        console.error(`❌ Error contando "${etiquetaError}" en el dashboard (¿corriste todas las migraciones?):`, err.message);
-        return 0;
-      }
-    };
+    // Se traen TODAS las conversaciones en páginas de 1000 (Supabase corta
+    // cada consulta en 1000 filas; antes solo se leía la primera página, sin
+    // orden, y por eso "hoy" podía dar 0 aunque hubiera chats de hoy). Se usa
+    // el MISMO criterio que /chats: solo conversaciones donde el lead escribió
+    // alguna vez, y cada paso se ubica en el día en que OCURRIÓ (enlace
+    // enviado, agendó, calificó...) — así los números coinciden con el filtro
+    // de fecha de /chats.
+    const filas = [];
+    for (let desdeFila = 0; ; desdeFila += 1000) {
+      const { data: pagina, error: errorPagina } = await supabase
+        .from("conversaciones")
+        .select("sender_id, ultimo_mensaje_usuario, ultimo_mensaje_bot_en, actualizado_en, califica, calificado_en, no_califica, no_califica_en, enlace_enviado, enlace_enviado_en, agendo, agendo_en, etiquetas, monto_pagado")
+        .not("ultimo_mensaje_usuario", "is", null)
+        .order("sender_id", { ascending: true })
+        .range(desdeFila, desdeFila + 999);
+      if (errorPagina) throw errorPagina;
+      filas.push(...(pagina || []));
+      if (!pagina || pagina.length < 1000) break;
+    }
 
-    const total = await contar(q => q, "total");
-    const totalCalifica = await contar(q => q.eq("califica", true), "califica");
-    const totalNoCalifica = await contar(q => q.eq("no_califica", true), "no_califica");
-    const totalEnlace = await contar(q => q.eq("enlace_enviado", true), "enlace_enviado");
-    const totalAgendo = await contar(q => q.eq("agendo", true), "agendo");
+    // Si un paso no tiene su fecha propia guardada (datos viejos), se usa la
+    // última actividad del chat como respaldo.
+    const fechaDe = (c, campo) => c[campo] || c.actualizado_en;
+    const total = filas.filter(c => enPeriodo(c.ultimo_mensaje_usuario) || enPeriodo(c.ultimo_mensaje_bot_en)).length;
+    const totalCalifica = filas.filter(c => c.califica && enPeriodo(fechaDe(c, "calificado_en"))).length;
+    const totalNoCalifica = filas.filter(c => c.no_califica && enPeriodo(fechaDe(c, "no_califica_en"))).length;
+    const totalEnlace = filas.filter(c => c.enlace_enviado && enPeriodo(fechaDe(c, "enlace_enviado_en"))).length;
+    const totalAgendo = filas.filter(c => c.agendo && enPeriodo(fechaDe(c, "agendo_en"))).length;
 
     const etiquetaAsistio = configActual.dashboard_etiqueta_asistio?.trim();
     const etiquetaCompro = configActual.dashboard_etiqueta_compro?.trim();
 
-    // Se cuenta comparando en JS (no con el operador de Postgres) porque la
-    // comparación exacta de la base de datos es sensible a mayúsculas y a
-    // cómo el navegador guardó los acentos — esto normaliza igual que el
-    // resto del sistema (sin mayúsculas, sin acentos), para que "Asistió",
-    // "asistio" y "ASISTIÓ" cuenten como la misma etiqueta.
-    async function contarPorEtiqueta(nombreEtiqueta, etiquetaError) {
+    // Las etiquetas manuales no guardan fecha propia: se ubican por la última
+    // actividad del chat. Se compara sin mayúsculas ni acentos, igual que el
+    // resto del sistema.
+    const contarPorEtiqueta = (nombreEtiqueta) => {
       if (!nombreEtiqueta) return 0;
-      try {
-        const objetivo = normalizarParaComparar(nombreEtiqueta);
-        const { data, error } = await supabase.from("conversaciones").select("etiquetas, actualizado_en");
-        if (error) throw error;
-        return (data || []).filter(c =>
-          dentroDelPeriodo(c.actualizado_en) &&
-          Array.isArray(c.etiquetas) && c.etiquetas.some(e => normalizarParaComparar(e) === objetivo)
-        ).length;
-      } catch (err) {
-        console.error(`❌ Error contando la etiqueta "${etiquetaError}" en el dashboard:`, err.message);
-        return 0;
-      }
-    }
+      const objetivo = normalizarParaComparar(nombreEtiqueta);
+      return filas.filter(c =>
+        enPeriodo(c.actualizado_en) &&
+        Array.isArray(c.etiquetas) && c.etiquetas.some(e => normalizarParaComparar(e) === objetivo)
+      ).length;
+    };
 
-    const totalAsistio = await contarPorEtiqueta(etiquetaAsistio, "asistio");
-    const totalCompro = await contarPorEtiqueta(etiquetaCompro, "compro");
+    const totalAsistio = contarPorEtiqueta(etiquetaAsistio);
+    const totalCompro = contarPorEtiqueta(etiquetaCompro);
 
-    // Cash collected: suma de todos los montos pagados registrados a mano,
-    // dentro del periodo. Igual que arriba, si la columna todavía no
-    // existe, se queda en 0 en vez de romper el resto del dashboard.
-    let cashCollected = 0;
-    try {
-      const { data: pagos, error: errorPagos } = await supabase
-        .from("conversaciones")
-        .select("monto_pagado, actualizado_en")
-        .gt("monto_pagado", 0);
-      if (errorPagos) throw errorPagos;
-      cashCollected = (pagos || [])
-        .filter(p => dentroDelPeriodo(p.actualizado_en))
-        .reduce((suma, p) => suma + (Number(p.monto_pagado) || 0), 0);
-    } catch (err) {
-      console.error("❌ Error sumando monto_pagado en el dashboard (¿corriste migracion_dashboard.sql?):", err.message);
-    }
+    // Cash collected: suma de los montos pagados registrados a mano, ubicados
+    // por la última actividad del chat.
+    const cashCollected = filas
+      .filter(p => (Number(p.monto_pagado) || 0) > 0 && enPeriodo(p.actualizado_en))
+      .reduce((suma, p) => suma + (Number(p.monto_pagado) || 0), 0);
 
     const porcentaje = (parte, base) => (base > 0 ? (parte / base) * 100 : 0);
 
