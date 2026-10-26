@@ -378,6 +378,17 @@ async function registrarMensajeUsuario(senderId, textoMensaje) {
   if (!conv.primer_mensaje_en) campos.primer_mensaje_en = campos.ultimo_mensaje_usuario;
   if (!conv.primer_mensaje_texto && textoMensaje) campos.primer_mensaje_texto = textoMensaje;
 
+  // Métrica de reactivación: si el último seguimiento automático que se le
+  // mandó a este lead todavía no tenía respuesta ("r" vacío), esta es esa
+  // respuesta — se marca con la hora actual. El registro vive dentro de
+  // "rotacion" (campo JSON que ya existe), en la clave "_seg".
+  const registroSeg = Array.isArray(conv.rotacion?._seg) ? conv.rotacion._seg : [];
+  const ultimoSeg = registroSeg[registroSeg.length - 1];
+  if (ultimoSeg && !ultimoSeg.r) {
+    const nuevoRegistro = registroSeg.slice(0, -1).concat([{ ...ultimoSeg, r: campos.ultimo_mensaje_usuario }]);
+    campos.rotacion = { ...(conv.rotacion || {}), _seg: nuevoRegistro };
+  }
+
   await guardarConversacion(senderId, campos);
 }
 
@@ -717,6 +728,12 @@ async function procesarSeguimientosPendientesDB() {
     try {
       console.log(`🔔 Enviando seguimiento (${tipo}, paso ${pasoIndex}, ${pasoConfig.horas} h) a ${senderId}: "${mensaje}"`);
       await enviarContenidoConMarcadores(senderId, mensaje);
+
+      // Registro de este seguimiento para la métrica de reactivación del
+      // dashboard: tipo ("normal"/"enlace"), número de paso, cuándo se mandó
+      // y (cuando el lead responda) "r". Se conservan solo los últimos 30.
+      const registroSeg = Array.isArray(rotacion._seg) ? rotacion._seg : [];
+      rotacion._seg = registroSeg.concat([{ t: tipo, p: pasoIndex, en: new Date().toISOString(), r: null }]).slice(-30);
 
       const camposAGuardar = { rotacion };
       if (esEnlace) {
@@ -4951,7 +4968,7 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
     for (let desdeFila = 0; ; desdeFila += 1000) {
       const { data: pagina, error: errorPagina } = await supabase
         .from("conversaciones")
-        .select("sender_id, ultimo_mensaje_usuario, ultimo_mensaje_bot_en, actualizado_en, califica, calificado_en, no_califica, no_califica_en, enlace_enviado, enlace_enviado_en, agendo, agendo_en, etiquetas, monto_pagado")
+        .select("sender_id, ultimo_mensaje_usuario, ultimo_mensaje_bot_en, actualizado_en, califica, calificado_en, no_califica, no_califica_en, enlace_enviado, enlace_enviado_en, agendo, agendo_en, etiquetas, monto_pagado, rotacion")
         .not("ultimo_mensaje_usuario", "is", null)
         .order("sender_id", { ascending: true })
         .range(desdeFila, desdeFila + 999);
@@ -4995,7 +5012,36 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
 
     const porcentaje = (parte, base) => (base > 0 ? (parte / base) * 100 : 0);
 
+    // Reactivación por seguimiento: un renglón por cada paso configurado
+    // (normales primero, luego los del enlace). "enviados" = seguimientos
+    // mandados en el periodo; "reactivados" = a cuántos el lead respondió
+    // después de ese seguimiento. Solo cuenta desde que se activó el registro.
+    const statsSeg = {};
+    for (const c of filas) {
+      const registro = Array.isArray(c.rotacion?._seg) ? c.rotacion._seg : [];
+      for (const e of registro) {
+        if (!enPeriodo(e.en)) continue;
+        const clave = e.t + "_" + e.p;
+        statsSeg[clave] = statsSeg[clave] || { enviados: 0, reactivados: 0 };
+        statsSeg[clave].enviados++;
+        if (e.r) statsSeg[clave].reactivados++;
+      }
+    }
+    const seguimientos = [];
+    const agregarPasos = (lista, tipo, nombreTipo) => {
+      (lista || []).forEach((paso, i) => {
+        const s = statsSeg[tipo + "_" + i] || { enviados: 0, reactivados: 0 };
+        seguimientos.push({
+          tipo, paso: i + 1, etiqueta: nombreTipo + " " + (i + 1) + (paso && paso.horas ? " (" + paso.horas + " h)" : ""),
+          enviados: s.enviados, reactivados: s.reactivados, porcentaje: porcentaje(s.reactivados, s.enviados)
+        });
+      });
+    };
+    agregarPasos(configActual.seguimientos, "normal", "Seguimiento");
+    agregarPasos(configActual.seguimientos_enlace, "enlace", "Seguimiento del enlace");
+
     res.json({
+      seguimientos,
       total,
       totalCalifica,
       totalNoCalifica,
@@ -10986,6 +11032,12 @@ ${estilosBase()}
       <div class="dash-cash-value" id="dashCash">$0</div>
     </div>
 
+    <div class="dash-cash-card" style="display:block;">
+      <div class="dash-cash-label">🔁 Reactivación por seguimiento</div>
+      <div class="dash-side-stat-label" style="margin:4px 0 10px;">De los seguimientos enviados en el periodo, a cuántos respondió la persona después. Aparece un renglón por cada seguimiento que tengas configurado.</div>
+      <div id="dashSeguimientos"><span class="dash-side-stat-label">Cargando…</span></div>
+    </div>
+
     <div class="dash-config-card">
       <h2 style="font-family:var(--display); font-size:16px; font-weight:600; margin:0 0 5px;">⚙️ Configurar el embudo</h2>
       <p class="hint" style="margin:0;">"Asistió" y "Compró" no los detecta el bot solo — se basan en las etiquetas manuales que le pongas a cada lead desde /chats. Elige aquí cuál etiqueta representa cada cosa.</p>
@@ -11116,6 +11168,26 @@ ${estilosBase()}
     document.getElementById("dashAgendo").textContent = data.totalAgendo ?? 0;
     document.getElementById("dashAsistio").textContent = data.totalAsistio ?? 0;
     document.getElementById("dashCompro").textContent = data.totalCompro ?? 0;
+
+    const contSeg = document.getElementById("dashSeguimientos");
+    contSeg.textContent = "";
+    const pasosSeg = Array.isArray(data.seguimientos) ? data.seguimientos : [];
+    if(pasosSeg.length === 0){
+      contSeg.textContent = "No hay seguimientos configurados.";
+    } else {
+      pasosSeg.forEach(function(s){
+        const fila = document.createElement("div");
+        fila.style.cssText = "display:flex; justify-content:space-between; align-items:center; gap:12px; padding:8px 0; border-top:1px solid var(--border);";
+        const izq = document.createElement("span");
+        izq.textContent = s.etiqueta;
+        const der = document.createElement("span");
+        der.style.fontWeight = "600";
+        der.textContent = s.reactivados + " de " + s.enviados + " reactivados · " + formatearPct(s.porcentaje);
+        fila.appendChild(izq);
+        fila.appendChild(der);
+        contSeg.appendChild(fila);
+      });
+    }
 
     document.getElementById("pctCalifica").textContent = formatearPct(porcentajes.califica_de_total);
     document.getElementById("pctEnlace").textContent = formatearPct(porcentajes.enlace_de_califica);
