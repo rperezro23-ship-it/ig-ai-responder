@@ -13577,6 +13577,19 @@ ${estilosBase()}
           <span id="btnLimpiarBusqueda" class="chat-search-limpiar" title="Limpiar búsqueda" style="display:none;">✕</span>
         </div>
         <div id="chatSearchEstado" class="chat-search-estado" style="display:none;"></div>
+        <div class="chat-search-bar" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <input type="date" id="filtroFechaDia" title="Elige un día para ver lo que pasó ese día" style="flex:0 0 auto; width:auto; min-width:140px; padding-right:10px;">
+          <select id="filtroFechaTipo" class="select-mini" title="Qué fecha se usa para filtrar">
+            <option value="actividad">Con actividad (mensajes)</option>
+            <option value="enlace">Enlace enviado</option>
+            <option value="agendo">Agendó</option>
+            <option value="califica">Calificó</option>
+            <option value="nocalifica">No calificó</option>
+          </select>
+          <span id="btnHoyFecha" class="chat-search-limpiar" style="position:static; display:inline; cursor:pointer; padding:0 6px; color:var(--green);" title="Ver hoy">Hoy</span>
+          <span id="btnLimpiarFecha" class="chat-search-limpiar" style="position:static; display:none; cursor:pointer;" title="Quitar filtro de fecha">✕</span>
+          <span id="filtroFechaResumen" style="font-size:12.5px; color:var(--muted);"></span>
+        </div>
         <div class="chat-tabs">
           <div class="chat-tab active" id="tabTodas" data-filtro="todas" title="Todas">Todas <span class="count" id="countTodas"></span></div>
           <div class="chat-tab tab-califica" id="tabCalifica" data-filtro="califica" title="Califica">✅ <span class="count" id="countCalifica"></span></div>
@@ -13935,8 +13948,35 @@ ${estilosBase()}
   // aparece en el username (sin mayúsculas/acentos), O si esa
   // conversación está entre los resultados de la búsqueda de contenido
   // (ver buscarContenidoEnServidor).
+  // Filtro por día (hora local del navegador). Cada tipo usa su propia fecha:
+  // enlace/agendó/calificó/no calificó tienen una fecha exacta guardada; la
+  // actividad usa el último mensaje del lead o del bot (solo se guarda el
+  // último, así que un chat aparece en el día de su ÚLTIMA actividad).
+  function diaLocalDe(iso){
+    if(!iso) return "";
+    const d = new Date(iso);
+    if(isNaN(d.getTime())) return "";
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return d.getFullYear() + "-" + mm + "-" + dd;
+  }
+
+  function coincideConFechaElegida(c){
+    const dia = document.getElementById("filtroFechaDia").value;
+    if(!dia) return true;
+    const tipo = document.getElementById("filtroFechaTipo").value;
+    if(tipo === "enlace") return c.enlace_enviado && diaLocalDe(c.enlace_enviado_en) === dia;
+    if(tipo === "agendo") return c.agendo && diaLocalDe(c.agendo_en) === dia;
+    if(tipo === "califica") return c.califica && diaLocalDe(c.calificado_en) === dia;
+    if(tipo === "nocalifica") return c.no_califica && diaLocalDe(c.no_califica_en) === dia;
+    return diaLocalDe(c.ultimo_mensaje_usuario) === dia || diaLocalDe(c.ultimo_mensaje_bot_en) === dia;
+  }
+
   function conversacionesFiltradas(){
-    const base = conversacionesFiltradasPorPestana();
+    let base = conversacionesFiltradasPorPestana();
+    if(document.getElementById("filtroFechaDia").value) base = base.filter(coincideConFechaElegida);
+    document.getElementById("btnLimpiarFecha").style.display = document.getElementById("filtroFechaDia").value ? "inline" : "none";
+    document.getElementById("filtroFechaResumen").textContent = document.getElementById("filtroFechaDia").value ? (base.length + " chats ese día") : "";
     if(!terminoBusqueda) return base;
 
     const terminoNormalizado = normalizarEtiqueta(terminoBusqueda);
@@ -14928,6 +14968,20 @@ ${estilosBase()}
     renderLista();
   });
   document.getElementById("filtroExcluirAgendo").addEventListener("change", () => {
+    renderLista();
+  });
+  document.getElementById("filtroFechaDia").addEventListener("change", () => {
+    renderLista();
+  });
+  document.getElementById("filtroFechaTipo").addEventListener("change", () => {
+    renderLista();
+  });
+  document.getElementById("btnHoyFecha").addEventListener("click", () => {
+    document.getElementById("filtroFechaDia").value = diaLocalDe(new Date().toISOString());
+    renderLista();
+  });
+  document.getElementById("btnLimpiarFecha").addEventListener("click", () => {
+    document.getElementById("filtroFechaDia").value = "";
     renderLista();
   });
 
