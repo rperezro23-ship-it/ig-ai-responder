@@ -11966,6 +11966,50 @@ ${estilosBase()}
     input.type = input.type === "password" ? "text" : "password";
   });
 
+  // Permite cambiar el orden de los pasos arrastrándolos desde "⠿ arrastrar".
+  // Primero se leen los valores escritos en pantalla (para no perder lo que
+  // se esté editando), luego se mueve el paso en la lista y se vuelve a pintar.
+  function activarArrastrePasos(cont, getLista, leerFn, renderFn){
+    const divs = cont.querySelectorAll(".paso");
+    let origen = -1;
+    divs.forEach(function(div, i){
+      const asa = div.querySelector(".paso-arrastre");
+      if(!asa) return;
+      asa.addEventListener("mousedown", function(){ div.draggable = true; });
+      asa.addEventListener("mouseup", function(){ div.draggable = false; });
+      div.addEventListener("dragstart", function(e){
+        origen = i;
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", String(i));
+        div.style.opacity = "0.5";
+      });
+      div.addEventListener("dragend", function(){
+        div.draggable = false;
+        div.style.opacity = "";
+        divs.forEach(function(d){ d.style.outline = ""; });
+      });
+      div.addEventListener("dragover", function(e){
+        if(origen < 0) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        div.style.outline = "2px dashed var(--green)";
+      });
+      div.addEventListener("dragleave", function(){ div.style.outline = ""; });
+      div.addEventListener("drop", function(e){
+        e.preventDefault();
+        div.style.outline = "";
+        if(origen < 0 || origen === i) { origen = -1; return; }
+        leerFn();
+        const lista = getLista();
+        const movido = lista.splice(origen, 1)[0];
+        lista.splice(i, 0, movido);
+        origen = -1;
+        renderFn();
+        if(typeof marcarCambios === "function") marcarCambios();
+      });
+    });
+  }
+
   // --- Seguimientos normales: editor dinámico ---
   let pasos = [];
 
@@ -11978,6 +12022,7 @@ ${estilosBase()}
       div.innerHTML = \`
         <div class="paso-head">
           <span class="eyebrow-num">PASO \${i + 1}</span>
+          <span class="paso-arrastre" title="Arrastra para cambiar el orden" style="cursor:grab; user-select:none; color:var(--muted); font-size:13px; padding:2px 8px;">⠿ arrastrar</span>
           <button type="button" class="quitar" data-i="\${i}">quitar</button>
         </div>
         <label>Horas de silencio antes de disparar</label>
@@ -11998,6 +12043,7 @@ ${estilosBase()}
     cont.querySelectorAll(".quitar").forEach(b => b.addEventListener("click", e => {
       pasos.splice(+e.target.dataset.i, 1); renderPasos();
     }));
+    activarArrastrePasos(cont, function(){ return pasos; }, leerPasosDelDOM, renderPasos);
   }
 
   document.getElementById("addPaso").addEventListener("click", () => {
@@ -12026,6 +12072,7 @@ ${estilosBase()}
       div.innerHTML = \`
         <div class="paso-head">
           <span class="eyebrow-num">PASO \${i + 1}</span>
+          <span class="paso-arrastre" title="Arrastra para cambiar el orden" style="cursor:grab; user-select:none; color:var(--muted); font-size:13px; padding:2px 8px;">⠿ arrastrar</span>
           <button type="button" class="quitar-enlace" data-i="\${i}">quitar</button>
         </div>
         <label>Horas desde que se envió el enlace, antes de disparar</label>
@@ -12042,6 +12089,7 @@ ${estilosBase()}
     cont.querySelectorAll(".quitar-enlace").forEach(b => b.addEventListener("click", e => {
       pasosEnlace.splice(+e.target.dataset.i, 1); renderPasosEnlace();
     }));
+    activarArrastrePasos(cont, function(){ return pasosEnlace; }, leerPasosEnlaceDelDOM, renderPasosEnlace);
   }
 
   document.getElementById("addPasoEnlace").addEventListener("click", () => {
