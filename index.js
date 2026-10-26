@@ -4995,10 +4995,17 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
     const contarPorEtiqueta = (nombreEtiqueta) => {
       if (!nombreEtiqueta) return 0;
       const objetivo = normalizarParaComparar(nombreEtiqueta);
-      return filas.filter(c =>
-        enPeriodo(c.actualizado_en) &&
-        Array.isArray(c.etiquetas) && c.etiquetas.some(e => normalizarParaComparar(e) === objetivo)
-      ).length;
+      const filtrando = Boolean(desdeMs || hastaMs);
+      return filas.filter(c => {
+        if (!Array.isArray(c.etiquetas) || !c.etiquetas.some(e => normalizarParaComparar(e) === objetivo)) return false;
+        if (!filtrando) return true;
+        // Con un periodo elegido, solo cuenta si la etiqueta tiene fecha
+        // guardada y cae en ese periodo. Las etiquetas puestas antes de que
+        // existiera ese registro no tienen fecha: no se pueden ubicar en un
+        // día, así que solo aparecen cuando no hay filtro de fechas.
+        const fechaEtq = c.rotacion && c.rotacion._etq ? c.rotacion._etq[objetivo] : null;
+        return enPeriodo(fechaEtq);
+      }).length;
     };
 
     const totalAsistio = contarPorEtiqueta(etiquetaAsistio);
@@ -5007,7 +5014,7 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
     // Cash collected: suma de los montos pagados registrados a mano, ubicados
     // por la última actividad del chat.
     const cashCollected = filas
-      .filter(p => (Number(p.monto_pagado) || 0) > 0 && enPeriodo(p.actualizado_en))
+      .filter(p => (Number(p.monto_pagado) || 0) > 0 && enPeriodo(p.rotacion && p.rotacion._pago_en))
       .reduce((suma, p) => suma + (Number(p.monto_pagado) || 0), 0);
 
     const porcentaje = (parte, base) => (base > 0 ? (parte / base) * 100 : 0);
@@ -5129,7 +5136,10 @@ app.post("/chats/etiqueta/agregar", requireAdminKey, async (req, res) => {
     }
 
     const etiquetasNuevas = [...etiquetasActuales, etiquetaLimpia];
-    await guardarConversacion(senderId, { etiquetas: etiquetasNuevas });
+    // Se anota cuándo se puso la etiqueta (dentro de "rotacion", que ya
+    // existe) para que el dashboard ubique "Asistió"/"Compró" en el día real.
+    const rotacionEtq = { ...(conv.rotacion || {}), _etq: { ...((conv.rotacion || {})._etq || {}), [etiquetaLimpia.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")]: new Date().toISOString() } };
+    await guardarConversacion(senderId, { etiquetas: etiquetasNuevas, rotacion: rotacionEtq });
     await registrarEtiquetaCreada(etiquetaLimpia);
 
     res.json({ ok: true, etiquetas: etiquetasNuevas });
@@ -5169,7 +5179,11 @@ app.post("/chats/monto-pagado", requireAdminKey, async (req, res) => {
       return res.status(400).json({ error: "El monto debe ser un número válido, mayor o igual a 0." });
     }
 
-    await guardarConversacion(senderId, { monto_pagado: montoNumero });
+    // Se anota la fecha del pago (dentro de "rotacion", que ya existe) para
+    // que el dashboard lo ubique en el día en que se registró.
+    const convPago = await obtenerConversacion(senderId);
+    const rotacionPago = { ...(convPago.rotacion || {}), _pago_en: new Date().toISOString() };
+    await guardarConversacion(senderId, { monto_pagado: montoNumero, rotacion: rotacionPago });
     res.json({ ok: true, monto_pagado: montoNumero });
   } catch (err) {
     res.status(500).json({ error: err.message });
