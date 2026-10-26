@@ -13740,6 +13740,7 @@ ${estilosBase()}
           <div class="chat-tab tab-compro" id="tabCompro" data-filtro="compro" title="Compró (según la etiqueta configurada en el Dashboard)">💰 <span class="count" id="countCompro"></span></div>
           <div class="chat-tab tab-handoff" id="tabHandoff" data-filtro="handoff" title="Handoff (+24h)">⏰ <span class="count" id="countHandoff"></span></div>
           <div class="chat-tab tab-seguimiento" id="tabSeguimiento" data-filtro="seguimiento" title="Seguimiento pendiente (handoff, sin contar los que ya agendaron o no califican)">🔁 <span class="count" id="countSeguimiento"></span></div>
+          <div class="chat-tab tab-porresponder" id="tabPorResponder" data-filtro="porresponder" title="Por responder: fuera de la ventana de 24h y el último mensaje es del lead (sin responder)">📩 <span class="count" id="countPorResponder"></span></div>
           <select id="filtroDiasSeguimiento" class="select-mini" style="display:none;" title="Filtra por cuánto tiempo hace que se le mandó el último mensaje del bot — útil para hacer seguimiento con tu propia cadencia (cada 3er día, cada semana, etc.)">
             <option value="">Cualquier antigüedad</option>
             <option value="1">Hace 1+ día</option>
@@ -13953,7 +13954,14 @@ ${estilosBase()}
     return Array.isArray(conv.etiquetas) && conv.etiquetas.some(e => normalizarEtiqueta(e) === objetivo);
   }
 
+  // Fuera de la ventana de 24h y el ultimo mensaje del chat es del lead
+  // (nadie le ha respondido): el bot ya no puede contestarle, hay que hacerlo a mano.
+  function esPorResponder(c){
+    return !c.en_ventana_24h && Boolean(c.ultimo_mensaje_usuario) && c.ultimo_role === "user";
+  }
+
   function actualizarContadores(){
+    const totalPorResponder = conversaciones.filter(esPorResponder).length;
     const totalHandoff = conversaciones.filter(c => !c.en_ventana_24h).length;
     const totalCalifica = conversaciones.filter(c => c.califica).length;
     const totalNoCalifica = conversaciones.filter(c => c.no_califica).length;
@@ -13977,6 +13985,7 @@ ${estilosBase()}
       : totalEnlace;
     document.getElementById("countTodas").textContent = conversaciones.length;
     document.getElementById("countHandoff").textContent = totalHandoff;
+    document.getElementById("countPorResponder").textContent = totalPorResponder;
     document.getElementById("countCalifica").textContent = totalCalifica;
     document.getElementById("countNoCalifica").textContent = totalNoCalifica;
     document.getElementById("countAgendo").textContent = totalAgendo;
@@ -13985,7 +13994,7 @@ ${estilosBase()}
     document.getElementById("countSeguimiento").textContent = totalSeguimientoMostrado;
     actualizarBotonExportar({
       todas: conversaciones.length, handoff: totalHandoff, califica: totalCalifica,
-      nocalifica: totalNoCalifica, agendo: totalAgendo, enlace: totalEnlaceMostrado, compro: totalCompro, seguimiento: totalSeguimientoMostrado
+      nocalifica: totalNoCalifica, agendo: totalAgendo, enlace: totalEnlaceMostrado, compro: totalCompro, seguimiento: totalSeguimientoMostrado, porresponder: totalPorResponder
     });
   }
 
@@ -14003,13 +14012,15 @@ ${estilosBase()}
       agendo: "border-color:rgba(49,217,124,.3); color:var(--green);",
       enlace: "border-color:rgba(63,199,232,.35); color:#3FC7E8;",
       compro: "border-color:rgba(255,197,66,.4); color:#FFC542;",
-      seguimiento: "border-color:rgba(255,197,66,.4); color:#FFC542;"
+      seguimiento: "border-color:rgba(255,197,66,.4); color:#FFC542;",
+      porresponder: "border-color:rgba(255,93,93,.35); color:var(--red);"
     };
     const titulos = {
       todas: "Exportar todos los leads", handoff: "Exportar handoff", califica: "Exportar calificados",
       nocalifica: "Exportar no califican", agendo: "Exportar agendaron", enlace: "Exportar enlace enviado",
       compro: "Exportar los que compraron",
-      seguimiento: "Exportar seguimiento pendiente"
+      seguimiento: "Exportar seguimiento pendiente",
+      porresponder: "Exportar los que faltan por responder"
     };
 
     const total = totales[filtroActual] ?? 0;
@@ -14038,6 +14049,7 @@ ${estilosBase()}
 
   function conversacionesFiltradasPorPestana(){
     if(filtroActual === "handoff") return conversaciones.filter(c => !c.en_ventana_24h);
+    if(filtroActual === "porresponder") return conversaciones.filter(esPorResponder);
     if(filtroActual === "califica") return conversaciones.filter(c => c.califica);
     if(filtroActual === "nocalifica") return conversaciones.filter(c => c.no_califica);
     if(filtroActual === "agendo") return conversaciones.filter(c => c.agendo);
@@ -14136,6 +14148,7 @@ ${estilosBase()}
     if(lista.length === 0){
       let vacioTxt = '<p class="vacio-lista">Todavía no hay conversaciones.</p>';
       if(filtroActual === "handoff") vacioTxt = '<p class="vacio-lista">🎉 Ninguna conversación en handoff — todas están dentro de la ventana de 24h.</p>';
+      if(filtroActual === "porresponder") vacioTxt = '<p class="vacio-lista">🎉 No hay chats fuera de la ventana de 24h esperando tu respuesta.</p>';
       if(filtroActual === "califica") vacioTxt = '<p class="vacio-lista">Todavía no hay leads calificados con los criterios actuales.</p>';
       if(filtroActual === "enlace") vacioTxt = '<p class="vacio-lista">Todavía no se le ha mandado el enlace de calificación a nadie.</p>';
       if(filtroActual === "compro") vacioTxt = etiquetaCompraConfigurada
@@ -15063,6 +15076,13 @@ ${estilosBase()}
     actualizarVisibilidadFiltroDias();
     renderLista();
   });
+  document.getElementById("tabPorResponder").addEventListener("click", () => {
+    filtroActual = "porresponder";
+    document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
+    document.getElementById("tabPorResponder").classList.add("active");
+    actualizarVisibilidadFiltroDias();
+    renderLista();
+  });
   document.getElementById("tabSeguimiento").addEventListener("click", () => {
     filtroActual = "seguimiento";
     document.querySelectorAll(".chat-tab").forEach(t => t.classList.remove("active"));
@@ -15874,6 +15894,7 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
       }
     }
     else if (filtro === "handoff") filtradas = filtradas.filter(c => !c.en_ventana_24h);
+    else if (filtro === "porresponder") filtradas = filtradas.filter(c => !c.en_ventana_24h && c.ultimo_mensaje_role === "user");
     else if (filtro === "seguimiento") {
       const etiquetaCompra = configActual.dashboard_etiqueta_compro?.trim();
       const objetivo = etiquetaCompra ? normalizarParaComparar(etiquetaCompra) : null;
