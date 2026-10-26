@@ -10902,6 +10902,7 @@ ${estilosBase()}
   .dash-step.step-compro .dash-step-pct{ color:#FFC542; background:rgba(255,197,66,.12); border-color:rgba(255,197,66,.4); }
   @media (max-width: 720px){
     .dash-funnel{ grid-template-columns:1fr; grid-auto-flow:row; }
+    #dashSeguimientos{ grid-template-columns:1fr !important; }
   }
   .dash-config-card{
     background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg);
@@ -11046,10 +11047,10 @@ ${estilosBase()}
       <div class="dash-cash-value" id="dashCash">$0</div>
     </div>
 
-    <div class="dash-cash-card" style="display:block;">
+    <div style="margin-bottom:22px;">
       <div class="dash-cash-label">🔁 Reactivación por seguimiento</div>
-      <div class="dash-side-stat-label" style="margin:4px 0 10px;">De los seguimientos enviados en el periodo, a cuántos respondió la persona después. Aparece un renglón por cada seguimiento que tengas configurado.</div>
-      <div id="dashSeguimientos"><span class="dash-side-stat-label">Cargando…</span></div>
+      <div class="dash-side-stat-label" style="margin:4px 0 10px;">Enviados / reactivados (la persona respondió después) y su porcentaje, por cada seguimiento configurado.</div>
+      <div id="dashSeguimientos" style="display:grid; grid-template-columns:1fr 1fr; gap:10px;"><span class="dash-side-stat-label">Cargando…</span></div>
     </div>
 
     <div class="dash-config-card">
@@ -11190,13 +11191,32 @@ ${estilosBase()}
       contSeg.textContent = "No hay seguimientos configurados.";
     } else {
       pasosSeg.forEach(function(s){
+        // Mismo diseño que los cuadros de arriba (dash-step): izquierda el
+        // nombre, derecha un cuadro "enviados / reactivados" y otro con el %.
         const fila = document.createElement("div");
-        fila.style.cssText = "display:flex; justify-content:space-between; align-items:center; gap:12px; padding:8px 0; border-top:1px solid var(--border);";
-        const izq = document.createElement("span");
-        izq.textContent = s.etiqueta;
-        const der = document.createElement("span");
-        der.style.fontWeight = "600";
-        der.textContent = s.reactivados + " de " + s.enviados + " reactivados · " + formatearPct(s.porcentaje);
+        fila.className = "dash-step step-califica";
+        const izq = document.createElement("div");
+        izq.className = "dash-step-left";
+        const icono = document.createElement("span");
+        icono.className = "dash-step-icon";
+        icono.textContent = "🔁";
+        const textos = document.createElement("div");
+        const nombre = document.createElement("div");
+        nombre.className = "dash-step-label";
+        nombre.textContent = s.etiqueta;
+        textos.appendChild(nombre);
+        izq.appendChild(icono);
+        izq.appendChild(textos);
+        const der = document.createElement("div");
+        der.className = "dash-step-right";
+        const cant = document.createElement("div");
+        cant.className = "dash-step-value";
+        cant.textContent = s.enviados + " / " + s.reactivados;
+        const pct = document.createElement("div");
+        pct.className = "dash-step-pct";
+        pct.textContent = formatearPct(s.porcentaje);
+        der.appendChild(cant);
+        der.appendChild(pct);
         fila.appendChild(izq);
         fila.appendChild(der);
         contSeg.appendChild(fila);
