@@ -5100,6 +5100,143 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------
+// Anuncios: resultados por campaña (dashboard)
+// Cada anuncio se identifica por la PALABRA CLAVE con la que entran los
+// leads (ej. "página") y por la fecha desde la que se corre. Un chat cuenta
+// para un anuncio si su PRIMER mensaje cae dentro de las fechas y, entre sus
+// primeros mensajes, aparece la palabra (ya sea porque el lead la escribió o
+// porque el bot abrió la conversación por ese comentario). El gasto lo anota
+// el dueño a mano, y con eso se calculan los costos. Se guarda en app_config
+// (clave "anuncios_campanas").
+// ---------------------------------------------------------------
+const CLAVE_ANUNCIOS = "anuncios_campanas";
+const ZONA_ANUNCIOS = "-06:00"; // Ciudad de México (sin horario de verano)
+
+async function leerAnunciosGuardados() {
+  const { data } = await supabase.from("app_config").select("valor").eq("key", CLAVE_ANUNCIOS).maybeSingle();
+  return Array.isArray(data?.valor) ? data.valor : [];
+}
+
+function limpiarAnuncios(lista) {
+  const fechaOk = (f) => /^\d{4}-\d{2}-\d{2}$/.test(f) && !isNaN(new Date(f + "T00:00:00" + ZONA_ANUNCIOS).getTime());
+  return (Array.isArray(lista) ? lista : []).slice(0, 30).map(a => ({
+    nombre: String(a?.nombre || "").trim().slice(0, 80),
+    palabra: String(a?.palabra || "").trim().slice(0, 40),
+    desde: fechaOk(String(a?.desde || "")) ? String(a.desde) : "",
+    hasta: fechaOk(String(a?.hasta || "")) ? String(a.hasta) : "",
+    gasto: Math.max(0, Number(a?.gasto) || 0)
+  })).filter(a => a.palabra && a.desde);
+}
+
+async function calcularMetricasAnuncio(a) {
+  const vacias = { chats: 0, califican: 0, enlaces: 0, agendas: 0, asistieron: 0, compraron: 0, cash: 0,
+    costoChat: null, costoEnlace: null, costoAgenda: null, costoCliente: null };
+
+  const palabraPlana = normalizarParaComparar(a.palabra).replace(/[^a-z0-9 ]/g, "").trim();
+  if (!palabraPlana) return vacias;
+
+  const desdeMs = new Date(a.desde + "T00:00:00" + ZONA_ANUNCIOS).getTime();
+  const hastaMs = a.hasta ? new Date(a.hasta + "T23:59:59.999" + ZONA_ANUNCIOS).getTime() : Date.now();
+  const tMs = (m) => new Date(m.creado_en).getTime();
+
+  // 1) Mensajes en el rango que mencionan la palabra (con y sin acento).
+  const originalLimpia = a.palabra.trim().replace(/[^\p{L}\p{N} ]/gu, "");
+  const patrones = [...new Set([palabraPlana, originalLimpia])].filter(Boolean);
+  const filtroOr = patrones.map(p => "content.ilike.%" + p + "%").join(",");
+  const candidatos = new Set();
+  for (let desdeFila = 0; desdeFila < 5000; desdeFila += 1000) {
+    const { data, error } = await supabase
+      .from("mensajes_chat")
+      .select("sender_id")
+      .or(filtroOr)
+      .gte("creado_en", new Date(desdeMs).toISOString())
+      .lte("creado_en", new Date(hastaMs).toISOString())
+      .order("creado_en", { ascending: true })
+      .range(desdeFila, desdeFila + 999);
+    if (error) throw error;
+    (data || []).forEach(m => candidatos.add(m.sender_id));
+    if (!data || data.length < 1000) break;
+  }
+
+  // 2) Se confirma que el PRIMER mensaje del chat cae en el rango y que la
+  //    palabra aparece entre sus primeros mensajes.
+  const ids = [...candidatos].slice(0, 800);
+  const verificados = await mapConLimite(ids, 6, async (id) => {
+    const { data } = await supabase
+      .from("mensajes_chat")
+      .select("content, creado_en")
+      .eq("sender_id", id)
+      .order("creado_en", { ascending: true })
+      .limit(3);
+    if (!data || !data.length) return null;
+    const t0 = tMs(data[0]);
+    if (t0 < desdeMs || t0 > hastaMs) return null;
+    const coincide = data.some(m => normalizarParaComparar(m.content).includes(palabraPlana));
+    return coincide ? id : null;
+  });
+  const idsAnuncio = verificados.filter(Boolean);
+  if (idsAnuncio.length === 0) return vacias;
+
+  // 3) Estado de esos chats (solo los que respondieron alguna vez).
+  const filas = [];
+  for (let i = 0; i < idsAnuncio.length; i += 100) {
+    const { data, error } = await supabase
+      .from("conversaciones")
+      .select("sender_id, ultimo_mensaje_usuario, califica, enlace_enviado, agendo, etiquetas, monto_pagado")
+      .in("sender_id", idsAnuncio.slice(i, i + 100))
+      .not("ultimo_mensaje_usuario", "is", null);
+    if (error) throw error;
+    filas.push(...(data || []));
+  }
+
+  const etiquetaAsistio = normalizarParaComparar(configActual.dashboard_etiqueta_asistio);
+  const etiquetaCompro = normalizarParaComparar(configActual.dashboard_etiqueta_compro);
+  const tiene = (c, objetivo) => Boolean(objetivo) && Array.isArray(c.etiquetas) && c.etiquetas.some(e => normalizarParaComparar(e) === objetivo);
+
+  const chats = filas.length;
+  const califican = filas.filter(c => c.califica).length;
+  const enlaces = filas.filter(c => c.enlace_enviado).length;
+  const agendas = filas.filter(c => c.agendo).length;
+  const asistieron = filas.filter(c => tiene(c, etiquetaAsistio)).length;
+  const compraron = filas.filter(c => tiene(c, etiquetaCompro)).length;
+  const cash = filas.reduce((s, c) => s + (Number(c.monto_pagado) || 0), 0);
+  const costo = (n) => (a.gasto > 0 && n > 0) ? a.gasto / n : null;
+
+  return { chats, califican, enlaces, agendas, asistieron, compraron, cash,
+    costoChat: costo(chats), costoEnlace: costo(enlaces), costoAgenda: costo(agendas), costoCliente: costo(compraron) };
+}
+
+app.get("/dashboard/anuncios", requireAdminKey, async (req, res) => {
+  try {
+    const lista = await leerAnunciosGuardados();
+    const salida = [];
+    for (const a of lista) {
+      try {
+        salida.push({ ...a, metricas: await calcularMetricasAnuncio(a) });
+      } catch (err) {
+        salida.push({ ...a, error: err.message });
+      }
+    }
+    res.json({ anuncios: salida });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/dashboard/anuncios", requireAdminKey, async (req, res) => {
+  try {
+    const lista = limpiarAnuncios(req.body?.anuncios);
+    const { error } = await supabase
+      .from("app_config")
+      .upsert({ key: CLAVE_ANUNCIOS, valor: lista, actualizado_en: new Date().toISOString() });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ ok: true, guardados: lista.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Datos agregados del embudo completo para /dashboard: cuenta cada paso
 // (conversaciones -> califica -> enlace -> agendó -> asistió -> compró) y
 // calcula el % de conversión de un paso al siguiente, además del total de
@@ -11247,6 +11384,17 @@ ${estilosBase()}
       <div id="dashSeguimientos" style="display:grid; grid-template-columns:1fr 1fr; gap:10px;"><span class="dash-side-stat-label">Cargando…</span></div>
     </div>
 
+    <div style="margin-bottom:22px;">
+      <div class="dash-cash-label">📣 Anuncios</div>
+      <div class="dash-side-stat-label" style="margin:4px 0 10px;">Resultados por anuncio. Cada anuncio se identifica por la palabra con la que entran los leads y la fecha desde la que lo corres. Anota el gasto de Meta y se calculan los costos.</div>
+      <div id="dashAnuncios"><span class="dash-side-stat-label">Cargando…</span></div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;">
+        <button class="add-paso" id="btnAgregarAnuncio" type="button">+ Agregar anuncio</button>
+        <button class="add-paso" id="btnGuardarAnuncios" type="button">Guardar anuncios</button>
+      </div>
+      <p class="dash-config-msg" id="anunciosMsg"></p>
+    </div>
+
     <div class="dash-config-card">
       <h2 style="font-family:var(--display); font-size:16px; font-weight:600; margin:0 0 5px;">⚙️ Configurar el embudo</h2>
       <p class="hint" style="margin:0;">"Asistió" y "Compró" no los detecta el bot solo — se basan en las etiquetas manuales que le pongas a cada lead desde /chats. Elige aquí cuál etiqueta representa cada cosa.</p>
@@ -11340,7 +11488,165 @@ ${estilosBase()}
     }
   }
 
+  // --- Anuncios: resultados por campaña ---
+  let anunciosEditables = [];
+
+  function campoAnuncio(etiqueta, tipo, valor, ancho, alCambiar, placeholder){
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "flex:1 1 " + ancho + "px; min-width:" + ancho + "px;";
+    const lab = document.createElement("label");
+    lab.textContent = etiqueta;
+    lab.style.cssText = "display:block; font-size:12px; margin-bottom:4px;";
+    const inp = document.createElement("input");
+    inp.type = tipo;
+    inp.value = valor;
+    if(placeholder) inp.placeholder = placeholder;
+    if(tipo === "number"){ inp.step = "0.01"; inp.min = "0"; }
+    inp.addEventListener("input", function(){ alCambiar(inp.value); });
+    wrap.appendChild(lab);
+    wrap.appendChild(inp);
+    return wrap;
+  }
+
+  function filaMetricaAnuncio(icono, titulo, valor){
+    const fila = document.createElement("div");
+    fila.className = "dash-step step-califica";
+    const izq = document.createElement("div");
+    izq.className = "dash-step-left";
+    const ic = document.createElement("span");
+    ic.className = "dash-step-icon";
+    ic.textContent = icono;
+    const nombre = document.createElement("div");
+    nombre.className = "dash-step-label";
+    nombre.textContent = titulo;
+    izq.appendChild(ic);
+    izq.appendChild(nombre);
+    const der = document.createElement("div");
+    der.className = "dash-step-right";
+    const val = document.createElement("div");
+    val.className = "dash-step-value";
+    val.textContent = valor;
+    der.appendChild(val);
+    fila.appendChild(izq);
+    fila.appendChild(der);
+    return fila;
+  }
+
+  function dineroOGuion(n){
+    return (n === null || n === undefined) ? "–" : formatearMoneda(n);
+  }
+
+  function renderAnuncios(){
+    const cont = document.getElementById("dashAnuncios");
+    cont.textContent = "";
+    if(anunciosEditables.length === 0){
+      const vacio = document.createElement("span");
+      vacio.className = "dash-side-stat-label";
+      vacio.textContent = "Todavía no hay anuncios. Pulsa + Agregar anuncio.";
+      cont.appendChild(vacio);
+      return;
+    }
+    anunciosEditables.forEach(function(a, i){
+      const card = document.createElement("div");
+      card.className = "dash-config-card";
+      card.style.marginBottom = "12px";
+
+      const campos = document.createElement("div");
+      campos.style.cssText = "display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;";
+      campos.appendChild(campoAnuncio("Nombre del anuncio", "text", a.nombre || "", 180, function(v){ a.nombre = v; }, "Ej: Video guía de página"));
+      campos.appendChild(campoAnuncio("Palabra clave", "text", a.palabra || "", 110, function(v){ a.palabra = v; }, "Ej: página"));
+      campos.appendChild(campoAnuncio("Desde", "date", a.desde || "", 140, function(v){ a.desde = v; }));
+      campos.appendChild(campoAnuncio("Hasta (opcional)", "date", a.hasta || "", 140, function(v){ a.hasta = v; }));
+      campos.appendChild(campoAnuncio("Gasto en USD", "number", a.gasto === undefined ? "" : a.gasto, 110, function(v){ a.gasto = v; }, "0"));
+      const quitar = document.createElement("button");
+      quitar.type = "button";
+      quitar.className = "quitar";
+      quitar.textContent = "quitar";
+      quitar.addEventListener("click", function(){ anunciosEditables.splice(i, 1); renderAnuncios(); });
+      campos.appendChild(quitar);
+      card.appendChild(campos);
+
+      const m = a.metricas;
+      if(a.error){
+        const err = document.createElement("p");
+        err.className = "dash-config-msg";
+        err.textContent = "No se pudieron calcular los resultados: " + a.error;
+        card.appendChild(err);
+      } else if(m){
+        const grid = document.createElement("div");
+        grid.style.cssText = "display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:14px;";
+        grid.appendChild(filaMetricaAnuncio("💬", "Chats", m.chats));
+        grid.appendChild(filaMetricaAnuncio("💵", "Costo por chat", dineroOGuion(m.costoChat)));
+        grid.appendChild(filaMetricaAnuncio("🔗", "Enlaces enviados", m.enlaces));
+        grid.appendChild(filaMetricaAnuncio("💵", "Costo por enlace", dineroOGuion(m.costoEnlace)));
+        grid.appendChild(filaMetricaAnuncio("📅", "Agendas", m.agendas));
+        grid.appendChild(filaMetricaAnuncio("💵", "Costo por agenda", dineroOGuion(m.costoAgenda)));
+        grid.appendChild(filaMetricaAnuncio("✅", "Asistieron", m.asistieron));
+        grid.appendChild(filaMetricaAnuncio("🎉", "Compraron", m.compraron));
+        grid.appendChild(filaMetricaAnuncio("💵", "Costo por cliente", dineroOGuion(m.costoCliente)));
+        grid.appendChild(filaMetricaAnuncio("💰", "Cash collected", formatearMoneda(m.cash)));
+        card.appendChild(grid);
+      } else {
+        const pend = document.createElement("p");
+        pend.className = "dash-side-stat-label";
+        pend.style.marginTop = "12px";
+        pend.textContent = "Guarda el anuncio para ver sus resultados.";
+        card.appendChild(pend);
+      }
+      cont.appendChild(card);
+    });
+  }
+
+  async function cargarAnuncios(){
+    const msg = document.getElementById("anunciosMsg");
+    try {
+      const res = await fetch("/dashboard/anuncios");
+      if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
+      const data = await res.json();
+      if(data.error) throw new Error(data.error);
+      anunciosEditables = Array.isArray(data.anuncios) ? data.anuncios : [];
+      renderAnuncios();
+    } catch (err) {
+      console.error("Error cargando anuncios:", err);
+      msg.textContent = "No se pudieron cargar los anuncios: " + err.message;
+    }
+  }
+
+  document.getElementById("btnAgregarAnuncio").addEventListener("click", function(){
+    anunciosEditables.push({ nombre: "", palabra: "", desde: "", hasta: "", gasto: 0 });
+    renderAnuncios();
+  });
+
+  document.getElementById("btnGuardarAnuncios").addEventListener("click", async function(){
+    const msg = document.getElementById("anunciosMsg");
+    for(const a of anunciosEditables){
+      if(!String(a.palabra || "").trim() || !String(a.desde || "").trim()){
+        msg.textContent = "Cada anuncio necesita una palabra clave y una fecha de inicio.";
+        return;
+      }
+    }
+    msg.textContent = "Guardando…";
+    try {
+      const lista = anunciosEditables.map(function(a){
+        return { nombre: a.nombre, palabra: a.palabra, desde: a.desde, hasta: a.hasta, gasto: Number(a.gasto) || 0 };
+      });
+      const res = await fetch("/dashboard/anuncios", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ anuncios: lista })
+      });
+      const data = await res.json();
+      if(!res.ok || data.error) throw new Error(data.error || "Error al guardar");
+      msg.textContent = "✓ Guardado. Calculando resultados…";
+      await cargarAnuncios();
+      msg.textContent = "✓ Guardado.";
+    } catch (err) {
+      msg.textContent = "No se pudo guardar: " + err.message;
+    }
+  });
+
   async function cargarDashboard(){
+    if(!window.__anunciosCargados){ window.__anunciosCargados = true; cargarAnuncios(); }
     let data;
     try {
       const params = new URLSearchParams();
