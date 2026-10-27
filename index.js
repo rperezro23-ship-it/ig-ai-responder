@@ -713,6 +713,16 @@ async function enviarRecordatorioAplazo(senderId, conv) {
   await guardarConversacion(senderId, { rotacion: { ...rotacion, _rec: usados + 1 } });
 }
 
+// Prueba A/B de seguimientos: reparte a los leads en dos grupos fijos (siempre
+// el mismo grupo para el mismo lead) segun el id de Instagram. Un grupo recibe
+// el audio pregrabado del paso y el otro recibe el texto.
+function grupoPruebaSeguimiento(senderId) {
+  let h = 0;
+  const txt = String(senderId);
+  for (let i = 0; i < txt.length; i++) h = (h * 31 + txt.charCodeAt(i)) >>> 0;
+  return h % 2 === 0 ? "audio" : "texto";
+}
+
 async function procesarSeguimientosPendientesDB() {
   const botActivo = await estaBotActivo();
   if (!botActivo) {
@@ -869,7 +879,20 @@ async function procesarSeguimientosPendientesDB() {
     // con otras palabras, la última pregunta del bot que el lead no
     // respondió. Si no hay pregunta pendiente o la IA falla, se queda el
     // mensaje fijo de arriba.
-    if (pasoConfig.reformular_pregunta) {
+    // Prueba A/B (opcional): si el paso tiene una clave de audio, a la mitad de
+    // los leads se les manda ese audio en vez del texto. Si el audio no existe
+    // en /panel, no se hace la prueba y todos reciben el texto.
+    let grupoPrueba = null;
+    const claveAudioAB = String(pasoConfig.audio_ab_clave || "").trim();
+    if (claveAudioAB && configActual.audios?.[claveAudioAB]?.url) {
+      grupoPrueba = grupoPruebaSeguimiento(senderId);
+      if (grupoPrueba === "audio") {
+        console.log("🎧 Seguimiento (" + tipo + ", paso " + pasoIndex + ") para " + senderId + ": grupo AUDIO de la prueba A/B (" + claveAudioAB + ").");
+        mensaje = "[[audio:" + claveAudioAB + "]]";
+      }
+    }
+
+    if (pasoConfig.reformular_pregunta && grupoPrueba !== "audio") {
       const reformulado = await reformularPreguntaPendiente(senderId);
       if (reformulado) {
         console.log(`🔁 Seguimiento (${tipo}, paso ${pasoIndex}) para ${senderId}: usando la pregunta pendiente reformulada.`);
@@ -885,7 +908,9 @@ async function procesarSeguimientosPendientesDB() {
       // dashboard: tipo ("normal"/"enlace"), número de paso, cuándo se mandó
       // y (cuando el lead responda) "r". Se conservan solo los últimos 30.
       const registroSeg = Array.isArray(rotacion._seg) ? rotacion._seg : [];
-      rotacion._seg = registroSeg.concat([{ t: tipo, p: pasoIndex, en: new Date().toISOString(), r: null }]).slice(-30);
+      const entradaSeg = { t: tipo, p: pasoIndex, en: new Date().toISOString(), r: null };
+      if (grupoPrueba) entradaSeg.g = grupoPrueba;
+      rotacion._seg = registroSeg.concat([entradaSeg]).slice(-30);
 
       const camposAGuardar = { rotacion };
       if (esEnlace) {
@@ -5185,6 +5210,12 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
         statsSeg[clave] = statsSeg[clave] || { enviados: 0, reactivados: 0 };
         statsSeg[clave].enviados++;
         if (e.r) statsSeg[clave].reactivados++;
+        if (e.g) {
+          const claveGrupo = clave + "_" + e.g;
+          statsSeg[claveGrupo] = statsSeg[claveGrupo] || { enviados: 0, reactivados: 0 };
+          statsSeg[claveGrupo].enviados++;
+          if (e.r) statsSeg[claveGrupo].reactivados++;
+        }
       }
     }
     const seguimientos = [];
@@ -5195,6 +5226,16 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
           tipo, paso: i + 1, etiqueta: nombreTipo + " " + (i + 1) + (paso && paso.horas ? " (" + paso.horas + " h)" : ""),
           enviados: s.enviados, reactivados: s.reactivados, porcentaje: porcentaje(s.reactivados, s.enviados)
         });
+        // Prueba A/B de audio: dos renglones extra, uno por grupo.
+        if (paso && String(paso.audio_ab_clave || "").trim()) {
+          ["texto", "audio"].forEach((g) => {
+            const sg = statsSeg[tipo + "_" + i + "_" + g] || { enviados: 0, reactivados: 0 };
+            seguimientos.push({
+              tipo, paso: i + 1, etiqueta: "↳ " + nombreTipo + " " + (i + 1) + " · solo " + g,
+              enviados: sg.enviados, reactivados: sg.reactivados, porcentaje: porcentaje(sg.reactivados, sg.enviados)
+            });
+          });
+        }
       });
     };
     agregarPasos(configActual.seguimientos, "normal", "Seguimiento");
@@ -12190,6 +12231,9 @@ ${estilosBase()}
           <input type="checkbox" class="paso-reformular" data-i="\${i}"\${paso.reformular_pregunta ? " checked" : ""} style="width:16px; height:16px; accent-color:var(--green); cursor:pointer; margin-top:1px; flex-shrink:0;">
           <span style="color:var(--text); font-size:13.5px; font-weight:500; line-height:1.45;">🔁 Re-preguntar con otras palabras la última pregunta que el lead no respondió (si no hay ninguna, se usan los mensajes de arriba)</span>
         </label>
+        <label style="margin-top:12px;">🎧 Prueba A/B (opcional): clave del audio que se manda a la mitad de los leads</label>
+        <input type="text" class="paso-audio-ab" data-i="\${i}" value="\${(paso.audio_ab_clave || "").replace(/"/g, "&quot;")}" placeholder="Ej: seguimiento20h (vacío = sin prueba)" style="margin-bottom:4px;">
+        <div style="color:var(--muted); font-size:12.5px; line-height:1.4;">La otra mitad recibe el texto de este paso. Sube el audio en la sección de audios del panel y escribe aquí su clave.</div>
       \`;
       cont.appendChild(div);
     });
@@ -12211,6 +12255,7 @@ ${estilosBase()}
     });
     document.querySelectorAll(".paso-solo-visto").forEach((chk, i) => { pasos[i].solo_si_visto = chk.checked; });
     document.querySelectorAll(".paso-reformular").forEach((chk, i) => { pasos[i].reformular_pregunta = chk.checked; });
+    document.querySelectorAll(".paso-audio-ab").forEach((inp, i) => { pasos[i].audio_ab_clave = inp.value.trim(); });
   }
 
   // --- Seguimiento especial al enlace: mismo patrón, otro contenedor ---
