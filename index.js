@@ -5140,9 +5140,19 @@ async function calcularMetricasAnuncio(a) {
   const hastaMs = a.hasta ? new Date(a.hasta + "T23:59:59.999" + ZONA_ANUNCIOS).getTime() : Date.now();
   const tMs = (m) => new Date(m.creado_en).getTime();
 
-  // 1) Mensajes en el rango que mencionan la palabra (con y sin acento).
+  // 1) Mensajes en el rango que mencionan la palabra. La busqueda en la base
+  //    de datos distingue acentos, asi que se buscan TODAS las variantes con
+  //    una vocal acentuada (o ñ): da igual si la palabra clave se guardo con
+  //    o sin tilde, y si el lead la escribio con o sin tilde. La comparacion
+  //    final (mas abajo) ya ignora los acentos.
+  const acentosPosibles = { a: "á", e: "é", i: "í", o: "ó", u: "ú", n: "ñ" };
+  const variantesAcento = new Set([palabraPlana]);
+  for (let i = 0; i < palabraPlana.length; i++) {
+    const acentuada = acentosPosibles[palabraPlana[i]];
+    if (acentuada) variantesAcento.add(palabraPlana.slice(0, i) + acentuada + palabraPlana.slice(i + 1));
+  }
   const originalLimpia = a.palabra.trim().replace(/[^\p{L}\p{N} ]/gu, "");
-  const patrones = [...new Set([palabraPlana, originalLimpia])].filter(Boolean);
+  const patrones = [...new Set([...variantesAcento, originalLimpia])].filter(Boolean).slice(0, 30);
   const filtroOr = patrones.map(p => "content.ilike.%" + p + "%").join(",");
   const candidatos = new Set();
   for (let desdeFila = 0; desdeFila < 5000; desdeFila += 1000) {
