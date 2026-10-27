@@ -588,6 +588,131 @@ async function reformularPreguntaPendiente(senderId) {
   }
 }
 
+// Recordatorio por aplazamiento: si el lead ya recibio el enlace del calendario
+// y dice que lo hara despues ("ahorita no puedo", "en un rato", "esta noche",
+// "cuando salga del trabajo"...), se programa un unico mensaje para la hora
+// aproximada que el mismo dijo, en vez de depender solo de los seguimientos
+// por horas fijas. Solo se programa si cae dentro de la ventana de 24h de
+// Instagram (desde su ultimo mensaje); si dijo "el lunes" o algo mas lejano,
+// no se puede mandar nada automatico y se deja a los seguimientos normales.
+const MAX_RECORDATORIOS_APLAZO = 2;
+
+async function programarRecordatorioAplazo(senderId) {
+  try {
+    const conv = await obtenerConversacion(senderId);
+    if (!conv?.enlace_enviado || conv.agendo || !conv.ultimo_mensaje_usuario) return;
+    if (tieneEtiquetaNoContactar(conv)) return;
+
+    const usados = Number(conv.rotacion?._rec) || 0;
+    if (usados >= MAX_RECORDATORIOS_APLAZO) return;
+
+    const { data: mensajes, error } = await supabase
+      .from("mensajes_chat")
+      .select("role, content")
+      .eq("sender_id", senderId)
+      .order("creado_en", { ascending: false })
+      .limit(8);
+    if (error || !mensajes?.length) return;
+
+    const texto = (m) => (typeof m.content === "string" && !m.content.startsWith("[[")) ? m.content.trim() : "";
+    const ultimoLead = mensajes.find(m => m.role === "user" && texto(m));
+    if (!ultimoLead || texto(ultimoLead).length > 220) return;
+
+    const contexto = [...mensajes].reverse().filter(m => texto(m))
+      .map(m => (m.role === "user" ? "Lead" : "Bot") + ": " + texto(m)).join("\n");
+
+    const ahoraMx = new Date().toLocaleString("es-MX", {
+      timeZone: "America/Mexico_City", weekday: "long", year: "numeric", month: "long",
+      day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false
+    });
+
+    const resp = await openaiClient.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      max_tokens: 60,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "Analizas un chat de ventas por Instagram. Al lead ya se le mando el enlace del calendario para agendar una llamada. " +
+            "Responde SOLO JSON: {\"aplaza\": true|false, \"en_minutos\": numero|null}. " +
+            "aplaza=true solo si el lead dice en su ULTIMO mensaje que lo hara o lo vera mas tarde o despues (ej. 'ahorita no puedo', 'en un rato', 'mas tarde', 'esta noche', 'cuando salga del trabajo', 'manana', 'a las 7'). " +
+            "aplaza=false si ya agendo, si rechaza, si solo hace una pregunta, si da las gracias sin fijar un momento o si no habla de cuando. " +
+            "en_minutos = minutos desde AHORA hasta el momento en que el lead dijo que podria hacerlo. Si dio una hora concreta, calculala. " +
+            "Si dijo algo vago: 'en un rato' o 'ahorita no puedo' = 120, 'mas tarde' = 180, 'esta noche' = hasta las 20:00, " +
+            "'cuando salga del trabajo' = hasta las 18:30, 'manana' = hasta las 10:00 del dia siguiente. " +
+            "Ahora son (hora de Mexico): " + ahoraMx + "."
+        },
+        { role: "user", content: contexto }
+      ]
+    });
+
+    let analisis = {};
+    try { analisis = JSON.parse(resp.choices?.[0]?.message?.content || "{}"); } catch (_) {}
+    if (analisis.aplaza !== true || !Number.isFinite(Number(analisis.en_minutos))) return;
+
+    const minutos = Math.min(Math.max(Number(analisis.en_minutos), 30), 1380);
+    const momentoDisparo = Date.now() + minutos * 60 * 1000;
+    const limiteVentana = new Date(conv.ultimo_mensaje_usuario).getTime() + VENTANA_24H_MS - COLCHON_SEGURIDAD_MS;
+
+    if (momentoDisparo > limiteVentana) {
+      console.log("⏭️ Recordatorio de aplazamiento para " + senderId + " descartado: la hora que dijo cae fuera de la ventana de 24h.");
+      return;
+    }
+
+    const { error: errIns } = await supabase.from("seguimientos_programados").insert({
+      sender_id: senderId,
+      paso_index: 0,
+      tipo: "recordatorio",
+      disparar_en: new Date(momentoDisparo).toISOString(),
+      enviado: false
+    });
+    if (errIns) { console.error("❌ Error programando recordatorio de aplazamiento:", errIns.message); return; }
+
+    console.log("⏰ Recordatorio de aplazamiento programado para " + senderId + " en ~" + Math.round(minutos) + " min (lead: \"" + texto(ultimoLead).slice(0, 80) + "\").");
+  } catch (err) {
+    console.error("⚠️ No se pudo evaluar el aplazamiento del lead:", err.message);
+  }
+}
+
+// Mensaje del recordatorio (se manda dentro de procesarSeguimientosPendientesDB
+// cuando la fila es de tipo "recordatorio"): texto corto + el enlace otra vez.
+const MENSAJES_RECORDATORIO_APLAZO = [
+  "Hola, ¿cómo vas? Me comentaste que más tarde podías ver el calendario. ¿Ya pudiste elegir tu horario?",
+  "Oye, paso por aquí como quedamos. ¿Pudiste ver el calendario y escoger día y hora?",
+  "¿Cómo vas? Te dejo de nuevo el enlace por si ahora te queda más cómodo agendar."
+];
+
+async function enviarRecordatorioAplazo(senderId, conv) {
+  const rotacion = conv.rotacion || {};
+  const usados = Number(rotacion._rec) || 0;
+  const mensaje = MENSAJES_RECORDATORIO_APLAZO[usados % MENSAJES_RECORDATORIO_APLAZO.length];
+
+  // Se reutiliza el enlace personalizado que ya se le mando (agendar?u=usuario).
+  let enlace = null;
+  const objetivo = (configActual.enlace_calificacion || "").trim();
+  if (objetivo) {
+    const { data: previos } = await supabase
+      .from("mensajes_chat")
+      .select("content")
+      .eq("sender_id", senderId)
+      .eq("role", "assistant")
+      .order("creado_en", { ascending: false })
+      .limit(40);
+    const previo = (previos || []).find(m => typeof m.content === "string" && m.content.includes(objetivo));
+    if (previo) {
+      const urls = previo.content.match(/https?:\/\/[^\s|\]]+/g) || [];
+      enlace = urls.find(u => u.includes(objetivo)) || urls[0] || null;
+    }
+  }
+
+  await enviarContenidoConMarcadores(senderId, mensaje);
+  if (enlace) await enviarContenidoConMarcadores(senderId, "[[boton]]Agendar|" + enlace);
+
+  await guardarConversacion(senderId, { rotacion: { ...rotacion, _rec: usados + 1 } });
+}
+
 async function procesarSeguimientosPendientesDB() {
   const botActivo = await estaBotActivo();
   if (!botActivo) {
@@ -648,6 +773,33 @@ async function procesarSeguimientosPendientesDB() {
     if (configActual.parar_seguimientos_si_agendo && conv.agendo) {
       console.log(`📅 Seguimiento (${tipo}, paso ${pasoIndex}) para ${senderId} descartado: el lead ya confirmó que agendó.`);
       await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
+      continue;
+    }
+
+    // Recordatorio por aplazamiento: no usa los pasos configurados; solo se
+    // manda si el lead todavia no agendo, y respeta la franja horaria.
+    if (tipo === "recordatorio") {
+      if (conv.agendo) {
+        await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
+        continue;
+      }
+      if (configActual.franja_horaria_activa) {
+        const horaMx = new Date().toLocaleTimeString("en-GB", { timeZone: "America/Mexico_City", hour: "2-digit", minute: "2-digit", hour12: false });
+        const [hD, mD] = (configActual.franja_horaria_desde || "08:00").split(":").map(Number);
+        const [hH, mH] = (configActual.franja_horaria_hasta || "23:00").split(":").map(Number);
+        const [hA, mA] = horaMx.split(":").map(Number);
+        const desdeMin = hD * 60 + mD, hastaMin = hH * 60 + mH, actualMin = hA * 60 + mA;
+        const dentro = desdeMin <= hastaMin ? (actualMin >= desdeMin && actualMin <= hastaMin) : (actualMin >= desdeMin || actualMin <= hastaMin);
+        if (!dentro) continue; // se queda pendiente hasta entrar a la franja
+      }
+      try {
+        console.log("⏰ Enviando recordatorio de aplazamiento a " + senderId);
+        await enviarRecordatorioAplazo(senderId, conv);
+        await supabase.from("seguimientos_programados").update({ enviado: true }).eq("id", id);
+        procesados++;
+      } catch (err) {
+        console.error("❌ Error enviando recordatorio a " + senderId + ":", err.response?.data || err.message);
+      }
       continue;
     }
 
@@ -4043,6 +4195,7 @@ async function procesarBuffer(senderId) {
     buffers.delete(senderId);
     await marcarNoContactarSiRechazo(senderId);
     await programarSeguimientosDB(senderId);
+    await programarRecordatorioAplazo(senderId);
   }
 }
 
