@@ -13768,6 +13768,7 @@ ${estilosBase()}
           <button type="button" class="btn-mini" id="btnRecuperarUsuario" title="Busca UN chat por su nombre de usuario de Instagram, te dice cuándo escribió y si está sin responder, y lo recupera.">🔎 Recuperar un usuario</button>
           <div class="chat-export" id="chatExportWrap" style="display:none;">
             <a id="btnExportar" href="#" class="btn-mini">⬇ CSV</a>
+            <a id="btnExportarCompleto" href="/exportar/chats-completos.json" class="btn-mini" title="Descarga TODOS los chats con todos sus mensajes en un solo archivo (para analizarlos)">⬇ Chats completos</a>
           </div>
         </div>
         <div class="chat-list" id="listaChats"><p class="vacio-lista">Cargando…</p></div>
@@ -15968,6 +15969,63 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${nombreArchivo}_${fechaArchivo}.csv"`);
     res.send(csv);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Exporta TODOS los chats con TODOS sus mensajes en un solo archivo JSON, para
+// poder analizarlos fuera del bot (en que etapa se caen los leads, que
+// preguntas funcionan, etc.). Trae cada conversacion con sus datos de estado
+// y la lista completa de mensajes (mensajes_chat) ordenada por fecha. Se
+// pagina porque Supabase devuelve como maximo 1000 filas por consulta.
+app.get("/exportar/chats-completos.json", requireAdminKey, async (req, res) => {
+  try {
+    const TAM_PAGINA = 1000;
+
+    const conversaciones = [];
+    for (let desde = 0; ; desde += TAM_PAGINA) {
+      const { data, error } = await supabase
+        .from("conversaciones")
+        .select("sender_id, username, etapa, califica, calificado_en, razon_calificacion, no_califica, no_califica_en, razon_no_califica, agendo, agendo_en, enlace_enviado, enlace_enviado_en, enlace_pasos_enviados, etiquetas, monto_pagado, ultimo_mensaje_usuario, ultimo_mensaje_bot_en, actualizado_en, bot_pausado, rotacion")
+        .order("sender_id", { ascending: true })
+        .range(desde, desde + TAM_PAGINA - 1);
+      if (error) return res.status(500).json({ error: error.message });
+      conversaciones.push(...(data || []));
+      if (!data || data.length < TAM_PAGINA) break;
+    }
+
+    const mensajesPorChat = new Map();
+    let totalMensajes = 0;
+    for (let desde = 0; ; desde += TAM_PAGINA) {
+      const { data, error } = await supabase
+        .from("mensajes_chat")
+        .select("sender_id, role, content, creado_en")
+        .order("creado_en", { ascending: true })
+        .order("sender_id", { ascending: true })
+        .range(desde, desde + TAM_PAGINA - 1);
+      if (error) return res.status(500).json({ error: error.message });
+      for (const m of data || []) {
+        if (!mensajesPorChat.has(m.sender_id)) mensajesPorChat.set(m.sender_id, []);
+        mensajesPorChat.get(m.sender_id).push({ role: m.role, content: m.content, creado_en: m.creado_en });
+      }
+      totalMensajes += (data || []).length;
+      if (!data || data.length < TAM_PAGINA) break;
+    }
+
+    const chats = conversaciones.map(c => {
+      const { rotacion, ...resto } = c;
+      return {
+        ...resto,
+        seguimientos_enviados: Array.isArray(rotacion?._seg) ? rotacion._seg : [],
+        mensajes: mensajesPorChat.get(c.sender_id) || []
+      };
+    });
+
+    const fechaArchivo = new Date().toISOString().slice(0, 10);
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="chats_completos_' + fechaArchivo + '.json"');
+    res.send(JSON.stringify({ exportado_en: new Date().toISOString(), total_chats: chats.length, total_mensajes: totalMensajes, chats }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
