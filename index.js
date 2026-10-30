@@ -11396,7 +11396,7 @@ ${estilosBase()}
 
     <div style="margin-bottom:22px;">
       <div class="dash-cash-label">📣 Anuncios</div>
-      <div class="dash-side-stat-label" style="margin:4px 0 10px;">Resultados por anuncio. Cada anuncio se identifica por la palabra con la que entran los leads y la fecha desde la que lo corres. Anota el gasto de Meta y se calculan los costos.</div>
+      <div class="dash-side-stat-label" style="margin:4px 0 10px;">Resultados por anuncio. Cada anuncio se identifica por la palabra con la que entran los leads y la fecha desde la que lo corres. Anota el gasto de Meta y se calculan los costos. Ojo: esta sección usa las fechas Desde y Hasta de cada anuncio, NO el filtro de fechas de arriba, porque el gasto que anotas corresponde a todo el periodo del anuncio.</div>
       <div id="dashAnuncios"><span class="dash-side-stat-label">Cargando…</span></div>
       <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;">
         <button class="add-paso" id="btnAgregarAnuncio" type="button">+ Agregar anuncio</button>
@@ -16736,6 +16736,60 @@ app.get("/seguimientos/:senderId?", requireAdminKey, async (req, res) => {
   res.json({ configuracion: configActual.seguimientos, configuracion_enlace: configActual.seguimientos_enlace, seguimientos: data });
 });
 
+// Respaldo automático de "Recuperar chats": cada cierto tiempo le pregunta a
+// Instagram por las conversaciones de las últimas 24 horas y atiende las que
+// tienen un mensaje del lead que el bot NUNCA recibió (Meta no lo mandó al
+// webhook, o llegó por un camino que no se procesó). Usa las mismas reglas del
+// botón manual, con tres seguros extra: (1) ignora mensajes de menos de 3
+// minutos (el webhook normal todavía puede estar procesándolos), (2) ignora los
+// que el bot ya recibió (ultimo_mensaje_usuario >= fecha del mensaje) y (3)
+// responde como máximo a RECUPERACION_AUTO_MAX chats por pasada. Se apaga con
+// RECUPERACION_AUTO_MINUTOS=0; por defecto corre cada 10 minutos.
+const RECUPERACION_AUTO_MINUTOS = Number.isFinite(parseInt(process.env.RECUPERACION_AUTO_MINUTOS, 10))
+  ? parseInt(process.env.RECUPERACION_AUTO_MINUTOS, 10) : 10;
+const RECUPERACION_AUTO_MAX = 15;
+let recuperacionAutoEnCurso = false;
+async function recuperarChatsPerdidosAuto() {
+  if (recuperacionAutoEnCurso || (recuperacionChats && !recuperacionChats.terminada)) return;
+  recuperacionAutoEnCurso = true;
+  try {
+    if (!(await estaBotActivo())) return;
+    const cuenta = await obtenerCuentaActiva();
+    if (!cuenta) return;
+    const { chats } = await revisarChatsRecuperables(1);
+    let respondidos = 0, guardados = 0;
+    for (const ch of chats) {
+      if (!ch.sinResponder) continue;
+      if ((Date.now() - new Date(ch.ultimoMensajeEn).getTime()) < 3 * 60000) continue;
+      const conv = await obtenerConversacion(ch.senderId);
+      if (conv.ultimo_mensaje_usuario && new Date(conv.ultimo_mensaje_usuario) >= new Date(ch.ultimoMensajeEn)) continue; // el bot ya lo recibió
+
+      const horas = (Date.now() - new Date(ch.ultimoMensajeEn).getTime()) / 3600000;
+      const puedeResponder = horas <= 23 && ch.texto && !conv.bot_pausado && !tieneEtiquetaNoContactar(conv)
+        && !(conv.ultimo_mensaje_bot_en && new Date(conv.ultimo_mensaje_bot_en) > new Date(ch.ultimoMensajeEn))
+        && respondidos < RECUPERACION_AUTO_MAX;
+
+      if (puedeResponder) {
+        console.log(`🛟 Respaldo automático: ${ch.username || ch.senderId} tenía un mensaje que el bot nunca recibió, se responde: "${ch.texto.slice(0, 80)}"`);
+        await tomarControlDelHilo(cuenta, ch.senderId);
+        await registrarMensajeUsuario(ch.senderId, ch.texto);
+        await cancelarSeguimientosPendientesDB(ch.senderId);
+        encolarMensaje(ch.senderId, ch.texto);
+        respondidos++;
+      } else if (await registrarChatRecuperado(ch)) {
+        console.log(`🛟 Respaldo automático: ${ch.username || ch.senderId} guardado en /chats para atenderlo a mano (el bot no puede contestarlo solo).`);
+        guardados++;
+      }
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    if (respondidos || guardados) console.log(`🛟 Respaldo automático terminado: ${respondidos} respondidos, ${guardados} guardados en /chats.`);
+  } catch (err) {
+    console.error("❌ Error en el respaldo automático de chats:", err.response?.data || err.message);
+  } finally {
+    recuperacionAutoEnCurso = false;
+  }
+}
+
 const PORT = process.env.PORT || 3000;
 // Diagnóstico seguro al arrancar — nunca imprime el secreto completo, solo
 // su longitud y sus primeros/últimos caracteres, para poder comparar contra
@@ -16755,3 +16809,11 @@ if (GOOGLE_CLIENT_SECRET) {
 }
 
 app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+
+if (RECUPERACION_AUTO_MINUTOS > 0) {
+  console.log(`🛟 Respaldo automático de chats activo: cada ${RECUPERACION_AUTO_MINUTOS} min.`);
+  setTimeout(() => {
+    recuperarChatsPerdidosAuto();
+    setInterval(recuperarChatsPerdidosAuto, RECUPERACION_AUTO_MINUTOS * 60000);
+  }, 2 * 60000);
+}
