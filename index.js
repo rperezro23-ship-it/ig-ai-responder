@@ -6778,7 +6778,21 @@ app.get("/agendar", (req, res) => {
   body{
     margin:0; background:var(--bg); color:var(--text);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-    display:flex; align-items:center; justify-content:center; min-height:100vh; padding:24px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; padding:24px;
+  }
+  /* Encabezado opcional (texto superior tipo "landing page"), configurable
+     desde /calendario. Si está vacío no se muestra. El estilo base (centrado,
+     grande, en negrita) se puede cambiar con el editor: tamaño, color,
+     tipografía, alineación y color de fondo del bloque. */
+  .encabezado-pagina{
+    width:800px; max-width:100%; margin:0 0 18px; padding:18px 22px; border-radius:16px;
+    text-align:center; font-size:28px; font-weight:700; line-height:1.3; color:var(--text);
+    overflow-wrap:break-word;
+  }
+  .encabezado-pagina[hidden]{ display:none; }
+  .encabezado-pagina a{ color:var(--accent); }
+  @media (max-width:640px){
+    .encabezado-pagina{ zoom:.8; padding:14px 16px; margin-bottom:14px; }
   }
   .contenedor{
     background:var(--card); border:1px solid var(--border); border-radius:20px;
@@ -6960,6 +6974,7 @@ app.get("/agendar", (req, res) => {
 </style>
 </head>
 <body>
+  <div class="encabezado-pagina" id="encabezadoPagina" hidden></div>
   <div class="contenedor">
 
     <div class="panel-izq">
@@ -7308,6 +7323,14 @@ app.get("/agendar", (req, res) => {
     document.getElementById("perfilTextoVideo").innerHTML = perfil.texto_video || "";
     document.getElementById("perfilInstrucciones").innerHTML = perfil.texto_instrucciones || "";
     document.getElementById("perfilOferta").innerHTML = perfil.texto_oferta || "";
+    const encabezadoEl = document.getElementById("encabezadoPagina");
+    if(perfil.encabezado_html){
+      encabezadoEl.innerHTML = perfil.encabezado_html;
+      encabezadoEl.style.background = perfil.encabezado_fondo || "transparent";
+      encabezadoEl.hidden = false;
+    } else {
+      encabezadoEl.hidden = true;
+    }
     if(perfil.foto_rectangular_url){
       // La foto rectangular (440x176) reemplaza por completo a la
       // circular en ese mismo espacio — se escala para caber en el
@@ -7807,6 +7830,8 @@ app.get("/agendar/pregunta", (req, res) => {
       texto_video: configActual.agenda_texto_video || "",
       texto_instrucciones: configActual.agenda_texto_instrucciones || "",
       texto_oferta: configActual.agenda_texto_oferta || "",
+      encabezado_html: configActual.agenda_encabezado_html || "",
+      encabezado_fondo: configActual.agenda_encabezado_fondo || "",
       whatsapp_link: configActual.agenda_whatsapp_link || "",
       duracion_minutos: configActual.agenda_duracion_minutos || 30
     }
@@ -8285,6 +8310,8 @@ let configActual = {
   agenda_texto_video: "Los detalles de la videollamada se envían al confirmar.",
   agenda_texto_instrucciones: "Selecciona un día y hora de tu preferencia para la sesión (las horas se muestran en tu horario local).",
   agenda_texto_oferta: "Pierde de 10 a 20 kg en solo 3 a 6 meses",
+  agenda_encabezado_html: "", // texto superior de /agendar (HTML del editor); vacío = no se muestra
+  agenda_encabezado_fondo: "", // color de fondo del bloque (ej. "#FFF3BF"); vacío = sin fondo
   agenda_whatsapp_link: "",
 
   dashboard_etiqueta_asistio: "", // nombre exacto de la etiqueta manual que representa "asistió a la llamada"
@@ -8344,6 +8371,19 @@ function enmascararClave(clave) {
   if (!clave) return "";
   const limpio = String(clave);
   return limpio.length <= 4 ? "••••" : "••••" + limpio.slice(-4);
+}
+
+// Limpieza mínima del HTML del encabezado de /agendar: el editor genera solo
+// etiquetas de formato simples, así que se quitan scripts, iframes, manejadores
+// de eventos (onclick=...) y enlaces "javascript:".
+function limpiarHtmlEncabezado(html) {
+  return String(html || "")
+    .slice(0, 20000)
+    .replace(/<\s*(script|iframe|object|embed|style|link|meta)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, "")
+    .replace(/<\s*(script|iframe|object|embed|style|link|meta)[^>]*\/?>/gi, "")
+    .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/(href|src)\s*=\s*("|')\s*javascript:[^"']*\2/gi, "$1=$2#$2")
+    .trim();
 }
 
 function configParaFrontend(cfg) {
@@ -9153,7 +9193,7 @@ app.post("/config", requireAdminKey, async (req, res) => {
             agenda_whatsapp_confirmar_mensaje, agenda_correos_notificacion, agenda_correo_texto_intro,
             agenda_correo_incluir_nombre, agenda_correo_incluir_correo, agenda_correo_incluir_fecha_hora, boton_texto_intro,
             agenda_recordatorios, agenda_recordatorio_asunto, agenda_recordatorio_mensaje, agenda_correo_no_califica_activo,
-            agenda_correo_lead_no_califica_activo } = req.body || {};
+            agenda_correo_lead_no_califica_activo, agenda_encabezado_html, agenda_encabezado_fondo } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -9293,6 +9333,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof agenda_texto_video === "string") nuevaConfig.agenda_texto_video = agenda_texto_video.trim();
     if (typeof agenda_texto_instrucciones === "string") nuevaConfig.agenda_texto_instrucciones = agenda_texto_instrucciones.trim();
     if (typeof agenda_texto_oferta === "string") nuevaConfig.agenda_texto_oferta = agenda_texto_oferta.trim();
+    if (typeof agenda_encabezado_html === "string") nuevaConfig.agenda_encabezado_html = limpiarHtmlEncabezado(agenda_encabezado_html);
+    if (typeof agenda_encabezado_fondo === "string") nuevaConfig.agenda_encabezado_fondo = /^#[0-9a-fA-F]{6}$/.test(agenda_encabezado_fondo.trim()) ? agenda_encabezado_fondo.trim() : "";
     if (typeof agenda_whatsapp_link === "string") nuevaConfig.agenda_whatsapp_link = agenda_whatsapp_link.trim();
 
     // Descarta transiciones (generales o por etapa) que apunten a una etapa
@@ -10071,6 +10113,18 @@ ${estilosBase()}
   }
   .rte-editable a{ color:var(--green); }
   .rte-editable:empty::before{ content: attr(data-placeholder); color:var(--muted); }
+  .rte-btn.rte-btn-texto{ width:auto; padding:0 8px; font-size:12.5px; }
+  .rte-toolbar input[type=color]{
+    width:34px; height:30px; padding:0; border:1px solid var(--border); border-radius:6px;
+    background:transparent; cursor:pointer;
+  }
+  /* Vista previa del encabezado: mismo fondo claro y estilo base que la
+     página pública, para ver los colores como los va a ver la gente. */
+  .rte-editable.rte-vista-clara{
+    background:#F7F8FA; color:#1A2028; text-align:center; font-size:28px; font-weight:700;
+    line-height:1.3; min-height:110px;
+  }
+  .rte-editable.rte-vista-clara:empty::before{ color:#68707E; font-size:16px; font-weight:400; }
 
   .savebar{
     position:fixed; left:236px; right:0; bottom:0; background:linear-gradient(0deg, var(--bg) 65%, transparent);
@@ -10121,6 +10175,13 @@ ${estilosBase()}
     <div class="card">
       <p class="cuentas-titulo">Paso 4</p>
       <p class="cuentas-subtitulo">Personalización de la página pública</p>
+      <label>Texto superior de la página (aparece arriba del calendario, como el título de una landing page)</label>
+      <div class="rte-shell" id="rteEncabezado"></div>
+      <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:10px;">
+        <label class="chk" style="margin:0;"><input type="checkbox" id="chkEncabezadoFondo"> Color de fondo del bloque</label>
+        <input type="color" id="inputEncabezadoFondo" value="#FFF3BF" style="width:40px; height:30px; padding:0; border:1px solid var(--border); border-radius:6px; background:transparent; cursor:pointer;">
+      </div>
+      <p class="hint" style="margin:8px 0 18px;">Selecciona el texto (Ctrl+A para todo) y cambia tamaño (número + botón "px"), tipografía, color y alineación. Si lo dejas vacío, no se muestra nada arriba. Recuerda pulsar "Guardar".</p>
       <div class="row2">
         <div><label>Tu nombre</label><input type="text" id="inputAgendaNombre"></div>
         <div><label>Tu título</label><input type="text" id="inputAgendaTitulo"></div>
@@ -10520,8 +10581,20 @@ ${estilosBase()}
   // tamaño de letra, enlaces) — sin depender de ninguna librería externa,
   // usando el mismo mecanismo que usa cualquier campo "contenteditable"
   // de un navegador. Se guarda como HTML.
-  function crearEditorRico(idContenedor, placeholder){
+  function crearEditorRico(idContenedor, placeholder, opciones){
+    opciones = opciones || {};
     const shell = document.getElementById(idContenedor);
+    // Herramientas extra (solo si se piden): cursiva, alineación y color de
+    // letra. Se arma con comillas simples para no mezclar plantillas.
+    const extrasAvanzado = opciones.avanzado
+      ? '<div class="rte-sep"></div>'
+        + '<button type="button" class="rte-btn rte-btn-texto" data-cmd="italic" title="Cursiva"><i>C</i></button>'
+        + '<button type="button" class="rte-btn rte-btn-texto" data-cmd="justifyLeft" title="Alinear a la izquierda">Izq</button>'
+        + '<button type="button" class="rte-btn rte-btn-texto" data-cmd="justifyCenter" title="Centrar">Cen</button>'
+        + '<button type="button" class="rte-btn rte-btn-texto" data-cmd="justifyRight" title="Alinear a la derecha">Der</button>'
+        + '<div class="rte-sep"></div>'
+        + '<input type="color" class="rte-color" value="#1A2028" title="Color de las letras (de la parte seleccionada)">'
+      : '';
     shell.innerHTML = \`
       <div class="rte-toolbar">
         <button type="button" class="rte-btn" data-cmd="bold" title="Negrita"><b>N</b></button>
@@ -10534,16 +10607,43 @@ ${estilosBase()}
           <option value="'Times New Roman'">Times New Roman</option>
           <option value="'Trebuchet MS'">Trebuchet MS</option>
         </select>
-        <input type="number" class="rte-tamano-px" min="8" max="72" value="14" title="Tamaño en píxeles" style="width:52px;">
+        <input type="number" class="rte-tamano-px" min="8" max="120" value="\${opciones.tamanoInicial || 14}" title="Tamaño en píxeles" style="width:52px;">
         <button type="button" class="rte-btn" data-cmd="aplicar-tamano" title="Aplicar este tamaño a la parte seleccionada">px</button>
         <div class="rte-sep"></div>
         <button type="button" class="rte-btn" data-cmd="createlink" title="Insertar enlace">🔗</button>
         <button type="button" class="rte-btn" data-cmd="unlink" title="Quitar enlace">🔗✕</button>
+        \${extrasAvanzado}
       </div>
       <div class="rte-editable" contenteditable="true" data-placeholder="\${placeholder || ""}"></div>
     \`;
 
     const editable = shell.querySelector(".rte-editable");
+    if(opciones.vistaClara) editable.classList.add("rte-vista-clara");
+
+    // Color de las letras: el selector de color le quita el foco al texto,
+    // así que se guarda la selección y se restaura antes de aplicar el color.
+    let rangoGuardado = null;
+    function guardarRango(){
+      const sel = window.getSelection();
+      if(sel.rangeCount && editable.contains(sel.anchorNode)) rangoGuardado = sel.getRangeAt(0).cloneRange();
+    }
+    editable.addEventListener("keyup", guardarRango);
+    editable.addEventListener("mouseup", guardarRango);
+    editable.addEventListener("blur", guardarRango);
+    const inputColor = shell.querySelector(".rte-color");
+    if(inputColor){
+      inputColor.addEventListener("input", () => {
+        editable.focus();
+        if(rangoGuardado){
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(rangoGuardado);
+        }
+        document.execCommand("styleWithCSS", false, true);
+        document.execCommand("foreColor", false, inputColor.value);
+        document.execCommand("styleWithCSS", false, false);
+      });
+    }
 
     // Los botones de formato usan document.execCommand — sigue siendo el
     // mecanismo estándar de los navegadores para editores "contenteditable"
@@ -10588,10 +10688,19 @@ ${estilosBase()}
 
     return {
       obtenerHTML: () => editable.innerHTML.trim(),
-      establecerHTML: (html) => { editable.innerHTML = html || ""; }
+      establecerHTML: (html) => { editable.innerHTML = html || ""; },
+      establecerFondo: (color) => { editable.style.background = color || ""; }
     };
   }
 
+  const editorEncabezado = crearEditorRico("rteEncabezado", "Ej: Agenda una llamada con Roberto para revisar tu caso", { avanzado: true, vistaClara: true, tamanoInicial: 28 });
+  const chkEncabezadoFondo = document.getElementById("chkEncabezadoFondo");
+  const inputEncabezadoFondo = document.getElementById("inputEncabezadoFondo");
+  function aplicarFondoEncabezado(){
+    editorEncabezado.establecerFondo(chkEncabezadoFondo.checked ? inputEncabezadoFondo.value : "");
+  }
+  chkEncabezadoFondo.addEventListener("change", aplicarFondoEncabezado);
+  inputEncabezadoFondo.addEventListener("input", () => { chkEncabezadoFondo.checked = true; aplicarFondoEncabezado(); });
   const editorOferta = crearEditorRico("rteOferta", "Ej: Pierde de 10 a 20 kg en solo 3 a 6 meses");
   const editorNoCalifica = crearEditorRico("rteNoCalifica", "Ej: Por ahora este programa no es para ti, pero aquí tienes un recurso gratis...");
   const editorTextoVideo = crearEditorRico("rteTextoVideo", "Ej: Los detalles de la videollamada se envían al confirmar.");
@@ -11046,6 +11155,10 @@ ${estilosBase()}
     editorTextoVideo.establecerHTML(cfg.agenda_texto_video || "");
     editorInstrucciones.establecerHTML(cfg.agenda_texto_instrucciones || "");
     editorOferta.establecerHTML(cfg.agenda_texto_oferta || "");
+    editorEncabezado.establecerHTML(cfg.agenda_encabezado_html || "");
+    chkEncabezadoFondo.checked = Boolean(cfg.agenda_encabezado_fondo);
+    if(cfg.agenda_encabezado_fondo) inputEncabezadoFondo.value = cfg.agenda_encabezado_fondo;
+    aplicarFondoEncabezado();
     document.getElementById("inputAgendaWhatsapp").value = cfg.agenda_whatsapp_link || "";
 
     document.getElementById("inputTituloNoCalifica").value = cfg.agenda_titulo_no_califica || "Gracias por tu interés";
@@ -11127,6 +11240,8 @@ ${estilosBase()}
       agenda_texto_video: editorTextoVideo.obtenerHTML(),
       agenda_texto_instrucciones: editorInstrucciones.obtenerHTML(),
       agenda_texto_oferta: editorOferta.obtenerHTML(),
+      agenda_encabezado_html: editorEncabezado.obtenerHTML(),
+      agenda_encabezado_fondo: chkEncabezadoFondo.checked ? inputEncabezadoFondo.value : "",
       agenda_whatsapp_link: document.getElementById("inputAgendaWhatsapp").value.trim(),
       agenda_titulo_no_califica: document.getElementById("inputTituloNoCalifica").value.trim() || "Gracias por tu interés",
       agenda_mensaje_no_califica: editorNoCalifica.obtenerHTML(),
