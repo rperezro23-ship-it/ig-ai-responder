@@ -7339,8 +7339,8 @@ app.get("/agendar", (req, res) => {
     caja.style.cssText = "position:fixed; left:12px; right:12px; bottom:12px; z-index:9999; background:#fff; color:#222; border:1px solid #ccd; border-radius:10px; padding:14px 16px; box-shadow:0 4px 18px rgba(0,0,0,.18); font:14px/1.4 sans-serif; max-width:560px; margin:0 auto;";
     caja.innerHTML = "<div style='margin-bottom:10px;'>Usamos cookies para medir la efectividad de nuestros anuncios. Puedes aceptarlas o rechazarlas.</div>" +
       "<div style='display:flex; gap:8px; justify-content:flex-end;'>" +
-      "<button type='button' id='btnCookiesNo' style='padding:8px 14px; border:1px solid #bbb; background:#fff; border-radius:8px; cursor:pointer;'>Rechazar</button>" +
-      "<button type='button' id='btnCookiesSi' style='padding:8px 14px; border:0; background:#0A6CFF; color:#fff; border-radius:8px; cursor:pointer;'>Aceptar</button></div>";
+      "<button type='button' id='btnCookiesNo' style='padding:8px 14px; border:1px solid #888 !important; background:#fff !important; color:#222 !important; font:600 14px/1.2 sans-serif; border-radius:8px; cursor:pointer;'>Rechazar</button>" +
+      "<button type='button' id='btnCookiesSi' style='padding:8px 14px; border:0; background:#0A6CFF !important; color:#fff !important; font:600 14px/1.2 sans-serif; border-radius:8px; cursor:pointer;'>Aceptar</button></div>";
     document.body.appendChild(caja);
     const decidir = function(valor){
       try { localStorage.setItem("consentimiento_cookies_meta", valor); } catch(e){}
