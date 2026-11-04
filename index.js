@@ -7310,6 +7310,47 @@ app.get("/agendar", (req, res) => {
     });
   }
 
+  // ---- Píxel de Meta (solo si hay ID en /calendario). Con consentimiento
+  // activado, no se carga nada hasta que el visitante acepte las cookies.
+  function cargarPixelMeta(id){
+    if(window.fbq || !id) return;
+    (function(f,b,e,v,n,t,s){
+      if(f.fbq) return;
+      n = f.fbq = function(){ n.callMethod ? n.callMethod.apply(n, arguments) : n.queue.push(arguments); };
+      if(!f._fbq) f._fbq = n;
+      n.push = n; n.loaded = true; n.version = "2.0"; n.queue = [];
+      t = b.createElement(e); t.async = true; t.src = v;
+      s = b.getElementsByTagName(e)[0]; s.parentNode.insertBefore(t, s);
+    })(window, document, "script", "https://connect.facebook.net/en_US/fbevents.js");
+    window.fbq("init", id);
+    window.fbq("track", "PageView");
+  }
+  function eventoPixelMeta(nombre){
+    try { if(window.fbq) window.fbq("track", nombre); } catch(e){}
+  }
+  function iniciarPixelMeta(id, pedirConsentimiento){
+    if(!id) return;
+    if(!pedirConsentimiento){ cargarPixelMeta(id); return; }
+    let guardado = "";
+    try { guardado = localStorage.getItem("consentimiento_cookies_meta") || ""; } catch(e){}
+    if(guardado === "si"){ cargarPixelMeta(id); return; }
+    if(guardado === "no") return;
+    const caja = document.createElement("div");
+    caja.style.cssText = "position:fixed; left:12px; right:12px; bottom:12px; z-index:9999; background:#fff; color:#222; border:1px solid #ccd; border-radius:10px; padding:14px 16px; box-shadow:0 4px 18px rgba(0,0,0,.18); font:14px/1.4 sans-serif; max-width:560px; margin:0 auto;";
+    caja.innerHTML = "<div style='margin-bottom:10px;'>Usamos cookies para medir la efectividad de nuestros anuncios. Puedes aceptarlas o rechazarlas.</div>" +
+      "<div style='display:flex; gap:8px; justify-content:flex-end;'>" +
+      "<button type='button' id='btnCookiesNo' style='padding:8px 14px; border:1px solid #bbb; background:#fff; border-radius:8px; cursor:pointer;'>Rechazar</button>" +
+      "<button type='button' id='btnCookiesSi' style='padding:8px 14px; border:0; background:#0A6CFF; color:#fff; border-radius:8px; cursor:pointer;'>Aceptar</button></div>";
+    document.body.appendChild(caja);
+    const decidir = function(valor){
+      try { localStorage.setItem("consentimiento_cookies_meta", valor); } catch(e){}
+      caja.remove();
+      if(valor === "si") cargarPixelMeta(id);
+    };
+    document.getElementById("btnCookiesSi").addEventListener("click", function(){ decidir("si"); });
+    document.getElementById("btnCookiesNo").addEventListener("click", function(){ decidir("no"); });
+  }
+
   async function cargarPregunta(){
     const res = await fetch("/agendar/pregunta");
     datosFormulario = await res.json();
@@ -7331,6 +7372,7 @@ app.get("/agendar", (req, res) => {
     } else {
       encabezadoEl.hidden = true;
     }
+    iniciarPixelMeta(perfil.pixel_id, perfil.pixel_consentimiento);
     if(perfil.foto_rectangular_url){
       // La foto rectangular (440x176) reemplaza por completo a la
       // circular en ese mismo espacio — se escala para caber en el
@@ -7771,6 +7813,7 @@ app.get("/agendar", (req, res) => {
       document.getElementById("resumenExito").textContent =
         "Te esperamos el " + new Date(horarioElegido).toLocaleString("es-MX", { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit", timeZone: zonaHorariaMostrada }) + ".";
       document.getElementById("pasoExito").classList.remove("oculto");
+      eventoPixelMeta("Schedule");
 
       // Si está activada la confirmación por WhatsApp, se arma el enlace
       // con el mensaje ya escrito (reemplazando {fecha} y {hora}). Se
@@ -7832,6 +7875,8 @@ app.get("/agendar/pregunta", (req, res) => {
       texto_oferta: configActual.agenda_texto_oferta || "",
       encabezado_html: configActual.agenda_encabezado_html || "",
       encabezado_fondo: configActual.agenda_encabezado_fondo || "",
+      pixel_id: /^[0-9]{5,20}$/.test(String(configActual.agenda_pixel_id || "")) ? String(configActual.agenda_pixel_id) : "",
+      pixel_consentimiento: configActual.agenda_pixel_consentimiento !== false,
       whatsapp_link: configActual.agenda_whatsapp_link || "",
       duracion_minutos: configActual.agenda_duracion_minutos || 30
     }
@@ -8312,6 +8357,8 @@ let configActual = {
   agenda_texto_oferta: "Pierde de 10 a 20 kg en solo 3 a 6 meses",
   agenda_encabezado_html: "", // texto superior de /agendar (HTML del editor); vacío = no se muestra
   agenda_encabezado_fondo: "", // color de fondo del bloque (ej. "#FFF3BF"); vacío = sin fondo
+  agenda_pixel_id: "", // ID del píxel de Meta (solo dígitos); vacío = no se carga ningún píxel en /agendar
+  agenda_pixel_consentimiento: true, // true = el píxel solo se carga si el visitante acepta cookies (necesario para España/UE)
   agenda_whatsapp_link: "",
 
   dashboard_etiqueta_asistio: "", // nombre exacto de la etiqueta manual que representa "asistió a la llamada"
@@ -9193,7 +9240,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
             agenda_whatsapp_confirmar_mensaje, agenda_correos_notificacion, agenda_correo_texto_intro,
             agenda_correo_incluir_nombre, agenda_correo_incluir_correo, agenda_correo_incluir_fecha_hora, boton_texto_intro,
             agenda_recordatorios, agenda_recordatorio_asunto, agenda_recordatorio_mensaje, agenda_correo_no_califica_activo,
-            agenda_correo_lead_no_califica_activo, agenda_encabezado_html, agenda_encabezado_fondo } = req.body || {};
+            agenda_correo_lead_no_califica_activo, agenda_encabezado_html, agenda_encabezado_fondo,
+            agenda_pixel_id, agenda_pixel_consentimiento } = req.body || {};
 
     const nuevaConfig = {};
     if (typeof ai_prompt === "string" && ai_prompt.trim()) nuevaConfig.ai_prompt = ai_prompt.trim();
@@ -9335,6 +9383,8 @@ app.post("/config", requireAdminKey, async (req, res) => {
     if (typeof agenda_texto_oferta === "string") nuevaConfig.agenda_texto_oferta = agenda_texto_oferta.trim();
     if (typeof agenda_encabezado_html === "string") nuevaConfig.agenda_encabezado_html = limpiarHtmlEncabezado(agenda_encabezado_html);
     if (typeof agenda_encabezado_fondo === "string") nuevaConfig.agenda_encabezado_fondo = /^#[0-9a-fA-F]{6}$/.test(agenda_encabezado_fondo.trim()) ? agenda_encabezado_fondo.trim() : "";
+    if (typeof agenda_pixel_id === "string") nuevaConfig.agenda_pixel_id = /^[0-9]{5,20}$/.test(agenda_pixel_id.trim()) ? agenda_pixel_id.trim() : "";
+    if (typeof agenda_pixel_consentimiento === "boolean") nuevaConfig.agenda_pixel_consentimiento = agenda_pixel_consentimiento;
     if (typeof agenda_whatsapp_link === "string") nuevaConfig.agenda_whatsapp_link = agenda_whatsapp_link.trim();
 
     // Descarta transiciones (generales o por etapa) que apunten a una etapa
@@ -10182,6 +10232,10 @@ ${estilosBase()}
         <input type="color" id="inputEncabezadoFondo" value="#FFF3BF" style="width:40px; height:30px; padding:0; border:1px solid var(--border); border-radius:6px; background:transparent; cursor:pointer;">
       </div>
       <p class="hint" style="margin:8px 0 18px;">Selecciona el texto (Ctrl+A para todo) y cambia tamaño (número + botón "px"), tipografía, color y alineación. Si lo dejas vacío, no se muestra nada arriba. Recuerda pulsar "Guardar".</p>
+      <label>Píxel de Meta (ID numérico, opcional)</label>
+      <input type="text" id="inputPixelId" placeholder="Ej. 123456789012345" inputmode="numeric" autocomplete="off">
+      <label class="chk" style="margin:8px 0 0;"><input type="checkbox" id="chkPixelConsentimiento" checked> Pedir consentimiento de cookies antes de cargarlo (recomendado para España/UE)</label>
+      <p class="hint" style="margin:8px 0 18px;">Lo encuentras en Meta → Administrador de eventos → tu píxel. Si lo dejas vacío, no se carga nada. La página envía el evento "Schedule" cuando alguien confirma su cita. Recuerda pulsar "Guardar".</p>
       <div class="row2">
         <div><label>Tu nombre</label><input type="text" id="inputAgendaNombre"></div>
         <div><label>Tu título</label><input type="text" id="inputAgendaTitulo"></div>
@@ -11159,6 +11213,8 @@ ${estilosBase()}
     chkEncabezadoFondo.checked = Boolean(cfg.agenda_encabezado_fondo);
     if(cfg.agenda_encabezado_fondo) inputEncabezadoFondo.value = cfg.agenda_encabezado_fondo;
     aplicarFondoEncabezado();
+    document.getElementById("inputPixelId").value = cfg.agenda_pixel_id || "";
+    document.getElementById("chkPixelConsentimiento").checked = cfg.agenda_pixel_consentimiento !== false;
     document.getElementById("inputAgendaWhatsapp").value = cfg.agenda_whatsapp_link || "";
 
     document.getElementById("inputTituloNoCalifica").value = cfg.agenda_titulo_no_califica || "Gracias por tu interés";
@@ -11242,6 +11298,8 @@ ${estilosBase()}
       agenda_texto_oferta: editorOferta.obtenerHTML(),
       agenda_encabezado_html: editorEncabezado.obtenerHTML(),
       agenda_encabezado_fondo: chkEncabezadoFondo.checked ? inputEncabezadoFondo.value : "",
+      agenda_pixel_id: document.getElementById("inputPixelId").value.replace(/[^0-9]/g, ""),
+      agenda_pixel_consentimiento: document.getElementById("chkPixelConsentimiento").checked,
       agenda_whatsapp_link: document.getElementById("inputAgendaWhatsapp").value.trim(),
       agenda_titulo_no_califica: document.getElementById("inputTituloNoCalifica").value.trim() || "Gracias por tu interés",
       agenda_mensaje_no_califica: editorNoCalifica.obtenerHTML(),
