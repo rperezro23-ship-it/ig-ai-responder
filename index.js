@@ -5388,7 +5388,33 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
     agregarPasos(configActual.seguimientos, "normal", "Seguimiento");
     agregarPasos(configActual.seguimientos_enlace, "enlace", "Seguimiento del enlace");
 
+    // Visitas a /agendar (contador propio del servidor, no depende del píxel).
+    // Se suman las visitas pendientes en memoria + lo ya guardado, y se filtran
+    // por el mismo periodo del dashboard (cada hora guardada se ubica en el
+    // inicio de esa hora).
+    const visitasAgendar = { total: 0, deAnuncio: 0, desde: null };
+    try {
+      const { data: filaVisitas } = await supabase.from("app_config").select("valor").eq("key", CLAVE_VISITAS_AGENDAR).maybeSingle();
+      const horas = {};
+      const base = (filaVisitas && filaVisitas.valor && typeof filaVisitas.valor === "object" && !Array.isArray(filaVisitas.valor)) ? filaVisitas.valor : {};
+      for (const [h, c] of Object.entries(base)) horas[h] = { t: c.t || 0, f: c.f || 0 };
+      for (const [h, c] of Object.entries(visitasAgendarPendientes)) {
+        const g = horas[h] || { t: 0, f: 0 };
+        horas[h] = { t: g.t + c.t, f: g.f + c.f };
+      }
+      for (const [h, c] of Object.entries(horas)) {
+        if (!visitasAgendar.desde || h < visitasAgendar.desde) visitasAgendar.desde = h;
+        if (!enPeriodo(h + ":00:00.000Z")) continue;
+        visitasAgendar.total += c.t;
+        visitasAgendar.deAnuncio += c.f;
+      }
+      if (visitasAgendar.desde) visitasAgendar.desde = visitasAgendar.desde + ":00:00.000Z";
+    } catch (errVisitas) {
+      console.error("⚠️ No se pudieron leer las visitas de /agendar:", errVisitas.message);
+    }
+
     res.json({
+      visitasAgendar,
       seguimientos,
       total,
       totalCalifica,
@@ -6740,7 +6766,63 @@ app.get("/google/estado", requireAdminKey, async (req, res) => {
 // (para poder hacer luego coincidir la reserva con la conversación
 // correcta) — el mismo truco que usábamos con el enlace de Calendly.
 // ---------------------------------------------------------------
+// ---------------------------------------------------------------
+// Contador de visitas a /agendar (para el dashboard). Funciona en el
+// servidor: no usa cookies, no guarda IP ni ningún dato personal, y no
+// depende del píxel de Meta ni de que la persona acepte cookies. Solo suma
+// 1 a un contador por hora ("total" y "de anuncio" = llega con fbclid o con
+// utm_source de Meta). Se acumula en memoria y se guarda en app_config
+// (clave "visitas_agendar") cada minuto. Se ignoran bots y vistas previas.
+// ---------------------------------------------------------------
+const CLAVE_VISITAS_AGENDAR = "visitas_agendar";
+let visitasAgendarPendientes = {};
+let visitasAgendarGuardando = false;
+
+function registrarVisitaAgendar(req) {
+  try {
+    const ua = String(req.get("user-agent") || "");
+    if (!ua || /bot|crawler|spider|facebookexternalhit|facebot|preview|whatsapp|telegram|slurp|curl|wget|headless|monitor|uptime/i.test(ua)) return;
+    const q = req.query || {};
+    const fuente = String(q.utm_source || "").toLowerCase();
+    const deAnuncio = Boolean(q.fbclid) || /^(fb|facebook|meta|ig|instagram)$/.test(fuente);
+    const hora = new Date().toISOString().slice(0, 13); // ej. "2026-11-05T17"
+    const c = visitasAgendarPendientes[hora] || (visitasAgendarPendientes[hora] = { t: 0, f: 0 });
+    c.t++;
+    if (deAnuncio) c.f++;
+  } catch (e) { /* el contador nunca debe romper la página */ }
+}
+
+async function volcarVisitasAgendar() {
+  if (visitasAgendarGuardando || Object.keys(visitasAgendarPendientes).length === 0) return;
+  const lote = visitasAgendarPendientes;
+  visitasAgendarPendientes = {};
+  visitasAgendarGuardando = true;
+  try {
+    const { data } = await supabase.from("app_config").select("valor").eq("key", CLAVE_VISITAS_AGENDAR).maybeSingle();
+    const guardado = (data && data.valor && typeof data.valor === "object" && !Array.isArray(data.valor)) ? data.valor : {};
+    for (const [h, c] of Object.entries(lote)) {
+      const g = guardado[h] || { t: 0, f: 0 };
+      guardado[h] = { t: g.t + c.t, f: g.f + c.f };
+    }
+    const limite = new Date(Date.now() - 120 * 86400000).toISOString().slice(0, 13); // se conservan 120 días
+    for (const h of Object.keys(guardado)) if (h < limite) delete guardado[h];
+    const { error } = await supabase.from("app_config").upsert({ key: CLAVE_VISITAS_AGENDAR, valor: guardado, actualizado_en: new Date().toISOString() });
+    if (error) throw new Error(error.message);
+  } catch (err) {
+    // Si falló el guardado, las visitas vuelven al contador en memoria para el siguiente intento.
+    for (const [h, c] of Object.entries(lote)) {
+      const g = visitasAgendarPendientes[h] || { t: 0, f: 0 };
+      visitasAgendarPendientes[h] = { t: g.t + c.t, f: g.f + c.f };
+    }
+    console.error("❌ No se pudo guardar el contador de visitas de /agendar:", err.message);
+  } finally {
+    visitasAgendarGuardando = false;
+  }
+}
+setInterval(volcarVisitasAgendar, 60000);
+
 app.get("/agendar", (req, res) => {
+  registrarVisitaAgendar(req);
   const usernamePrellenado = (req.query.u || "").toString().slice(0, 100);
 
   // Vista previa del enlace (Open Graph) — lo que Instagram, WhatsApp, etc.
@@ -11486,6 +11568,17 @@ ${estilosBase()}
 
     <div id="dashSinEtiquetas" class="dash-warning" style="display:none;"></div>
 
+    <div class="dash-step step-total" style="margin-bottom:22px;">
+      <div class="dash-step-left">
+        <span class="dash-step-icon">🌐</span>
+        <div><div class="dash-step-label">Visitas a la página de agendar</div><div class="dash-step-sub" id="subVisitasAgendar">Contador propio: no depende del píxel ni de las cookies</div></div>
+      </div>
+      <div class="dash-step-right">
+        <div class="dash-step-value" id="dashVisitasAgendar">–</div>
+        <div class="dash-step-pct" id="dashVisitasAnuncio">–</div>
+      </div>
+    </div>
+
     <div class="dash-funnel">
       <div class="dash-step step-total">
         <div class="dash-step-left">
@@ -11859,6 +11952,12 @@ ${estilosBase()}
     const porcentajes = data.porcentajes || {};
     if(!data.porcentajes) console.warn("La respuesta de /dashboard/datos no trajo \\"porcentajes\\":", data);
 
+    const visitasAg = data.visitasAgendar || {};
+    document.getElementById("dashVisitasAgendar").textContent = visitasAg.total ?? 0;
+    document.getElementById("dashVisitasAnuncio").textContent = (visitasAg.deAnuncio ?? 0) + " desde anuncios";
+    document.getElementById("subVisitasAgendar").textContent = visitasAg.desde
+      ? "Contador propio (sin píxel ni cookies), activo desde " + new Date(visitasAg.desde).toLocaleDateString("es-MX", { day: "numeric", month: "short" })
+      : "Contador propio (sin píxel ni cookies): todavía sin visitas registradas";
     document.getElementById("dashCash").textContent = formatearMoneda(data.cashCollected);
     document.getElementById("dashTotal").textContent = data.total ?? 0;
     document.getElementById("dashCalifica").textContent = data.totalCalifica ?? 0;
