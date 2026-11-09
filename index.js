@@ -5210,6 +5210,21 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
 
     const totalPasosEnlace = (configActual.seguimientos_enlace || []).length;
 
+    // Multi-cuenta: a qué cuenta conectada pertenece cada conversación (la que
+    // la atiende; si no se sabe, la principal), para poder filtrar /chats.
+    const cuentasIg = await obtenerCuentasConectadas();
+    const mapaCuentaIg = cuentasIg.length > 1 ? await cargarMapaCuentaContacto() : null;
+    const cuentaPrincipalIg = cuentasIg[0] || null;
+    const cuentaDeConversacion = (senderId) => {
+      if (!cuentaPrincipalIg) return null;
+      if (mapaCuentaIg) {
+        const idMapa = mapaCuentaIg.get(String(senderId));
+        const encontrada = idMapa && cuentasIg.find(x => String(x.ig_id) === String(idMapa));
+        if (encontrada) return encontrada;
+      }
+      return cuentaPrincipalIg;
+    };
+
     // El perfil en vivo de Instagram (foto/username) solo se consulta para las
     // 200 conversaciones más recientes; las más viejas usan el username ya
     // guardado en Supabase (o la caché), para no disparar miles de llamadas a Meta.
@@ -5227,8 +5242,11 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
       const pasosEnviados = c.enlace_pasos_enviados || 0;
       const etapaConfig = obtenerEtapaConfig(c.etapa);
 
+      const cuentaConv = cuentaDeConversacion(c.sender_id);
       return {
         sender_id: c.sender_id,
+        cuenta_id: cuentaConv ? String(cuentaConv.ig_id) : null,
+        cuenta_username: cuentaConv ? (cuentaConv.username || null) : null,
         // Si la consulta en vivo a Instagram falla (ej. porque el lead salió
         // de la ventana de mensajería de 24h, o porque nunca hubo ventana —
         // como con leads a los que se les escribió primero desde ManyChat o
@@ -5272,7 +5290,11 @@ app.get("/conversaciones", requireAdminKey, async (req, res) => {
     });
 
 
-    res.json({ conversaciones: resumen });
+    res.json({
+      conversaciones: resumen,
+      // Cuentas conectadas (sin tokens), para el selector de cuenta de /chats.
+      cuentas: cuentasIg.map((c, i) => ({ ig_id: String(c.ig_id), username: c.username || null, principal: i === 0 }))
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -14807,6 +14829,16 @@ ${estilosBase()}
           <span id="btnLimpiarFecha" class="chat-search-limpiar" style="position:static; display:none; cursor:pointer;" title="Quitar filtro de fecha">✕</span>
           <span id="filtroFechaResumen" style="font-size:12.5px; color:var(--muted);"></span>
         </div>
+        <!-- Selector de cuenta (solo aparece si hay 2 o más cuentas conectadas) -->
+        <style>
+          #cuentasFiltro{ display:none; gap:6px; flex-wrap:wrap; align-items:center; margin:0 0 10px; }
+          .cuenta-pill{ border:1px solid var(--border); background:var(--surface-3); color:var(--muted); border-radius:999px;
+            padding:5px 12px; font-size:12.5px; cursor:pointer; font-family:inherit; }
+          .cuenta-pill:hover{ color:#fff; }
+          .cuenta-pill.active{ background:#3FC7E8; border-color:#3FC7E8; color:#06202A; font-weight:600; }
+          .cuenta-pill .n{ opacity:.75; margin-left:4px; }
+        </style>
+        <div id="cuentasFiltro" title="Elige de qué cuenta de Instagram quieres ver los chats"></div>
         <div class="chat-tabs">
           <div class="chat-tab active" id="tabTodas" data-filtro="todas" title="Todas">Todas <span class="count" id="countTodas"></span></div>
           <div class="chat-tab tab-califica" id="tabCalifica" data-filtro="califica" title="Califica">✅ <span class="count" id="countCalifica"></span></div>
@@ -14937,7 +14969,11 @@ ${estilosBase()}
     return res.json();
   }
 
-  let conversaciones = [];
+  let conversaciones = [];          // las conversaciones de la cuenta elegida (o todas)
+  let conversacionesTodas = [];     // todas, tal como las manda el servidor
+  let cuentasIg = [];               // cuentas de Instagram conectadas
+  let filtroCuenta = "";            // ig_id de la cuenta elegida ("" = todas)
+  try { filtroCuenta = localStorage.getItem("chats_filtro_cuenta") || ""; } catch(e) {}
   let senderSeleccionado = null;
   let mensajesMostrados = []; // {role, content, creado_en} — página actual mostrada, orden ascendente
   let hayMasAntiguos = false;
@@ -15255,6 +15291,7 @@ ${estilosBase()}
             \${tieneEtiqueta(c, etiquetaCompraConfigurada) ? '<span class="califica-badge" title="Compró">💰</span>' : ''}
             \${!c.en_ventana_24h ? '<span class="handoff-dot" title="Fuera de la ventana de 24h"></span>' : ''}
             \${c.etapa_nombre ? '<span class="etapa-chip" title="Etapa actual">' + escapar(c.etapa_nombre) + '</span>' : ''}
+            \${(cuentasIg.length > 1 && !filtroCuenta && c.cuenta_username) ? '<span class="etapa-chip" title="Cuenta de Instagram que recibió este chat">@' + escapar(c.cuenta_username) + '</span>' : ''}
           </div>
           \${previewHTML}
           <div class="time">
@@ -16223,10 +16260,50 @@ ${estilosBase()}
     renderLista();
   });
 
+  // Multi-cuenta: "conversaciones" es la lista YA filtrada por la cuenta elegida,
+  // así que contadores, pestañas, búsqueda y CSV respetan el filtro sin más cambios.
+  function aplicarFiltroCuenta(){
+    if(filtroCuenta && !cuentasIg.some(c => c.ig_id === filtroCuenta)) filtroCuenta = ""; // esa cuenta ya no está conectada
+    conversaciones = filtroCuenta ? conversacionesTodas.filter(c => c.cuenta_id === filtroCuenta) : conversacionesTodas;
+  }
+
+  function renderFiltroCuentas(){
+    const cont = document.getElementById("cuentasFiltro");
+    if(!cont) return;
+    if(cuentasIg.length < 2){ cont.style.display = "none"; return; }
+    cont.style.display = "flex";
+    const contar = (id) => conversacionesTodas.filter(c => c.cuenta_id === id).length;
+    let html = '<button type="button" class="cuenta-pill' + (!filtroCuenta ? " active" : "") + '" data-cuenta="">Todas las cuentas <span class="n">' + conversacionesTodas.length + '</span></button>';
+    cuentasIg.forEach(c => {
+      html += '<button type="button" class="cuenta-pill' + (filtroCuenta === c.ig_id ? " active" : "") + '" data-cuenta="' + escapar(c.ig_id) + '">@' + escapar(c.username || "cuenta") + ' <span class="n">' + contar(c.ig_id) + '</span></button>';
+    });
+    cont.innerHTML = html;
+    cont.querySelectorAll(".cuenta-pill").forEach(b => {
+      b.addEventListener("click", () => {
+        filtroCuenta = b.getAttribute("data-cuenta") || "";
+        try { localStorage.setItem("chats_filtro_cuenta", filtroCuenta); } catch(e) {}
+        aplicarFiltroCuenta();
+        renderFiltroCuentas();
+        // Si el chat abierto no es de la cuenta elegida, se cierra para no mezclar.
+        if(senderSeleccionado && !conversaciones.some(c => c.sender_id === senderSeleccionado)){
+          senderSeleccionado = null;
+          mensajesMostrados = [];
+          renderHead();
+          actualizarInputBar();
+          document.getElementById("chatMensajes").innerHTML = '<div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>';
+        }
+        renderLista();
+      });
+    });
+  }
+
   async function cargarConversaciones(){
     const data = await llamarGET("/conversaciones");
     if(!data) return;
-    conversaciones = data.conversaciones || [];
+    conversacionesTodas = data.conversaciones || [];
+    cuentasIg = data.cuentas || [];
+    aplicarFiltroCuenta();
+    renderFiltroCuentas();
     renderLista();
     if(senderSeleccionado) renderHead();
   }
