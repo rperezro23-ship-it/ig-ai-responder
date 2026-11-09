@@ -749,6 +749,11 @@ async function procesarSeguimientosPendientesDB() {
     const { id, sender_id: senderId, paso_index: pasoIndex, tipo } = fila;
     const esEnlace = tipo === "enlace";
 
+    // Multi-cuenta: si el bot está apagado para la cuenta de este contacto, el
+    // seguimiento se deja pendiente (se enviará cuando se vuelva a encender,
+    // si todavía está dentro de la ventana de 24 h).
+    if (!(await botActivoParaContacto(senderId))) continue;
+
     const conv = await obtenerConversacion(senderId);
     const ultimoMsg = conv.ultimo_mensaje_usuario ? new Date(conv.ultimo_mensaje_usuario).getTime() : 0;
     const sigueVigente = Date.now() <= (ultimoMsg + VENTANA_24H_MS - COLCHON_SEGURIDAD_MS);
@@ -2430,6 +2435,7 @@ async function activarEscribiendoInstagram(senderId) {
   try {
     const cuenta = await obtenerCuentaDeContacto(senderId);
     if (!cuenta) return;
+    if (cuenta.bot_activo === false) return; // bot apagado para esta cuenta: no se muestra "escribiendo..."
 
     await axios.post(
       `https://graph.instagram.com/v25.0/${cuenta.ig_id}/messages`,
@@ -3800,9 +3806,9 @@ async function procesarBuffer(senderId) {
   const mensajeCompleto = mensajesAResponder.join("\n");
   console.log(`📨 Mensaje agrupado de ${senderId}: "${mensajeCompleto}"`);
 
-  const botActivo = await estaBotActivo();
+  const botActivo = await botActivoParaContacto(senderId); // general Y de la cuenta de este contacto
   if (!botActivo) {
-    console.log(`⏸️ Bot apagado: se ignora el mensaje de ${senderId} (no se genera ni envía respuesta).`);
+    console.log(`⏸️ Bot apagado (general o de la cuenta de este contacto): se ignora el mensaje de ${senderId} (no se genera ni envía respuesta).`);
     buffer.enProceso = false;
     if (buffer.mensajes.length > 0) {
       const delay = segundosAleatorios(configActual.min_delay, configActual.max_delay);
@@ -4520,6 +4526,7 @@ app.post("/webhook", async (req, res) => {
 
           if (!textoTranscrito) {
             console.warn(`⚠️ No se pudo transcribir el audio de ${senderId} — se le avisa y se le pide que lo mande de nuevo.`);
+            if (!(await botActivoParaContacto(senderId))) continue; // bot apagado para esta cuenta: no se manda ni el aviso de error
             const listaMensajesError = (configActual.mensajes_error_audio?.length > 0) ? configActual.mensajes_error_audio : MENSAJES_ERROR_AUDIO_DEFECTO;
             const mensajeError = listaMensajesError[Math.floor(Math.random() * listaMensajesError.length)];
             await conReintento(() => enviarMensajeInstagram(senderId, mensajeError));
@@ -8564,7 +8571,7 @@ app.get("/cuentas/lista", requireAdminKey, async (req, res) => {
         diasRestantes = Math.round((exp - Date.now()) / 86400000);
       }
       const { access_token, ...publico } = c;
-      salida.push({ ...publico, principal: i === 0, dias_restantes: diasRestantes });
+      salida.push({ ...publico, principal: i === 0, dias_restantes: diasRestantes, bot_activo: c.bot_activo !== false });
     }
     res.json({ cuentas: salida });
   } catch (err) {
@@ -9175,6 +9182,23 @@ async function ponerEstadoBot(estado) {
   if (error) console.error("❌ Error guardando estado del bot:", error.message);
 }
 
+// Interruptor POR CUENTA (multi-cuenta): se guarda dentro de cada cuenta
+// conectada como "bot_activo" (si no existe, la cuenta está encendida). El
+// bot atiende a un contacto solo si están encendidos el interruptor GENERAL
+// ("bot_status") y el de la cuenta a la que ese contacto le escribió.
+async function botActivoParaContacto(senderId) {
+  if (!(await estaBotActivo())) return false;
+  const cuenta = await obtenerCuentaDeContacto(senderId);
+  return !cuenta || cuenta.bot_activo !== false;
+}
+
+async function ponerEstadoBotCuenta(igId, activo) {
+  const lista = await obtenerCuentasConectadas();
+  const cuenta = lista.find(x => cuentaCoincideConId(x, igId));
+  if (!cuenta) return false;
+  return await guardarCuentaConectada({ ...cuenta, bot_activo: Boolean(activo) });
+}
+
 async function guardarFechaTokenDB(expiresInSeconds) {
   const ahoraISO = new Date().toISOString();
   const { error } = await supabase
@@ -9274,7 +9298,32 @@ app.get("/token-info", requireAdminKey, async (req, res) => {
 
 app.get("/bot/estado", requireAdminKey, async (req, res) => {
   const activo = await estaBotActivo();
-  res.json({ activo, estado: activo ? "on" : "off" });
+  const cuentas = (await obtenerCuentasConectadas()).map((c, i) => ({
+    ig_id: String(c.ig_id), username: c.username || null, principal: i === 0, activo: c.bot_activo !== false
+  }));
+  res.json({ activo, estado: activo ? "on" : "off", cuentas });
+});
+
+// Enciende/apaga el bot SOLO para una cuenta conectada (body: { ig_id, activo }).
+// El interruptor general (/bot/encender, /bot/apagar) sigue mandando sobre todas.
+app.post("/bot/cuenta", requireAdminKey, async (req, res) => {
+  try {
+    const { ig_id: igId, activo } = req.body || {};
+    if (!igId || typeof activo !== "boolean") {
+      return res.status(400).json({ error: "Falta ig_id o activo (true/false)." });
+    }
+    const ok = await ponerEstadoBotCuenta(igId, activo);
+    if (!ok) return res.status(404).json({ error: "Esa cuenta no está conectada." });
+    const cuenta = await obtenerCuentaActiva(igId);
+    res.json({
+      ok: true, ig_id: String(cuenta?.ig_id || igId), username: cuenta?.username || null, activo,
+      mensaje: activo
+        ? `✅ Bot ENCENDIDO para @${cuenta?.username || igId}`
+        : `⏸️ Bot APAGADO para @${cuenta?.username || igId} (no responderá ni mandará seguimientos desde esa cuenta)`
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/bot/encender", requireAdminKey, async (req, res) => {
@@ -10294,6 +10343,15 @@ ${estilosBase()}
   }
   .btn-eliminar:hover{ background:rgba(255,93,93,.18); }
   .sin-cuenta{ color:var(--muted); font-size:15px; padding:8px 2px; }
+  /* --- Encender / apagar el bot (general y por cuenta) --- */
+  .bot-general{ display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  .bot-general-texto{ flex:1; min-width:240px; }
+  .bot-nota{ color:var(--muted); font-size:13.5px; line-height:1.6; margin:0; }
+  .btn-bot{ border-radius:9px; padding:9px 15px; font-size:13.5px; font-weight:600; cursor:pointer; white-space:nowrap; border:1px solid; }
+  .btn-bot.on{ background:var(--green-soft); color:var(--green); border-color:rgba(49,217,124,.35); }
+  .btn-bot.off{ background:var(--red-soft); color:var(--red); border-color:rgba(255,93,93,.35); }
+  .btn-bot:disabled{ opacity:.6; cursor:wait; }
+  .bot-cuenta-nota{ font-size:12px; color:var(--muted); font-family:var(--mono); text-align:right; }
 </style>
 </head>
 <body>
@@ -10308,6 +10366,17 @@ ${estilosBase()}
       <button class="btn-hero" id="btnConectarInstagram">Conectar otra cuenta de Instagram</button>
     </div>
     <p class="page-sub">Conecta cuentas directo desde Instagram (token de 60 días). Puedes tener varias cuentas conectadas a la vez: conectar una nueva la agrega y no desconecta las demás. El bot contesta a cada persona desde la cuenta a la que ella escribió. La primera de la lista es la principal (la usan por defecto las herramientas que aún no distinguen cuentas, como "Recuperar chats").</p>
+
+    <div class="card" style="margin-bottom:16px;">
+      <div class="bot-general">
+        <div class="bot-general-texto">
+          <p class="cuentas-titulo">Bot general</p>
+          <p class="cuentas-subtitulo" id="botGeneralEstado" style="margin-bottom:6px;">Cargando…</p>
+          <p class="bot-nota">Interruptor para TODAS las cuentas a la vez. Apagado, el bot no responde ni manda seguimientos desde ninguna cuenta, aunque la cuenta esté encendida abajo. Tus mensajes manuales desde /chats siguen funcionando.</p>
+        </div>
+        <button type="button" class="btn-bot on" id="btnBotGeneral" disabled>…</button>
+      </div>
+    </div>
 
     <div class="card">
       <p class="cuentas-titulo">Tus cuentas</p>
@@ -10347,9 +10416,29 @@ ${estilosBase()}
     return String(t == null ? "" : t).replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch]));
   }
 
+  // Interruptor GENERAL del bot (el mismo que usa /panel).
+  let botGeneralActivo = true;
+  function pintarBotGeneral(){
+    const est = document.getElementById("botGeneralEstado");
+    const btn = document.getElementById("btnBotGeneral");
+    est.textContent = botGeneralActivo ? "🟢 Encendido" : "🔴 Apagado";
+    btn.textContent = botGeneralActivo ? "Apagar el bot (todas las cuentas)" : "Encender el bot (todas las cuentas)";
+    btn.className = "btn-bot " + (botGeneralActivo ? "off" : "on"); // el botón muestra la acción que hará
+    btn.disabled = false;
+  }
+  document.getElementById("btnBotGeneral").addEventListener("click", async () => {
+    const btn = document.getElementById("btnBotGeneral");
+    const apagar = botGeneralActivo;
+    if(apagar && !confirm("¿Apagar el bot para TODAS las cuentas? No responderá ni mandará seguimientos desde ninguna.")) return;
+    btn.disabled = true;
+    await llamarGET(apagar ? "/bot/apagar" : "/bot/encender");
+    cargarCuentaActual();
+  });
+
   async function cargarCuentaActual(){
     const cont = document.getElementById("cuentaActual");
-    const data = await llamarGET("/cuentas/lista");
+    const [data, estadoBot] = await Promise.all([llamarGET("/cuentas/lista"), llamarGET("/bot/estado")]);
+    if(estadoBot && typeof estadoBot.activo === "boolean"){ botGeneralActivo = estadoBot.activo; pintarBotGeneral(); }
     if(!data || !data.cuentas || data.cuentas.length === 0){
       cont.innerHTML = '<p class="sin-cuenta">No hay ninguna cuenta conectada todavía. Usa el botón de arriba para conectar una.</p>';
       return;
@@ -10358,20 +10447,33 @@ ${estilosBase()}
     cont.innerHTML = data.cuentas.map((c, i) => {
       const tokenTxt = (c.dias_restantes === null || c.dias_restantes === undefined)
         ? "" : \`Token vence en \${c.dias_restantes} día(s)\`;
+      const botOn = c.bot_activo !== false;
       return \`
       <div class="cuenta-item" style="margin-bottom:12px;">
         <div class="cuenta-info">
           <div class="nombre">@\${escaparHtml(c.username || "sin_usuario")}\${c.principal ? ' <span style="font-size:12px;color:var(--muted);font-weight:400;">(principal)</span>' : ""}</div>
           <div class="detalle">
-            Conectada: <b>\${formatearFecha(c.conectada_en)}</b>\${tokenTxt ? " · " + tokenTxt : ""}
+            Conectada: <b>\${formatearFecha(c.conectada_en)}</b>\${tokenTxt ? " · " + tokenTxt : ""}<br>
+            Bot de esta cuenta: <b>\${botOn ? "🟢 encendido" : "🔴 apagado"}</b>
           </div>
         </div>
         <div class="cuenta-lado">
           <span class="badge">Conectada</span>
+          <button class="btn-bot \${botOn ? "off" : "on"}" data-botcuenta="\${escaparHtml(c.ig_id)}" data-activar="\${botOn ? "0" : "1"}" data-usuario="\${escaparHtml(c.username || "")}">\${botOn ? "Apagar bot" : "Encender bot"}</button>
+          \${(!botGeneralActivo && botOn) ? '<span class="bot-cuenta-nota">apagado por el interruptor general</span>' : ""}
           <button class="btn-eliminar" data-igid="\${escaparHtml(c.ig_id)}" data-usuario="\${escaparHtml(c.username || "")}">Eliminar cuenta</button>
         </div>
       </div>\`;
     }).join("");
+
+    cont.querySelectorAll(".btn-bot").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        const activar = btn.getAttribute("data-activar") === "1";
+        await llamarPOST("/bot/cuenta", { ig_id: btn.getAttribute("data-botcuenta"), activo: activar });
+        cargarCuentaActual();
+      });
+    });
 
     cont.querySelectorAll(".btn-eliminar").forEach(btn => {
       btn.addEventListener("click", async () => {
@@ -17399,6 +17501,7 @@ async function recuperarChatsPerdidosAuto() {
     // Multi-cuenta: se revisan los chats de CADA cuenta conectada (el tope de
     // respuestas por pasada es compartido entre todas).
     for (const cuenta of cuentas) {
+      if (cuenta.bot_activo === false) continue; // bot apagado para esta cuenta
       let chats;
       try {
         ({ chats } = await revisarChatsRecuperables(1, cuenta));
