@@ -940,52 +940,189 @@ async function procesarSeguimientosPendientesDB() {
 // a la vez (conectar una nueva sobrescribe a la anterior).
 // ---------------------------------------------------------------
 
-async function obtenerCuentaActiva() {
+// ACTUALIZACIÓN (multi-cuenta): ahora se pueden conectar VARIAS cuentas a la
+// vez. La lista vive en app_config, key "ig_cuentas_conectadas" =
+// { cuentas: [ {ig_id, username, access_token, ...}, ... ] }. La PRIMERA de la
+// lista es la "principal": es la que usan por defecto todas las funciones que
+// no saben de qué cuenta hablan (y los contactos que ya existían antes de
+// activar esto). Cada contacto que escribe a una cuenta SECUNDARIA queda
+// anotado en app_config, key "ig_cuenta_por_contacto", para contestarle
+// siempre desde esa misma cuenta (seguimientos, mensajes manuales, etc.).
+// Compatibilidad: si todavía no existe la lista nueva, se toma la cuenta del
+// formato anterior ("ig_cuenta_conectada") o las variables de entorno.
+// ---------------------------------------------------------------
+
+const CLAVE_CUENTAS_IG = "ig_cuentas_conectadas";
+const CLAVE_CUENTA_UNICA_ANTIGUA = "ig_cuenta_conectada";
+const CLAVE_CUENTA_POR_CONTACTO = "ig_cuenta_por_contacto";
+const CUENTAS_CACHE_MS = 10000; // las funciones de envío piden la cuenta muy seguido
+let cuentasCache = null; // { lista, hasta }
+
+function cuentaCoincideConId(cuenta, id) {
+  if (!cuenta || id === undefined || id === null) return false;
+  return String(cuenta.ig_id) === String(id) || (cuenta.user_id && String(cuenta.user_id) === String(id));
+}
+
+async function obtenerCuentasConectadas() {
+  if (cuentasCache && Date.now() < cuentasCache.hasta) return cuentasCache.lista;
+
+  let lista = null;
   const { data, error } = await supabase
     .from("app_config")
     .select("*")
-    .eq("key", "ig_cuenta_conectada")
+    .eq("key", CLAVE_CUENTAS_IG)
     .maybeSingle();
 
   if (error) {
-    console.error("❌ Error leyendo cuenta conectada de Supabase:", error.message);
+    console.error("❌ Error leyendo cuentas conectadas de Supabase:", error.message);
+    if (cuentasCache) return cuentasCache.lista; // se sigue con la última lista buena
   }
 
-  if (data && data.valor && data.valor.access_token) {
-    return data.valor;
+  if (data && data.valor && Array.isArray(data.valor.cuentas)) {
+    lista = data.valor.cuentas.filter(c => c && c.access_token && c.ig_id);
   }
 
-  // Fallback de compatibilidad: si nunca se ha conectado nada desde el
-  // panel nuevo, se sigue usando lo que haya en las variables de entorno.
-  if (IG_ACCESS_TOKEN && IG_ACCOUNT_ID) {
-    return {
-      ig_id: IG_ACCOUNT_ID,
-      access_token: IG_ACCESS_TOKEN,
-      username: null,
-      account_type: null,
-      metodo: "env_legacy",
-      conectada_en: null
-    };
+  if (lista === null) {
+    // Todavía no existe la lista nueva: se toma la cuenta del formato anterior.
+    lista = [];
+    const { data: vieja, error: errorVieja } = await supabase
+      .from("app_config")
+      .select("*")
+      .eq("key", CLAVE_CUENTA_UNICA_ANTIGUA)
+      .maybeSingle();
+    if (errorVieja) console.error("❌ Error leyendo cuenta conectada (formato anterior) de Supabase:", errorVieja.message);
+
+    if (vieja && vieja.valor && vieja.valor.access_token) {
+      lista.push(vieja.valor);
+    } else if (IG_ACCESS_TOKEN && IG_ACCOUNT_ID) {
+      // Fallback de compatibilidad: si nunca se ha conectado nada desde el
+      // panel, se sigue usando lo que haya en las variables de entorno.
+      lista.push({
+        ig_id: IG_ACCOUNT_ID,
+        access_token: IG_ACCESS_TOKEN,
+        username: null,
+        account_type: null,
+        metodo: "env_legacy",
+        conectada_en: null
+      });
+    }
   }
 
-  return null;
+  cuentasCache = { lista, hasta: Date.now() + CUENTAS_CACHE_MS };
+  return lista;
 }
 
+// Sin argumento devuelve la cuenta PRINCIPAL (la primera conectada), que es lo
+// que hacía antes. Con un ig_id devuelve esa cuenta concreta (o null).
+async function obtenerCuentaActiva(igId) {
+  const lista = await obtenerCuentasConectadas();
+  if (igId !== undefined && igId !== null && igId !== "") {
+    return lista.find(c => cuentaCoincideConId(c, igId)) || null;
+  }
+  return lista[0] || null;
+}
+
+async function guardarListaCuentas(lista) {
+  const { error } = await supabase
+    .from("app_config")
+    .upsert({ key: CLAVE_CUENTAS_IG, valor: { cuentas: lista }, actualizado_en: new Date().toISOString() });
+
+  if (error) console.error("❌ Error guardando cuentas conectadas en Supabase:", error.message);
+  else cuentasCache = { lista, hasta: Date.now() + CUENTAS_CACHE_MS };
+  return !error;
+}
+
+// AGREGA la cuenta a la lista (si ya estaba conectada, solo actualiza sus
+// datos y el token) — ya NO reemplaza a las demás.
 async function guardarCuentaConectada(cuenta) {
-  const { error } = await supabase
-    .from("app_config")
-    .upsert({ key: "ig_cuenta_conectada", valor: cuenta, actualizado_en: new Date().toISOString() });
-
-  if (error) console.error("❌ Error guardando cuenta conectada en Supabase:", error.message);
+  const lista = [...(await obtenerCuentasConectadas())];
+  const i = lista.findIndex(c => String(c.ig_id) === String(cuenta.ig_id));
+  if (i >= 0) lista[i] = { ...lista[i], ...cuenta };
+  else lista.push(cuenta);
+  return await guardarListaCuentas(lista);
 }
 
-async function eliminarCuentaConectada() {
-  const { error } = await supabase
-    .from("app_config")
-    .delete()
-    .eq("key", "ig_cuenta_conectada");
+// Con igId desconecta solo esa cuenta; sin argumento las desconecta todas.
+async function eliminarCuentaConectada(igId) {
+  const lista = await obtenerCuentasConectadas();
+  const nueva = (igId !== undefined && igId !== null && igId !== "")
+    ? lista.filter(c => !cuentaCoincideConId(c, igId))
+    : [];
+  return await guardarListaCuentas(nueva);
+}
 
-  if (error) console.error("❌ Error eliminando cuenta conectada en Supabase:", error.message);
+// --- Qué cuenta atiende a cada contacto ---
+let mapaCuentaContacto = null; // Map senderId -> ig_id (solo contactos de cuentas SECUNDARIAS)
+let mapaCuentaContactoGuardando = Promise.resolve();
+
+async function cargarMapaCuentaContacto() {
+  if (mapaCuentaContacto) return mapaCuentaContacto;
+  const { data, error } = await supabase
+    .from("app_config")
+    .select("*")
+    .eq("key", CLAVE_CUENTA_POR_CONTACTO)
+    .maybeSingle();
+  if (error) {
+    console.error("❌ Error leyendo el mapa contacto→cuenta de Supabase:", error.message);
+    return new Map(); // no se guarda en memoria: se reintenta la próxima vez
+  }
+  mapaCuentaContacto = new Map(Object.entries((data && data.valor && data.valor.mapa) || {}));
+  return mapaCuentaContacto;
+}
+
+function guardarMapaCuentaContacto() {
+  // Se encadena para que dos guardados seguidos no se pisen.
+  mapaCuentaContactoGuardando = mapaCuentaContactoGuardando.then(async () => {
+    if (!mapaCuentaContacto) return;
+    const { error } = await supabase
+      .from("app_config")
+      .upsert({ key: CLAVE_CUENTA_POR_CONTACTO, valor: { mapa: Object.fromEntries(mapaCuentaContacto) }, actualizado_en: new Date().toISOString() });
+    if (error) console.error("❌ Error guardando el mapa contacto→cuenta en Supabase:", error.message);
+  }).catch(() => {});
+  return mapaCuentaContactoGuardando;
+}
+
+// Se llama cuando llega un mensaje (o se recupera un chat) de "senderId" a la
+// cuenta con id "entryId". Con una sola cuenta conectada no hace nada.
+async function registrarCuentaDeContacto(senderId, entryId) {
+  try {
+    const lista = await obtenerCuentasConectadas();
+    if (lista.length < 2 || !senderId) return;
+
+    const cuenta = lista.find(c => cuentaCoincideConId(c, entryId));
+    if (!cuenta) {
+      console.warn(`⚠️ Mensaje de ${senderId} para la cuenta ${entryId}, que no coincide con ninguna cuenta conectada (${lista.map(c => c.username || c.ig_id).join(", ")}). Se usará la cuenta principal.`);
+      return;
+    }
+
+    const mapa = await cargarMapaCuentaContacto();
+    const actual = mapa.get(String(senderId));
+    if (String(cuenta.ig_id) === String(lista[0].ig_id)) {
+      // Es de la principal: no hace falta anotarlo (es el valor por defecto).
+      if (actual !== undefined) { mapa.delete(String(senderId)); await guardarMapaCuentaContacto(); }
+      return;
+    }
+    if (actual !== String(cuenta.ig_id)) {
+      mapa.set(String(senderId), String(cuenta.ig_id));
+      await guardarMapaCuentaContacto();
+    }
+  } catch (err) {
+    console.error("❌ Error registrando la cuenta de un contacto:", err.message);
+  }
+}
+
+// La cuenta con la que hay que hablarle a este contacto: la que lo atendió; si
+// no se sabe, la principal (comportamiento de siempre).
+async function obtenerCuentaDeContacto(senderId) {
+  const lista = await obtenerCuentasConectadas();
+  if (lista.length <= 1) return lista[0] || null;
+  const mapa = await cargarMapaCuentaContacto();
+  const igId = mapa.get(String(senderId));
+  if (igId) {
+    const cuenta = lista.find(c => String(c.ig_id) === String(igId));
+    if (cuenta) return cuenta;
+  }
+  return lista[0];
 }
 
 // ---------------------------------------------------------------
@@ -1857,7 +1994,7 @@ async function obtenerPerfilInstagram(senderId) {
   }
 
   try {
-    const cuenta = await obtenerCuentaActiva();
+    const cuenta = await obtenerCuentaDeContacto(senderId);
     if (!cuenta) return cacheado || null;
 
     const resp = await axios.get(`https://graph.instagram.com/v25.0/${senderId}`, {
@@ -2236,7 +2373,7 @@ async function tomarControlSiLlegoEnStandby(senderId) {
   const ahora = Date.now();
   const ultimo = hilosTomadosRecientemente.get(senderId) || 0;
   if (ahora - ultimo < 30000) return true;
-  const cuenta = await obtenerCuentaActiva();
+  const cuenta = await obtenerCuentaDeContacto(senderId);
   if (!cuenta) return false;
   const tomado = await tomarControlDelHilo(cuenta, senderId);
   if (tomado) hilosTomadosRecientemente.set(senderId, ahora);
@@ -2272,7 +2409,7 @@ async function postMensajeInstagram(cuenta, payload) {
 }
 
 async function enviarMensajeInstagram(senderId, texto) {
-  const cuenta = await obtenerCuentaActiva();
+  const cuenta = await obtenerCuentaDeContacto(senderId);
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
   const resp = await postMensajeInstagram(cuenta, {
@@ -2291,7 +2428,7 @@ async function enviarMensajeInstagram(senderId, texto) {
 // mensaje, para que un fallo aquí nunca bloquee la respuesta real.
 async function activarEscribiendoInstagram(senderId) {
   try {
-    const cuenta = await obtenerCuentaActiva();
+    const cuenta = await obtenerCuentaDeContacto(senderId);
     if (!cuenta) return;
 
     await axios.post(
@@ -2314,7 +2451,7 @@ async function activarEscribiendoInstagram(senderId) {
 // que cualquier nota de voz — la diferencia es que el archivo ya existe (no
 // se graba en el momento), pero para quien lo recibe se ve/escucha igual.
 async function enviarAudioInstagram(senderId, urlAudio) {
-  const cuenta = await obtenerCuentaActiva();
+  const cuenta = await obtenerCuentaDeContacto(senderId);
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
   const resp = await postMensajeInstagram(cuenta, {
@@ -2333,7 +2470,7 @@ async function enviarAudioInstagram(senderId, urlAudio) {
 // fotos pregrabadas ([[foto:clave]] desde el prompt o los seguimientos) como
 // para fotos sueltas mandadas a mano desde /chats (ej. casos de éxito).
 async function enviarImagenInstagram(senderId, urlImagen) {
-  const cuenta = await obtenerCuentaActiva();
+  const cuenta = await obtenerCuentaDeContacto(senderId);
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
   const resp = await postMensajeInstagram(cuenta, {
@@ -2355,7 +2492,7 @@ async function enviarImagenInstagram(senderId, urlImagen) {
 // link en el mensaje, es un archivo adjunto nativo (igual que una foto o
 // un audio).
 async function enviarArchivoInstagram(senderId, urlArchivo) {
-  const cuenta = await obtenerCuentaActiva();
+  const cuenta = await obtenerCuentaDeContacto(senderId);
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
   const resp = await postMensajeInstagram(cuenta, {
@@ -2377,7 +2514,7 @@ async function enviarArchivoInstagram(senderId, urlArchivo) {
 // evite la detección de enlaces de Instagram (no es información pública),
 // pero técnicamente el link ya no viaja como texto suelto en el mensaje.
 async function enviarBotonInstagram(senderId, urlBoton, textoBoton) {
-  const cuenta = await obtenerCuentaActiva();
+  const cuenta = await obtenerCuentaDeContacto(senderId);
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
   // El título del botón no puede pasar de 20 caracteres (límite de Meta) —
@@ -4298,6 +4435,7 @@ app.post("/webhook", async (req, res) => {
         // Se intenta tomar el control, pero NO se bloquea el mensaje si falla:
         // con esta conexión ese método no existe, y de todos modos el bot toma
         // el control al enviar su respuesta (si la opción está activa en Meta).
+        await registrarCuentaDeContacto(idLead, entry.id); // multi-cuenta: anota qué cuenta recibió este mensaje
         const tomado = await tomarControlSiLlegoEnStandby(idLead);
         console.log(`🔓 Mensaje de ${idLead} llegó en STANDBY — ${tomado ? "se tomó el control del hilo y " : ""}se procesa normalmente (el bot toma el control al responder).`);
         eventos.push(ev);
@@ -4309,6 +4447,13 @@ app.post("/webhook", async (req, res) => {
       if (!senderId) {
         console.log(`❓ Evento sin sender.id reconocible (se ignora). Evento completo: ${JSON.stringify(event)}`);
         continue;
+      }
+
+      // Multi-cuenta: se anota qué cuenta conectada recibió el mensaje de este
+      // contacto, para contestarle siempre desde esa misma cuenta. (Los "echoes"
+      // —mensajes que manda la propia cuenta— no cuentan: ahí el sender es ella.)
+      if (String(senderId) !== String(entry.id) && !event.message?.is_echo) {
+        await registrarCuentaDeContacto(senderId, entry.id);
       }
 
       // Evento de "visto" (read receipt): Instagram manda esto cuando el
@@ -4897,15 +5042,47 @@ ${estilosBase()}
 
 // --- ENDPOINTS DE DIAGNÓSTICO ---
 
+// Suscribe una cuenta a los mensajes de la app (webhook). Se usa al conectarla
+// y desde /force-subscribe.
+async function suscribirCuentaAMensajes(cuenta) {
+  const response = await axios.post(
+    `https://graph.instagram.com/v25.0/${cuenta.ig_id}/subscribed_apps`,
+    null,
+    {
+      params: { subscribed_fields: "messages" },
+      headers: { "Authorization": `Bearer ${cuenta.access_token}` }
+    }
+  );
+  return response.data;
+}
+
+// Con ?ig_id=... solo esa cuenta; sin parámetro, TODAS las conectadas. Para no
+// romper lo de antes: si hay una sola cuenta, la respuesta es la misma de siempre.
+async function cuentasSegunConsulta(req) {
+  if (req.query && req.query.ig_id) {
+    const c = await obtenerCuentaActiva(req.query.ig_id);
+    return c ? [c] : [];
+  }
+  return await obtenerCuentasConectadas();
+}
+
 app.get("/check-subscription", requireAdminKey, async (req, res) => {
   try {
-    const cuenta = await obtenerCuentaActiva();
-    if (!cuenta) return res.status(404).json({ error: "No hay cuenta conectada" });
-    const response = await axios.get(
-      `https://graph.instagram.com/v25.0/${cuenta.ig_id}/subscribed_apps`,
-      { headers: { "Authorization": `Bearer ${cuenta.access_token}` } }
-    );
-    res.json(response.data);
+    const cuentas = await cuentasSegunConsulta(req);
+    if (!cuentas.length) return res.status(404).json({ error: "No hay cuenta conectada" });
+    const resultados = [];
+    for (const cuenta of cuentas) {
+      try {
+        const response = await axios.get(
+          `https://graph.instagram.com/v25.0/${cuenta.ig_id}/subscribed_apps`,
+          { headers: { "Authorization": `Bearer ${cuenta.access_token}` } }
+        );
+        resultados.push({ ig_id: cuenta.ig_id, username: cuenta.username, ...response.data });
+      } catch (err) {
+        resultados.push({ ig_id: cuenta.ig_id, username: cuenta.username, error: err.response?.data || err.message });
+      }
+    }
+    res.json(resultados.length === 1 ? resultados[0] : { cuentas: resultados });
   } catch (err) {
     res.status(500).json(err.response?.data || { error: err.message });
   }
@@ -4913,17 +5090,18 @@ app.get("/check-subscription", requireAdminKey, async (req, res) => {
 
 app.get("/force-subscribe", requireAdminKey, async (req, res) => {
   try {
-    const cuenta = await obtenerCuentaActiva();
-    if (!cuenta) return res.status(404).json({ error: "No hay cuenta conectada" });
-    const response = await axios.post(
-      `https://graph.instagram.com/v25.0/${cuenta.ig_id}/subscribed_apps`,
-      null,
-      {
-        params: { subscribed_fields: "messages" },
-        headers: { "Authorization": `Bearer ${cuenta.access_token}` }
+    const cuentas = await cuentasSegunConsulta(req);
+    if (!cuentas.length) return res.status(404).json({ error: "No hay cuenta conectada" });
+    const resultados = [];
+    for (const cuenta of cuentas) {
+      try {
+        const data = await suscribirCuentaAMensajes(cuenta);
+        resultados.push({ ig_id: cuenta.ig_id, username: cuenta.username, ...data });
+      } catch (err) {
+        resultados.push({ ig_id: cuenta.ig_id, username: cuenta.username, error: err.response?.data || err.message });
       }
-    );
-    res.json(response.data);
+    }
+    res.json(resultados.length === 1 ? resultados[0] : { cuentas: resultados });
   } catch (err) {
     res.status(500).json(err.response?.data || { error: err.message });
   }
@@ -5976,8 +6154,8 @@ async function importarHistorialCompleto(cuenta, yo, chat) {
   return { total: msgs.length, insertados: nuevos.length };
 }
 
-async function revisarChatsRecuperables(dias) {
-  const cuenta = await obtenerCuentaActiva();
+async function revisarChatsRecuperables(dias, cuentaElegida) {
+  const cuenta = cuentaElegida || await obtenerCuentaActiva();
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
   const yo = await obtenerIdentidadCuenta(cuenta);
   const desde = Date.now() - dias * 86400000;
@@ -6024,8 +6202,8 @@ async function revisarChatsRecuperables(dias) {
 // usuario" de /chats). Primero intenta por el ID si ya lo conocemos en la base
 // (consulta exacta) y, si no, recorre las conversaciones más recientes de
 // Instagram (hasta ~1000) hasta dar con ese usuario.
-async function buscarChatPorUsuario(usuarioBuscado) {
-  const cuenta = await obtenerCuentaActiva();
+async function buscarChatPorUsuario(usuarioBuscado, cuentaElegida) {
+  const cuenta = cuentaElegida || await obtenerCuentaActiva();
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
   const objetivo = String(usuarioBuscado || "").trim().replace(/^@/, "").toLowerCase();
   if (!objetivo) throw new Error("Escribe un nombre de usuario.");
@@ -6088,10 +6266,11 @@ async function buscarChatPorUsuario(usuarioBuscado) {
 app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
   try {
     const simular = Boolean(req.body?.simular);
-    const cuenta = await obtenerCuentaActiva();
+    // Multi-cuenta: por defecto la cuenta principal; con body.ig_id, otra de las conectadas.
+    const cuenta = await obtenerCuentaActiva(req.body?.ig_id);
     if (!cuenta) return res.status(404).json({ error: "No hay ninguna cuenta de Instagram conectada." });
 
-    const { chat, escaneados, masReciente, sinUsername, recientes, parecidos, porId } = await buscarChatPorUsuario(req.body?.usuario);
+    const { chat, escaneados, masReciente, sinUsername, recientes, parecidos, porId } = await buscarChatPorUsuario(req.body?.usuario, cuenta);
     if (!chat) return res.json({ ok: true, encontrado: false, escaneados, masReciente, sinUsername, recientes: recientes || [], parecidos: parecidos || [], porId: Boolean(porId) });
 
     const conv = await obtenerConversacion(chat.senderId);
@@ -6119,6 +6298,7 @@ app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
       ultimosMensajes: chat.ultimosMensajes || []
     };
     if (simular) return res.json({ ok: true, simulacion: true, ...detalle });
+    await registrarCuentaDeContacto(chat.senderId, cuenta.ig_id); // multi-cuenta: contestar desde la misma cuenta
 
     // Último mensaje de la persona (si lo conocemos): es lo que hace que el chat
     // aparezca en la lista de /chats.
@@ -6214,10 +6394,10 @@ app.post("/chats/recuperar-standby", requireAdminKey, async (req, res) => {
     if (!simular && recuperacionChats && !recuperacionChats.terminada) {
       return res.status(409).json({ enCurso: true, error: `Ya hay una recuperación en curso (${recuperacionChats.hechos} de ${recuperacionChats.total} chats).` });
     }
-    const cuenta = await obtenerCuentaActiva();
+    const cuenta = await obtenerCuentaActiva(req.body?.ig_id); // multi-cuenta: principal por defecto
     if (!cuenta) return res.status(404).json({ error: "No hay ninguna cuenta de Instagram conectada." });
 
-    const { chats, truncado } = await revisarChatsRecuperables(dias);
+    const { chats, truncado } = await revisarChatsRecuperables(dias, cuenta);
     const plan = [];
     for (const ch of chats) {
       let accion = ch.sinResponder ? "responder" : "solo_control";
@@ -6261,6 +6441,7 @@ app.post("/chats/recuperar-standby", requireAdminKey, async (req, res) => {
       let tomados = 0, fallos = 0, respondidos = 0, guardadosParaRevisar = 0;
       for (const p of plan) {
         if (estado.cancelar) break;
+        await registrarCuentaDeContacto(p.senderId, cuenta.ig_id); // multi-cuenta: contestar desde la misma cuenta
         const tomado = await tomarControlDelHilo(cuenta, p.senderId);
         if (tomado) tomados++; else fallos++;
 
@@ -6482,31 +6663,58 @@ app.get("/get-long-lived-token", requireAdminKey, async (req, res) => {
 
 app.get("/refresh-token", requireAdminKey, async (req, res) => {
   try {
-    const cuenta = await obtenerCuentaActiva();
-    const tokenActual = cuenta ? cuenta.access_token : IG_ACCESS_TOKEN;
+    const cuentas = await obtenerCuentasConectadas();
 
-    const response = await axios.get("https://graph.instagram.com/refresh_access_token", {
-      params: {
-        grant_type: "ig_refresh_token",
-        access_token: tokenActual
-      }
-    });
-
-    if (cuenta) {
-      await guardarCuentaConectada({
-        ...cuenta,
-        access_token: response.data.access_token,
-        token_expira_en_segundos: response.data.expires_in || 5184000,
-        ultimo_oauth_en: new Date().toISOString()
+    // Sin ninguna cuenta guardada: se refresca el token de las variables de entorno (como antes).
+    if (!cuentas.length) {
+      const response = await axios.get("https://graph.instagram.com/refresh_access_token", {
+        params: { grant_type: "ig_refresh_token", access_token: IG_ACCESS_TOKEN }
+      });
+      await guardarFechaTokenDB(response.data.expires_in);
+      return res.json({
+        mensaje: "Token refrescado y guardado. Si sigues usando IG_ACCESS_TOKEN en Render, actualízalo también manualmente.",
+        ...response.data,
+        expira_en_dias: response.data.expires_in ? Math.round(response.data.expires_in / 86400) : null
       });
     }
-    await guardarFechaTokenDB(response.data.expires_in);
 
-    res.json({
-      mensaje: "Token refrescado y guardado. Si sigues usando IG_ACCESS_TOKEN en Render, actualízalo también manualmente.",
-      ...response.data,
-      expira_en_dias: response.data.expires_in ? Math.round(response.data.expires_in / 86400) : null
-    });
+    // Multi-cuenta: se refresca el token de CADA cuenta conectada.
+    const resultados = [];
+    for (let i = 0; i < cuentas.length; i++) {
+      const cuenta = cuentas[i];
+      try {
+        const response = await axios.get("https://graph.instagram.com/refresh_access_token", {
+          params: { grant_type: "ig_refresh_token", access_token: cuenta.access_token }
+        });
+        await guardarCuentaConectada({
+          ...cuenta,
+          access_token: response.data.access_token,
+          token_expira_en_segundos: response.data.expires_in || 5184000,
+          ultimo_oauth_en: new Date().toISOString()
+        });
+        if (i === 0) await guardarFechaTokenDB(response.data.expires_in); // /token-info sigue mirando la principal
+        resultados.push({
+          ig_id: cuenta.ig_id, username: cuenta.username, ok: true,
+          expires_in: response.data.expires_in,
+          expira_en_dias: response.data.expires_in ? Math.round(response.data.expires_in / 86400) : null
+        });
+      } catch (err) {
+        console.error(`❌ No se pudo refrescar el token de @${cuenta.username || cuenta.ig_id}:`, err.response?.data || err.message);
+        resultados.push({ ig_id: cuenta.ig_id, username: cuenta.username, ok: false, error: err.response?.data || err.message });
+      }
+    }
+
+    // Se mantiene la forma de respuesta de antes cuando hay una sola cuenta.
+    if (resultados.length === 1) {
+      const r = resultados[0];
+      if (!r.ok) return res.status(500).json(r.error);
+      return res.json({
+        mensaje: "Token refrescado y guardado. Si sigues usando IG_ACCESS_TOKEN en Render, actualízalo también manualmente.",
+        expires_in: r.expires_in,
+        expira_en_dias: r.expira_en_dias
+      });
+    }
+    res.json({ mensaje: "Tokens refrescados (uno por cuenta).", cuentas: resultados });
   } catch (err) {
     res.status(500).json(err.response?.data || { error: err.message });
   }
@@ -6536,6 +6744,9 @@ app.get("/oauth/instagram/start", requireAdminKey, (req, res) => {
     + `&redirect_uri=${encodeURIComponent(redirectUri)}`
     + `&response_type=code`
     + `&scope=${encodeURIComponent(scopes)}`
+    // Para poder agregar OTRA cuenta distinta a la que ya tengas abierta en este
+    // navegador, se pide a Instagram que muestre de nuevo el inicio de sesión.
+    + `&force_reauth=true`
     + `&state=${encodeURIComponent(state)}`;
 
   res.redirect(url);
@@ -6587,19 +6798,50 @@ app.get("/oauth/instagram/callback", async (req, res) => {
     });
     const perfil = perfilResp.data;
 
+    // Instagram puede usar dos ids para la misma cuenta (el de /me y el "user_id"
+    // que a veces llega en los webhooks). Se guarda también el segundo, si existe,
+    // para poder reconocer a qué cuenta pertenece cada mensaje. Si falla, no pasa nada.
+    let userId = null;
+    try {
+      const r2 = await axios.get("https://graph.instagram.com/v25.0/me", {
+        params: { fields: "user_id", access_token: longToken }
+      });
+      userId = r2.data?.user_id || null;
+    } catch (e) { /* opcional */ }
+
+    const yaConectadas = await obtenerCuentasConectadas();
+    const eraNueva = !yaConectadas.some(c => String(c.ig_id) === String(perfil.id));
+
     const cuenta = {
       ig_id: perfil.id,
+      ...(userId && String(userId) !== String(perfil.id) ? { user_id: String(userId) } : {}),
       username: perfil.username,
       account_type: perfil.account_type,
       access_token: longToken,
       token_expira_en_segundos: expiresIn,
-      conectada_en: new Date().toISOString(),
+      // Si ya estaba conectada, se conserva su fecha de conexión original.
+      conectada_en: eraNueva ? new Date().toISOString() : (yaConectadas.find(c => String(c.ig_id) === String(perfil.id))?.conectada_en || new Date().toISOString()),
       metodo: "instagram_directo",
       ultimo_oauth_en: new Date().toISOString()
     };
 
+    // AGREGA la cuenta (ya no reemplaza a las que había conectadas).
     await guardarCuentaConectada(cuenta);
-    await guardarFechaTokenDB(expiresIn); // mantiene compatibilidad con /token-info
+
+    // /token-info sigue mirando la cuenta principal (la primera de la lista).
+    const listaAhora = await obtenerCuentasConectadas();
+    if (listaAhora[0] && String(listaAhora[0].ig_id) === String(cuenta.ig_id)) {
+      await guardarFechaTokenDB(expiresIn); // mantiene compatibilidad con /token-info
+    }
+
+    // Se suscribe la cuenta a los mensajes para que lleguen al webhook. Si falla
+    // no se interrumpe la conexión: se puede repetir desde /force-subscribe.
+    try {
+      await suscribirCuentaAMensajes(cuenta);
+      console.log(`✅ Cuenta @${cuenta.username} conectada y suscrita a los mensajes (${listaAhora.length} cuenta(s) conectada(s) en total).`);
+    } catch (e) {
+      console.error(`⚠️ La cuenta @${cuenta.username} se conectó, pero no se pudo suscribir a los mensajes (usa /force-subscribe):`, e.response?.data || e.message);
+    }
 
     res.redirect("/cuentas");
   } catch (err) {
@@ -8270,9 +8512,54 @@ app.get("/cuenta/actual", requireAdminKey, async (req, res) => {
   res.json({ conectada: true, ...datosPublicos });
 });
 
+// Lista de TODAS las cuentas conectadas (sin tokens), con los días que le quedan
+// a cada token. La primera es la "principal".
+app.get("/cuentas/lista", requireAdminKey, async (req, res) => {
+  try {
+    const cuentas = await obtenerCuentasConectadas();
+    const salida = [];
+    for (let i = 0; i < cuentas.length; i++) {
+      const c = { ...cuentas[i] };
+
+      // La cuenta legada (variables de entorno) no trae username ni fecha: se completan.
+      if (c.metodo === "env_legacy") {
+        if (!c.username) {
+          try {
+            const p = await axios.get("https://graph.instagram.com/v25.0/me", { params: { fields: "username", access_token: c.access_token } });
+            c.username = p.data.username;
+          } catch (err) { console.error("❌ Error obteniendo username de la cuenta legada:", err.response?.data || err.message); }
+        }
+        if (!c.conectada_en) {
+          const infoToken = await obtenerInfoTokenDB();
+          if (infoToken?.obtenido_en) { c.conectada_en = infoToken.obtenido_en; c.ultimo_oauth_en = infoToken.obtenido_en; c.token_expira_en_segundos = infoToken.expira_en_segundos; }
+        }
+      }
+
+      let diasRestantes = null;
+      const desde = c.ultimo_oauth_en || c.conectada_en;
+      if (desde) {
+        const exp = new Date(desde).getTime() + (c.token_expira_en_segundos || 5184000) * 1000;
+        diasRestantes = Math.round((exp - Date.now()) / 86400000);
+      }
+      const { access_token, ...publico } = c;
+      salida.push({ ...publico, principal: i === 0, dias_restantes: diasRestantes });
+    }
+    res.json({ cuentas: salida });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Desconecta UNA cuenta (body.ig_id) — o todas, si no se manda ig_id (como antes).
 app.post("/cuenta/eliminar", requireAdminKey, async (req, res) => {
-  await eliminarCuentaConectada();
-  res.json({ mensaje: "Cuenta desconectada. El bot dejará de responder hasta que conectes otra." });
+  const igId = req.body && req.body.ig_id;
+  await eliminarCuentaConectada(igId);
+  const quedan = (await obtenerCuentasConectadas()).length;
+  res.json({
+    mensaje: quedan > 0
+      ? `Cuenta desconectada. Quedan ${quedan} cuenta(s) conectada(s).`
+      : "Cuenta desconectada. El bot dejará de responder hasta que conectes otra."
+  });
 });
 
 // ---------------------------------------------------------------
@@ -9996,9 +10283,9 @@ ${estilosBase()}
       <div class="page-header-left">
         <h1 class="page-title">CONECTAR CUENTAS DE INSTAGRAM</h1>
       </div>
-      <button class="btn-hero" id="btnConectarInstagram">Instagram directo (token 60 días)</button>
+      <button class="btn-hero" id="btnConectarInstagram">Conectar otra cuenta de Instagram</button>
     </div>
-    <p class="page-sub">Conecta una cuenta directo desde Instagram y el sistema intenta guardar token long-lived (60 días) sin depender de Facebook Page. Por ahora solo se puede tener una cuenta activa a la vez: conectar una nueva reemplaza a la anterior.</p>
+    <p class="page-sub">Conecta cuentas directo desde Instagram (token de 60 días). Puedes tener varias cuentas conectadas a la vez: conectar una nueva la agrega y no desconecta las demás. El bot contesta a cada persona desde la cuenta a la que ella escribió. La primera de la lista es la principal (la usan por defecto las herramientas que aún no distinguen cuentas, como "Recuperar chats").</p>
 
     <div class="card">
       <p class="cuentas-titulo">Tus cuentas</p>
@@ -10034,40 +10321,43 @@ ${estilosBase()}
       d.toLocaleTimeString("es-MX", { hour:"2-digit", minute:"2-digit" });
   }
 
+  function escaparHtml(t){
+    return String(t == null ? "" : t).replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch]));
+  }
+
   async function cargarCuentaActual(){
     const cont = document.getElementById("cuentaActual");
-    const data = await llamarGET("/cuenta/actual");
-    if(!data || !data.conectada){
+    const data = await llamarGET("/cuentas/lista");
+    if(!data || !data.cuentas || data.cuentas.length === 0){
       cont.innerHTML = '<p class="sin-cuenta">No hay ninguna cuenta conectada todavía. Usa el botón de arriba para conectar una.</p>';
       return;
     }
 
-    let tokenInfo = await llamarGET("/token-info");
-    let diasRestantesTxt = "";
-    if(tokenInfo && !tokenInfo.error){
-      const fecha = new Date(tokenInfo.expira_aproximadamente_en);
-      diasRestantesTxt = \`Token vence en \${tokenInfo.dias_restantes} día(s) (\${fecha.toLocaleDateString("es-MX",{day:"2-digit",month:"short"})})\`;
-    }
-
-    cont.innerHTML = \`
-      <div class="cuenta-item">
+    cont.innerHTML = data.cuentas.map((c, i) => {
+      const tokenTxt = (c.dias_restantes === null || c.dias_restantes === undefined)
+        ? "" : \`Token vence en \${c.dias_restantes} día(s)\`;
+      return \`
+      <div class="cuenta-item" style="margin-bottom:12px;">
         <div class="cuenta-info">
-          <div class="nombre">@\${data.username || "sin_usuario"}</div>
+          <div class="nombre">@\${escaparHtml(c.username || "sin_usuario")}\${c.principal ? ' <span style="font-size:12px;color:var(--muted);font-weight:400;">(principal)</span>' : ""}</div>
           <div class="detalle">
-            Conectada: <b>\${formatearFecha(data.conectada_en)}</b>\${diasRestantesTxt ? " · " + diasRestantesTxt : ""}
+            Conectada: <b>\${formatearFecha(c.conectada_en)}</b>\${tokenTxt ? " · " + tokenTxt : ""}
           </div>
         </div>
         <div class="cuenta-lado">
           <span class="badge">Conectada</span>
-          <button class="btn-eliminar" id="btnEliminarCuenta">Eliminar cuenta</button>
+          <button class="btn-eliminar" data-igid="\${escaparHtml(c.ig_id)}" data-usuario="\${escaparHtml(c.username || "")}">Eliminar cuenta</button>
         </div>
-      </div>
-    \`;
+      </div>\`;
+    }).join("");
 
-    document.getElementById("btnEliminarCuenta").addEventListener("click", async () => {
-      if(!confirm("¿Seguro que quieres desconectar esta cuenta? El bot dejará de responder hasta que conectes otra.")) return;
-      await llamarPOST("/cuenta/eliminar");
-      cargarCuentaActual();
+    cont.querySelectorAll(".btn-eliminar").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const usuario = btn.getAttribute("data-usuario") || "esta cuenta";
+        if(!confirm("¿Seguro que quieres desconectar @" + usuario + "? El bot dejará de responder a esa cuenta (las demás siguen conectadas).")) return;
+        await llamarPOST("/cuenta/eliminar", { ig_id: btn.getAttribute("data-igid") });
+        cargarCuentaActual();
+      });
     });
   }
 
@@ -17026,33 +17316,45 @@ async function recuperarChatsPerdidosAuto() {
   recuperacionAutoEnCurso = true;
   try {
     if (!(await estaBotActivo())) return;
-    const cuenta = await obtenerCuentaActiva();
-    if (!cuenta) return;
-    const { chats } = await revisarChatsRecuperables(1);
+    const cuentas = await obtenerCuentasConectadas();
+    if (!cuentas.length) return;
     let respondidos = 0, guardados = 0;
-    for (const ch of chats) {
-      if (!ch.sinResponder) continue;
-      if ((Date.now() - new Date(ch.ultimoMensajeEn).getTime()) < 3 * 60000) continue;
-      const conv = await obtenerConversacion(ch.senderId);
-      if (conv.ultimo_mensaje_usuario && new Date(conv.ultimo_mensaje_usuario) >= new Date(ch.ultimoMensajeEn)) continue; // el bot ya lo recibió
-
-      const horas = (Date.now() - new Date(ch.ultimoMensajeEn).getTime()) / 3600000;
-      const puedeResponder = horas <= 23 && ch.texto && !conv.bot_pausado && !tieneEtiquetaNoContactar(conv)
-        && !(conv.ultimo_mensaje_bot_en && new Date(conv.ultimo_mensaje_bot_en) > new Date(ch.ultimoMensajeEn))
-        && respondidos < RECUPERACION_AUTO_MAX;
-
-      if (puedeResponder) {
-        console.log(`🛟 Respaldo automático: ${ch.username || ch.senderId} tenía un mensaje que el bot nunca recibió, se responde: "${ch.texto.slice(0, 80)}"`);
-        await tomarControlDelHilo(cuenta, ch.senderId);
-        await registrarMensajeUsuario(ch.senderId, ch.texto);
-        await cancelarSeguimientosPendientesDB(ch.senderId);
-        encolarMensaje(ch.senderId, ch.texto);
-        respondidos++;
-      } else if (await registrarChatRecuperado(ch)) {
-        console.log(`🛟 Respaldo automático: ${ch.username || ch.senderId} guardado en /chats para atenderlo a mano (el bot no puede contestarlo solo).`);
-        guardados++;
+    // Multi-cuenta: se revisan los chats de CADA cuenta conectada (el tope de
+    // respuestas por pasada es compartido entre todas).
+    for (const cuenta of cuentas) {
+      let chats;
+      try {
+        ({ chats } = await revisarChatsRecuperables(1, cuenta));
+      } catch (err) {
+        console.error(`❌ Respaldo automático: no se pudieron revisar los chats de @${cuenta.username || cuenta.ig_id}:`, err.response?.data || err.message);
+        continue;
       }
-      await new Promise(r => setTimeout(r, 1500));
+      for (const ch of chats) {
+        if (!ch.sinResponder) continue;
+        if ((Date.now() - new Date(ch.ultimoMensajeEn).getTime()) < 3 * 60000) continue;
+        const conv = await obtenerConversacion(ch.senderId);
+        if (conv.ultimo_mensaje_usuario && new Date(conv.ultimo_mensaje_usuario) >= new Date(ch.ultimoMensajeEn)) continue; // el bot ya lo recibió
+
+        const horas = (Date.now() - new Date(ch.ultimoMensajeEn).getTime()) / 3600000;
+        const puedeResponder = horas <= 23 && ch.texto && !conv.bot_pausado && !tieneEtiquetaNoContactar(conv)
+          && !(conv.ultimo_mensaje_bot_en && new Date(conv.ultimo_mensaje_bot_en) > new Date(ch.ultimoMensajeEn))
+          && respondidos < RECUPERACION_AUTO_MAX;
+
+        if (puedeResponder) {
+          console.log(`🛟 Respaldo automático: ${ch.username || ch.senderId} tenía un mensaje que el bot nunca recibió (cuenta @${cuenta.username || cuenta.ig_id}), se responde: "${ch.texto.slice(0, 80)}"`);
+          await registrarCuentaDeContacto(ch.senderId, cuenta.ig_id);
+          await tomarControlDelHilo(cuenta, ch.senderId);
+          await registrarMensajeUsuario(ch.senderId, ch.texto);
+          await cancelarSeguimientosPendientesDB(ch.senderId);
+          encolarMensaje(ch.senderId, ch.texto);
+          respondidos++;
+        } else if (await registrarChatRecuperado(ch)) {
+          await registrarCuentaDeContacto(ch.senderId, cuenta.ig_id);
+          console.log(`🛟 Respaldo automático: ${ch.username || ch.senderId} guardado en /chats para atenderlo a mano (el bot no puede contestarlo solo).`);
+          guardados++;
+        }
+        await new Promise(r => setTimeout(r, 1500));
+      }
     }
     if (respondidos || guardados) console.log(`🛟 Respaldo automático terminado: ${respondidos} respondidos, ${guardados} guardados en /chats.`);
   } catch (err) {
