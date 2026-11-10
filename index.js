@@ -2437,13 +2437,43 @@ async function postMensajeInstagram(cuenta, payload) {
   }
 }
 
-async function enviarMensajeInstagram(senderId, texto) {
+// ---------------------------------------------------------------
+// SIN EMOJIS: el bot NUNCA manda emojis. Esta regla se aplica aquí, en el
+// último paso antes de enviar, para que no dependa de que la IA o de que los
+// textos escritos a mano (seguimientos, botones, avisos) la respeten. Solo
+// toca los textos que SÍ traen emojis; el resto pasa exactamente igual.
+// Para permitirlos otra vez (no recomendado): variable de entorno
+// PERMITIR_EMOJIS=1 en Render. Los mensajes que escribes TÚ a mano desde /chats
+// no se filtran (se mandan con permitirEmojis).
+// ---------------------------------------------------------------
+const BLOQUEAR_EMOJIS = process.env.PERMITIR_EMOJIS !== "1";
+const REGEX_EMOJIS = /[0-9#*]️?⃣|[\p{Extended_Pictographic}\p{Emoji_Presentation}\p{Regional_Indicator}\p{Emoji_Modifier}️‍⃣]/gu;
+function quitarEmojis(texto) {
+  if (!BLOQUEAR_EMOJIS || typeof texto !== "string") return texto;
+  // © ® ™ no son emojis para este fin: se respetan.
+  const limpio = texto.replace(REGEX_EMOJIS, (m) => (m === "©" || m === "®" || m === "™") ? m : "");
+  if (limpio === texto) return texto; // no había emojis: no se toca nada
+  return limpio
+    .replace(/[ \t]{2,}/g, " ")       // espacios que quedaron donde estaba el emoji
+    .replace(/ +([,.;:!?])/g, "$1")   // " ." o " !" que quedó pegado al emoji quitado
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .trim();
+}
+
+async function enviarMensajeInstagram(senderId, texto, opciones) {
   const cuenta = await obtenerCuentaDeContacto(senderId);
   if (!cuenta) throw new Error("No hay ninguna cuenta de Instagram conectada.");
 
+  const textoFinal = (opciones && opciones.permitirEmojis) ? texto : quitarEmojis(texto);
+  if (typeof textoFinal === "string" && !textoFinal.trim()) {
+    console.warn(`⚠️ Mensaje a ${senderId} vacío después de quitar los emojis — no se envía nada.`);
+    return;
+  }
+
   const resp = await postMensajeInstagram(cuenta, {
     recipient: { id: senderId },
-    message:   { text: texto }
+    message:   { text: textoFinal }
   });
   registrarMidBot(resp.data?.message_id);
 }
@@ -2864,7 +2894,11 @@ async function enviarContenidoConMarcadores(senderId, contenidoCrudo) {
     }
 
     if (parte.tipo === "texto") {
-      let valorFinal = parte.valor;
+      // Sin emojis en el TEXTO hablado (ver quitarEmojis): se limpian aquí para
+      // que el historial de /chats muestre exactamente lo que se envió. Los
+      // botones (título y texto de encima) NO se filtran: ahí los emojis se respetan.
+      let valorFinal = quitarEmojis(parte.valor);
+      if (typeof valorFinal === "string" && !valorFinal.trim()) continue; // solo había emojis
       let convParaEnlaces = null; // se comparte entre las dos verificaciones de abajo, para no consultar dos veces la misma conversación
 
       // Si el texto trae un enlace de Calendly y hay una posición configurada
@@ -6399,7 +6433,7 @@ app.post("/chats/recuperar-usuario", requireAdminKey, async (req, res) => {
       // registrado un mensaje del lead, y sin esto el chat no aparecería.
       if (importados === null && chatDelLead) await registrarChatRecuperado(chatDelLead);
       for (const fragmento of dividirTextoLargo(mensajeManual)) {
-        await enviarMensajeInstagram(chat.senderId, fragmento);
+        await enviarMensajeInstagram(chat.senderId, fragmento, { permitirEmojis: true }); // mensaje escrito por ti a mano: no se filtra
         await agregarAlHistorialDB(chat.senderId, "assistant", fragmento);
       }
       await cancelarSeguimientosPendientesDB(chat.senderId);
@@ -6549,7 +6583,7 @@ app.post("/chats/enviar", requireAdminKey, async (req, res) => {
     // automáticas — si el admin escribe algo más largo, se manda en varias burbujas.
     const fragmentos = dividirTextoLargo(texto);
     for (const fragmento of fragmentos) {
-      await enviarMensajeInstagram(senderId, fragmento);
+      await enviarMensajeInstagram(senderId, fragmento, { permitirEmojis: true }); // mensaje escrito por ti a mano desde /chats: no se filtra
       await agregarAlHistorialDB(senderId, "assistant", fragmento);
     }
 
