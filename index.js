@@ -16548,6 +16548,17 @@ ${estilosBase()}
     if(tab) tab.click();
   });
 
+  // Multi-cuenta: "Recuperar chats" y "Recuperar un usuario" trabajan sobre UNA
+  // cuenta. Con 2 o más cuentas conectadas hay que elegirla antes en el menú de
+  // cuentas; devuelve su ig_id ("" si solo hay una), o null si falta elegir.
+  function cuentaParaRecuperar(){
+    if(cuentasIg.length > 1 && !filtroCuenta){
+      alert("Tienes varias cuentas conectadas. Elige primero la cuenta en el menú de cuentas (arriba, a la izquierda) y vuelve a intentarlo: la recuperación se hace sobre una cuenta a la vez.");
+      return null;
+    }
+    return filtroCuenta || "";
+  }
+
   // Panel "🛠 Herramientas": agrupa Resumen, Recuperar chats, Recuperar un
   // usuario y las exportaciones (los botones son los mismos de siempre, con sus
   // mismos ids y acciones; solo cambió dónde se muestran).
@@ -16912,6 +16923,8 @@ ${estilosBase()}
   document.getElementById("btnRecuperarChats").addEventListener("click", async () => {
     const btn = document.getElementById("btnRecuperarChats");
     const textoOriginal = btn.textContent;
+    const igIdRecuperar = cuentaParaRecuperar();
+    if(igIdRecuperar === null) return;
     const entrada = prompt("¿De cuántos días atrás quieres revisar los chats? (1 a 14)", "3");
     if(entrada === null) return;
     const dias = parseInt(entrada, 10);
@@ -16924,7 +16937,7 @@ ${estilosBase()}
         const res = await fetch("/chats/recuperar-standby", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dias: dias, simular: simular })
+          body: JSON.stringify({ dias: dias, simular: simular, ig_id: igIdRecuperar })
         });
         if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
         const data = await res.json().catch(() => ({}));
@@ -16970,6 +16983,8 @@ ${estilosBase()}
   document.getElementById("btnRecuperarUsuario").addEventListener("click", async () => {
     const btn = document.getElementById("btnRecuperarUsuario");
     const textoOriginal = btn.textContent;
+    const igIdRecuperar = cuentaParaRecuperar();
+    if(igIdRecuperar === null) return;
     const entrada = prompt("Nombre de usuario de Instagram del chat que quieres recuperar (con o sin @):", "");
     if(entrada === null || !entrada.trim()) return;
     const usuario = entrada.trim().replace(/^@/, "");
@@ -16981,7 +16996,7 @@ ${estilosBase()}
         const res = await fetch("/chats/recuperar-usuario", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ usuario: usuario, simular: simular, mensaje: mensaje || "" })
+          body: JSON.stringify({ usuario: usuario, simular: simular, mensaje: mensaje || "", ig_id: igIdRecuperar })
         });
         if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return null; }
         const data = await res.json().catch(() => ({}));
