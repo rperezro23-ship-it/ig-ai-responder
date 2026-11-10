@@ -1130,6 +1130,30 @@ async function obtenerCuentaDeContacto(senderId) {
   return lista[0];
 }
 
+// Para filtrar datos por cuenta (dashboard): devuelve una función
+// (senderId) => ¿este contacto es de la cuenta elegida?, o null si no hay
+// filtro (cuenta vacía). Misma regla que obtenerCuentaDeContacto: el contacto
+// anotado en una cuenta secundaria es de esa; el resto, de la principal.
+async function crearFiltroPorCuenta(cuentaElegida) {
+  if (!cuentaElegida) return null;
+  const lista = await obtenerCuentasConectadas();
+  if (!lista.length) return null;
+  // Si la cuenta elegida ya no está conectada, no se filtra (se muestra todo).
+  const cuentaEl = lista.find(x => cuentaCoincideConId(x, cuentaElegida));
+  if (!cuentaEl) return null;
+  const mapa = lista.length > 1 ? await cargarMapaCuentaContacto() : null;
+  const principal = String(lista[0].ig_id);
+  const elegida = String(cuentaEl.ig_id);
+  return (senderId) => {
+    let id = principal;
+    if (mapa) {
+      const m = mapa.get(String(senderId));
+      if (m && lista.some(x => String(x.ig_id) === m)) id = m;
+    }
+    return id === elegida;
+  };
+}
+
 // ---------------------------------------------------------------
 // Conexión con Google Calendar — reemplaza a Calendly. Se guarda el
 // "refresh_token" (que no vence nunca, salvo que se revoque el acceso
@@ -5336,7 +5360,7 @@ function limpiarAnuncios(lista) {
   })).filter(a => a.palabra && a.desde);
 }
 
-async function calcularMetricasAnuncio(a) {
+async function calcularMetricasAnuncio(a, filtroCuenta) {
   const vacias = { chats: 0, califican: 0, enlaces: 0, agendas: 0, asistieron: 0, compraron: 0, cash: 0,
     costoChat: null, costoEnlace: null, costoAgenda: null, costoCliente: null };
 
@@ -5396,7 +5420,7 @@ async function calcularMetricasAnuncio(a) {
   if (idsAnuncio.length === 0) return vacias;
 
   // 3) Estado de esos chats (solo los que respondieron alguna vez).
-  const filas = [];
+  let filas = [];
   for (let i = 0; i < idsAnuncio.length; i += 100) {
     const { data, error } = await supabase
       .from("conversaciones")
@@ -5406,6 +5430,8 @@ async function calcularMetricasAnuncio(a) {
     if (error) throw error;
     filas.push(...(data || []));
   }
+  // Multi-cuenta: si se eligió una cuenta, solo cuentan los chats de esa cuenta.
+  if (filtroCuenta) filas = filas.filter(c => filtroCuenta(c.sender_id));
 
   const etiquetaAsistio = normalizarParaComparar(configActual.dashboard_etiqueta_asistio);
   const etiquetaCompro = normalizarParaComparar(configActual.dashboard_etiqueta_compro);
@@ -5427,10 +5453,11 @@ async function calcularMetricasAnuncio(a) {
 app.get("/dashboard/anuncios", requireAdminKey, async (req, res) => {
   try {
     const lista = await leerAnunciosGuardados();
+    const filtroCuenta = await crearFiltroPorCuenta(req.query.cuenta ? String(req.query.cuenta) : "");
     const salida = [];
     for (const a of lista) {
       try {
-        salida.push({ ...a, metricas: await calcularMetricasAnuncio(a) });
+        salida.push({ ...a, metricas: await calcularMetricasAnuncio(a, filtroCuenta) });
       } catch (err) {
         salida.push({ ...a, error: err.message });
       }
@@ -5496,7 +5523,7 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
     // alguna vez, y cada paso se ubica en el día en que OCURRIÓ (enlace
     // enviado, agendó, calificó...) — así los números coinciden con el filtro
     // de fecha de /chats.
-    const filas = [];
+    let filas = [];
     for (let desdeFila = 0; ; desdeFila += 1000) {
       const { data: pagina, error: errorPagina } = await supabase
         .from("conversaciones")
@@ -5508,6 +5535,12 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
       filas.push(...(pagina || []));
       if (!pagina || pagina.length < 1000) break;
     }
+
+    // Multi-cuenta: con ?cuenta=<ig_id> solo se cuentan los chats de esa cuenta.
+    const cuentaElegida = req.query.cuenta ? String(req.query.cuenta) : "";
+    const filtroCuenta = await crearFiltroPorCuenta(cuentaElegida);
+    if (filtroCuenta) filas = filas.filter(c => filtroCuenta(c.sender_id));
+    const cuentasIgDash = (await obtenerCuentasConectadas()).map((c, i) => ({ ig_id: String(c.ig_id), username: c.username || null, principal: i === 0 }));
 
     // Si un paso no tiene su fecha propia guardada (datos viejos), se usa la
     // última actividad del chat como respaldo.
@@ -5621,6 +5654,8 @@ app.get("/dashboard/datos", requireAdminKey, async (req, res) => {
     }
 
     res.json({
+      cuentas: cuentasIgDash,
+      cuentaFiltrada: filtroCuenta ? cuentaElegida : null,
       visitasAgendar,
       seguimientos,
       total,
@@ -11977,6 +12012,12 @@ ${estilosBase()}
         <input type="date" id="dashFechaHasta" class="dash-periodo-select">
         <button class="dash-periodo-btn" id="btnAplicarPeriodo" type="button">Aplicar</button>
       </div>
+      <span id="dashCuentaWrap" style="display:none; align-items:center; gap:8px;">
+        <span class="dash-periodo-label">📱 Cuenta:</span>
+        <select id="selectCuentaDash" class="dash-periodo-select" title="Ver las cifras de una sola cuenta de Instagram, o de todas juntas">
+          <option value="">Todas las cuentas</option>
+        </select>
+      </span>
       <span class="dash-periodo-info" id="dashPeriodoInfo"></span>
     </div>
 
@@ -12117,6 +12158,36 @@ ${estilosBase()}
   // { desde: "YYYY-MM-DD" o null, hasta: "YYYY-MM-DD" o null } — null en
   // ambos significa "todo el tiempo", sin filtrar nada.
   let periodoActual = { desde: null, hasta: null };
+
+  // Multi-cuenta: ig_id de la cuenta elegida ("" = todas). Se recuerda en este navegador.
+  let cuentaDash = "";
+  try { cuentaDash = localStorage.getItem("dash_filtro_cuenta") || ""; } catch(e) {}
+
+  // Llena el selector de cuentas (solo se muestra con 2 o más). Se vuelve a
+  // dibujar únicamente si la lista cambió, para no cerrar el desplegable en
+  // cada refresco automático.
+  function pintarSelectorCuentas(cuentas){
+    const wrap = document.getElementById("dashCuentaWrap");
+    const sel = document.getElementById("selectCuentaDash");
+    const lista = Array.isArray(cuentas) ? cuentas : [];
+    if(lista.length < 2){ wrap.style.display = "none"; return; }
+    wrap.style.display = "flex";
+    const firma = lista.map(c => c.ig_id + ":" + (c.username || "")).join("|");
+    if(window.__firmaCuentasDash !== firma){
+      window.__firmaCuentasDash = firma;
+      sel.innerHTML = "";
+      const todas = document.createElement("option");
+      todas.value = ""; todas.textContent = "Todas las cuentas";
+      sel.appendChild(todas);
+      lista.forEach(c => {
+        const op = document.createElement("option");
+        op.value = c.ig_id; op.textContent = "@" + (c.username || "cuenta");
+        sel.appendChild(op);
+      });
+    }
+    if(cuentaDash && !lista.some(c => c.ig_id === cuentaDash)){ cuentaDash = ""; } // esa cuenta ya no está conectada
+    sel.value = cuentaDash;
+  }
 
   function formatoFecha(d){
     return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
@@ -12290,7 +12361,7 @@ ${estilosBase()}
   async function cargarAnuncios(){
     const msg = document.getElementById("anunciosMsg");
     try {
-      const res = await fetch("/dashboard/anuncios");
+      const res = await fetch("/dashboard/anuncios" + (cuentaDash ? "?cuenta=" + encodeURIComponent(cuentaDash) : ""));
       if(res.status === 401){ window.location.href = "/login?redirect=" + encodeURIComponent(window.location.pathname); return; }
       const data = await res.json();
       if(data.error) throw new Error(data.error);
@@ -12345,6 +12416,7 @@ ${estilosBase()}
       // servidor no tiene que adivinar en qué zona horaria interpretarlas.
       if(periodoActual.desde) params.set("desde", inicioDelDiaISO(periodoActual.desde));
       if(periodoActual.hasta) params.set("hasta", finDelDiaISO(periodoActual.hasta));
+      if(cuentaDash) params.set("cuenta", cuentaDash);
       const url = "/dashboard/datos" + (params.toString() ? "?" + params.toString() : "");
 
       const res = await fetch(url);
@@ -12366,12 +12438,15 @@ ${estilosBase()}
     const porcentajes = data.porcentajes || {};
     if(!data.porcentajes) console.warn("La respuesta de /dashboard/datos no trajo \\"porcentajes\\":", data);
 
+    pintarSelectorCuentas(data.cuentas);
+
     const visitasAg = data.visitasAgendar || {};
     document.getElementById("dashVisitasAgendar").textContent = visitasAg.total ?? 0;
     document.getElementById("dashVisitasAnuncio").textContent = (visitasAg.deAnuncio ?? 0) + " desde anuncios";
-    document.getElementById("subVisitasAgendar").textContent = visitasAg.desde
+    document.getElementById("subVisitasAgendar").textContent = (visitasAg.desde
       ? "Contador propio (sin píxel ni cookies), activo desde " + new Date(visitasAg.desde).toLocaleDateString("es-MX", { day: "numeric", month: "short" })
-      : "Contador propio (sin píxel ni cookies): todavía sin visitas registradas";
+      : "Contador propio (sin píxel ni cookies): todavía sin visitas registradas")
+      + (data.cuentaFiltrada ? " · de todas las cuentas (la web no distingue cuenta)" : "");
     document.getElementById("dashCash").textContent = formatearMoneda(data.cashCollected);
     document.getElementById("dashTotal").textContent = data.total ?? 0;
     document.getElementById("dashCalifica").textContent = data.totalCalifica ?? 0;
@@ -12521,6 +12596,13 @@ ${estilosBase()}
     periodoActual = { desde, hasta };
     actualizarInfoPeriodo();
     cargarDashboard();
+  });
+
+  document.getElementById("selectCuentaDash").addEventListener("change", (e) => {
+    cuentaDash = e.target.value || "";
+    try { localStorage.setItem("dash_filtro_cuenta", cuentaDash); } catch(err) {}
+    cargarDashboard();
+    cargarAnuncios(); // los resultados por anuncio también se filtran por cuenta
   });
 
   cargarEtiquetasDisponibles().then(cargarDashboard);
