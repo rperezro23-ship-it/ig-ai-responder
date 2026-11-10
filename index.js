@@ -15027,6 +15027,7 @@ ${estilosBase()}
         <div class="chat-filtros-fila">
           <select id="selectCuentaChats" title="Elige de qué cuenta de Instagram quieres ver los chats"></select>
           <select id="selectFiltroChats" title="Elige qué tipo de chats quieres ver"></select>
+          <button type="button" class="btn-mini" id="btnHerramientas" aria-haspopup="true" aria-expanded="false" title="Resumen, recuperar chats y exportar" style="flex:0 0 auto; padding:8px 10px; font-size:12.5px;">🛠 ▾</button>
         </div>
         <div class="chat-tabs">
           <div class="chat-tab active" id="tabTodas" data-filtro="todas" title="Todas">Todas <span class="count" id="countTodas"></span></div>
@@ -15052,18 +15053,46 @@ ${estilosBase()}
             Excluir quienes ya agendaron
           </label>
         </div>
-        <div class="chat-toolbar">
-          <select id="segmentoReporteDolores" class="select-mini" title="Segmento a analizar en el resumen de dolores/obstáculos">
-            <option value="todos">Todos</option>
-            <option value="califica">✅ Califican</option>
-            <option value="nocalifica">🚫 No califican</option>
-            <option value="agendo">📅 Agendaron (confirmado)</option>
-            <option value="enlace">🔗 Enlace enviado</option>
-          </select>
-          <button type="button" class="btn-mini" id="btnReporteDolores" title="Analiza tus conversaciones y descarga un CSV con las frecuencias de dolores y obstáculos que mencionaron tus leads.">📊 Resumen</button>
-          <button type="button" class="btn-mini" id="btnRecuperarChats" title="Toma el control de los chats recientes que otra app (ej. ManyChat) tenía, y el bot solo escribe en los que tienen un mensaje del lead sin responder.">🔓 Recuperar chats</button>
-          <button type="button" class="btn-mini" id="btnRecuperarUsuario" title="Busca UN chat por su nombre de usuario de Instagram, te dice cuándo escribió y si está sin responder, y lo recupera.">🔎 Recuperar un usuario</button>
-          <div class="chat-export" id="chatExportWrap" style="display:none;">
+        <!-- Panel "Herramientas": agrupa Resumen, Recuperar chats, Recuperar un usuario y las exportaciones.
+             Se abre desde el botón 🛠 de la fila de filtros (arriba) y se posiciona con JS. -->
+        <style>
+          .herramientas-panel{ display:none; position:fixed; z-index:1000; width:300px; max-width:calc(100vw - 20px);
+            background:var(--surface-2, #12161d); border:1px solid var(--border); border-radius:12px;
+            padding:12px; box-shadow:0 12px 34px rgba(0,0,0,.45); }
+          .herramientas-panel.abierto{ display:block; }
+          .herramientas-titulo{ font-family:var(--mono); font-size:10.5px; letter-spacing:.12em; text-transform:uppercase;
+            color:var(--muted); margin:0 0 6px; }
+          .herramientas-grupo{ margin:0 0 12px; }
+          .herramientas-grupo:last-child{ margin-bottom:0; }
+          .herramientas-fila{ display:flex; gap:6px; align-items:center; }
+          .herramientas-fila .select-mini{ flex:1 1 0; min-width:0; font-size:12px; padding:6px 6px; }
+          .herramientas-panel .btn-mini{ width:100%; justify-content:flex-start; font-size:12.5px; padding:8px 10px; margin:0 0 6px;
+            border-radius:8px; overflow:visible; white-space:normal; text-align:left; box-sizing:border-box; }
+          .herramientas-panel .herramientas-fila .btn-mini{ width:auto; margin:0; white-space:nowrap; }
+          .herramientas-panel .btn-mini:last-child{ margin-bottom:0; }
+          #btnHerramientas.ocupado::after{ content:" ⏳"; }
+        </style>
+        <div class="herramientas-panel" id="herramientasPanel">
+          <div class="herramientas-grupo">
+            <div class="herramientas-titulo">Análisis</div>
+            <div class="herramientas-fila">
+              <select id="segmentoReporteDolores" class="select-mini" title="Segmento a analizar en el resumen de dolores/obstáculos">
+                <option value="todos">Todos</option>
+                <option value="califica">✅ Califican</option>
+                <option value="nocalifica">🚫 No califican</option>
+                <option value="agendo">📅 Agendaron (confirmado)</option>
+                <option value="enlace">🔗 Enlace enviado</option>
+              </select>
+              <button type="button" class="btn-mini" id="btnReporteDolores" title="Analiza tus conversaciones y descarga un CSV con las frecuencias de dolores y obstáculos que mencionaron tus leads.">📊 Resumen</button>
+            </div>
+          </div>
+          <div class="herramientas-grupo">
+            <div class="herramientas-titulo">Recuperar</div>
+            <button type="button" class="btn-mini" id="btnRecuperarChats" title="Toma el control de los chats recientes que otra app (ej. ManyChat) tenía, y el bot solo escribe en los que tienen un mensaje del lead sin responder.">🔓 Recuperar chats</button>
+            <button type="button" class="btn-mini" id="btnRecuperarUsuario" title="Busca UN chat por su nombre de usuario de Instagram, te dice cuándo escribió y si está sin responder, y lo recupera.">🔎 Recuperar un usuario</button>
+          </div>
+          <div class="herramientas-grupo chat-export" id="chatExportWrap" style="display:none;">
+            <div class="herramientas-titulo">Exportar</div>
             <a id="btnExportar" href="#" class="btn-mini">⬇ CSV</a>
             <a id="btnExportarCompleto" href="/exportar/chats-completos.json" class="btn-mini" title="Descarga TODOS los chats con todos sus mensajes en un solo archivo (para analizarlos)">⬇ Chats completos</a>
           </div>
@@ -15327,7 +15356,7 @@ ${estilosBase()}
     };
 
     const total = totales[filtroActual] ?? 0;
-    wrap.style.display = "inline-block";
+    wrap.style.display = "block";
 
     let href = "/exportar/leads.csv?filtro=" + encodeURIComponent(filtroActual);
     // Multi-cuenta: el CSV respeta la cuenta elegida en el menú.
@@ -16518,6 +16547,47 @@ ${estilosBase()}
     const tab = document.querySelector('.chat-tab[data-filtro="' + e.target.value + '"]');
     if(tab) tab.click();
   });
+
+  // Panel "🛠 Herramientas": agrupa Resumen, Recuperar chats, Recuperar un
+  // usuario y las exportaciones (los botones son los mismos de siempre, con sus
+  // mismos ids y acciones; solo cambió dónde se muestran).
+  const panelHerramientas = document.getElementById("herramientasPanel");
+  const btnHerramientas = document.getElementById("btnHerramientas");
+  function cerrarHerramientas(){
+    panelHerramientas.classList.remove("abierto");
+    btnHerramientas.setAttribute("aria-expanded", "false");
+  }
+  function abrirHerramientas(){
+    const r = btnHerramientas.getBoundingClientRect();
+    let left = Math.min(r.left, window.innerWidth - 310);
+    if(left < 10) left = 10;
+    panelHerramientas.style.left = left + "px";
+    panelHerramientas.style.top = (r.bottom + 6) + "px";
+    panelHerramientas.classList.add("abierto");
+    btnHerramientas.setAttribute("aria-expanded", "true");
+  }
+  btnHerramientas.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if(panelHerramientas.classList.contains("abierto")) cerrarHerramientas(); else abrirHerramientas();
+  });
+  document.addEventListener("click", (e) => {
+    if(!panelHerramientas.contains(e.target) && e.target !== btnHerramientas) cerrarHerramientas();
+  });
+  document.addEventListener("keydown", (e) => { if(e.key === "Escape") cerrarHerramientas(); });
+  // Al pulsar una acción del panel (un botón o un enlace, no el selector) se cierra.
+  panelHerramientas.addEventListener("click", (e) => {
+    if(e.target.closest("button, a")) setTimeout(cerrarHerramientas, 0);
+  });
+  // Mientras una de esas acciones está trabajando (el botón se deshabilita),
+  // el botón 🛠 muestra un ⏳ para que se vea aunque el panel esté cerrado.
+  (function(){
+    const botones = ["btnReporteDolores", "btnRecuperarChats", "btnRecuperarUsuario"].map(id => document.getElementById(id));
+    const marcar = () => btnHerramientas.classList.toggle("ocupado", botones.some(b => b.disabled));
+    if(typeof MutationObserver !== "undefined"){
+      const obs = new MutationObserver(marcar);
+      botones.forEach(b => obs.observe(b, { attributes: true, attributeFilter: ["disabled"] }));
+    }
+  })();
 
   async function cargarConversaciones(){
     const data = await llamarGET("/conversaciones");
