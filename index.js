@@ -15013,16 +15013,21 @@ ${estilosBase()}
           <span id="btnLimpiarFecha" class="chat-search-limpiar" style="position:static; display:none; cursor:pointer;" title="Quitar filtro de fecha">✕</span>
           <span id="filtroFechaResumen" style="font-size:12.5px; color:var(--muted);"></span>
         </div>
-        <!-- Selector de cuenta (solo aparece si hay 2 o más cuentas conectadas) -->
+        <!-- Filtros compactos: cuenta (solo con 2+ cuentas) y tipo de chat, como menús desplegables -->
         <style>
-          #cuentasFiltro{ display:none; gap:6px; flex-wrap:wrap; align-items:center; margin:0 0 10px; }
-          .cuenta-pill{ border:1px solid var(--border); background:var(--surface-3); color:var(--muted); border-radius:999px;
-            padding:5px 12px; font-size:12.5px; cursor:pointer; font-family:inherit; }
-          .cuenta-pill:hover{ color:#fff; }
-          .cuenta-pill.active{ background:#3FC7E8; border-color:#3FC7E8; color:#06202A; font-weight:600; }
-          .cuenta-pill .n{ opacity:.75; margin-left:4px; }
+          .chat-filtros-fila{ display:flex; gap:8px; padding:8px 10px; border-bottom:1px solid var(--border); flex-shrink:0; align-items:center; }
+          .chat-filtros-fila select{ flex:1 1 0; min-width:0; background:var(--surface-3); color:var(--text); border:1px solid var(--border);
+            border-radius:9px; padding:8px 10px; font-size:13px; font-family:inherit; cursor:pointer; }
+          #selectCuentaChats{ display:none; }
+          /* Los botones de pestaña originales siguen existiendo (los usa el código), pero ya no se ven: los reemplaza el menú. */
+          .chat-tabs .chat-tab{ display:none !important; }
+          .chat-tabs{ padding:0 10px; border-bottom:0; flex-wrap:wrap; }
+          .chat-tabs > select, .chat-tabs > label{ margin:0 0 8px; }
         </style>
-        <div id="cuentasFiltro" title="Elige de qué cuenta de Instagram quieres ver los chats"></div>
+        <div class="chat-filtros-fila">
+          <select id="selectCuentaChats" title="Elige de qué cuenta de Instagram quieres ver los chats"></select>
+          <select id="selectFiltroChats" title="Elige qué tipo de chats quieres ver"></select>
+        </div>
         <div class="chat-tabs">
           <div class="chat-tab active" id="tabTodas" data-filtro="todas" title="Todas">Todas <span class="count" id="countTodas"></span></div>
           <div class="chat-tab tab-califica" id="tabCalifica" data-filtro="califica" title="Califica">✅ <span class="count" id="countCalifica"></span></div>
@@ -15289,6 +15294,7 @@ ${estilosBase()}
     document.getElementById("countEnlace").textContent = totalEnlaceMostrado;
     document.getElementById("countCompro").textContent = totalCompro;
     document.getElementById("countSeguimiento").textContent = totalSeguimientoMostrado;
+    actualizarSelectFiltroChats();
     actualizarBotonExportar({
       todas: conversaciones.length, handoff: totalHandoff, califica: totalCalifica,
       nocalifica: totalNoCalifica, agendo: totalAgendo, enlace: totalEnlaceMostrado, compro: totalCompro, seguimiento: totalSeguimientoMostrado, porresponder: totalPorResponder
@@ -15324,6 +15330,8 @@ ${estilosBase()}
     wrap.style.display = "inline-block";
 
     let href = "/exportar/leads.csv?filtro=" + encodeURIComponent(filtroActual);
+    // Multi-cuenta: el CSV respeta la cuenta elegida en el menú.
+    if(filtroCuenta) href += "&cuenta=" + encodeURIComponent(filtroCuenta);
     // Si estás en Seguimiento o en Enlace Enviado y elegiste un umbral de
     // antigüedad (ej. "hace 3+ días"), se manda también aquí — así el
     // Excel/CSV descargado respeta exactamente la misma selección que
@@ -16451,35 +16459,65 @@ ${estilosBase()}
     conversaciones = filtroCuenta ? conversacionesTodas.filter(c => c.cuenta_id === filtroCuenta) : conversacionesTodas;
   }
 
+  // Menú desplegable de cuenta (solo aparece con 2 o más cuentas conectadas).
   function renderFiltroCuentas(){
-    const cont = document.getElementById("cuentasFiltro");
-    if(!cont) return;
-    if(cuentasIg.length < 2){ cont.style.display = "none"; return; }
-    cont.style.display = "flex";
+    const sel = document.getElementById("selectCuentaChats");
+    if(!sel) return;
+    if(cuentasIg.length < 2){ sel.style.display = "none"; return; }
+    sel.style.display = "block";
     const contar = (id) => conversacionesTodas.filter(c => c.cuenta_id === id).length;
-    let html = '<button type="button" class="cuenta-pill' + (!filtroCuenta ? " active" : "") + '" data-cuenta="">Todas las cuentas <span class="n">' + conversacionesTodas.length + '</span></button>';
+    let html = '<option value="">Todas las cuentas (' + conversacionesTodas.length + ')</option>';
     cuentasIg.forEach(c => {
-      html += '<button type="button" class="cuenta-pill' + (filtroCuenta === c.ig_id ? " active" : "") + '" data-cuenta="' + escapar(c.ig_id) + '">@' + escapar(c.username || "cuenta") + ' <span class="n">' + contar(c.ig_id) + '</span></button>';
+      html += '<option value="' + escapar(c.ig_id) + '">@' + escapar(c.username || "cuenta") + ' (' + contar(c.ig_id) + ')</option>';
     });
-    cont.innerHTML = html;
-    cont.querySelectorAll(".cuenta-pill").forEach(b => {
-      b.addEventListener("click", () => {
-        filtroCuenta = b.getAttribute("data-cuenta") || "";
-        try { localStorage.setItem("chats_filtro_cuenta", filtroCuenta); } catch(e) {}
-        aplicarFiltroCuenta();
-        renderFiltroCuentas();
-        // Si el chat abierto no es de la cuenta elegida, se cierra para no mezclar.
-        if(senderSeleccionado && !conversaciones.some(c => c.sender_id === senderSeleccionado)){
-          senderSeleccionado = null;
-          mensajesMostrados = [];
-          renderHead();
-          actualizarInputBar();
-          document.getElementById("chatMensajes").innerHTML = '<div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>';
-        }
-        renderLista();
-      });
-    });
+    sel.innerHTML = html;
+    sel.value = filtroCuenta;
   }
+
+  document.getElementById("selectCuentaChats").addEventListener("change", (e) => {
+    filtroCuenta = e.target.value || "";
+    try { localStorage.setItem("chats_filtro_cuenta", filtroCuenta); } catch(err) {}
+    aplicarFiltroCuenta();
+    renderFiltroCuentas();
+    // Si el chat abierto no es de la cuenta elegida, se cierra para no mezclar.
+    if(senderSeleccionado && !conversaciones.some(c => c.sender_id === senderSeleccionado)){
+      senderSeleccionado = null;
+      mensajesMostrados = [];
+      renderHead();
+      actualizarInputBar();
+      document.getElementById("chatMensajes").innerHTML = '<div class="chat-empty">Elige una conversación de la izquierda para ver los mensajes.</div>';
+    }
+    renderLista();
+  });
+
+  // Menú desplegable del tipo de chat (Todas, Califican, ...). Reemplaza a la
+  // fila de botones: cada opción "pulsa" por debajo el botón original oculto
+  // (data-filtro), así toda la lógica de siempre (contadores, exportar, filtros
+  // de días, etc.) sigue funcionando igual.
+  const OPCIONES_FILTRO_CHATS = [
+    ["todas", "Todas", "countTodas"],
+    ["califica", "✅ Califican", "countCalifica"],
+    ["nocalifica", "🚫 No califican", "countNoCalifica"],
+    ["agendo", "📅 Agendaron", "countAgendo"],
+    ["enlace", "🔗 Enlace enviado", "countEnlace"],
+    ["compro", "💰 Compraron", "countCompro"],
+    ["handoff", "⏰ Handoff (+24h)", "countHandoff"],
+    ["seguimiento", "🔁 Seguimiento pendiente", "countSeguimiento"],
+    ["porresponder", "📩 Por responder", "countPorResponder"]
+  ];
+  function actualizarSelectFiltroChats(){
+    const sel = document.getElementById("selectFiltroChats");
+    if(!sel) return;
+    sel.innerHTML = OPCIONES_FILTRO_CHATS.map(o => {
+      const n = document.getElementById(o[2]).textContent;
+      return '<option value="' + o[0] + '">' + o[1] + ' (' + (n === "" ? "0" : n) + ')</option>';
+    }).join("");
+    sel.value = filtroActual;
+  }
+  document.getElementById("selectFiltroChats").addEventListener("change", (e) => {
+    const tab = document.querySelector('.chat-tab[data-filtro="' + e.target.value + '"]');
+    if(tab) tab.click();
+  });
 
   async function cargarConversaciones(){
     const data = await llamarGET("/conversaciones");
@@ -17187,6 +17225,8 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
     const filtro = req.query.filtro || "todas";
     const diasMinimos = req.query.dias ? Number(req.query.dias) : null;
     const excluirAgendo = req.query.excluir_agendo === "1";
+    // Multi-cuenta: con ?cuenta=<ig_id> solo se exportan los chats de esa cuenta.
+    const filtroCuentaCsv = await crearFiltroPorCuenta(req.query.cuenta ? String(req.query.cuenta) : "");
 
     const { data, error } = await supabase
       .from("conversaciones")
@@ -17199,7 +17239,7 @@ app.get("/exportar/leads.csv", requireAdminKey, async (req, res) => {
 
     if (error) return res.status(500).json({ error: error.message });
 
-    let filtradas = (data || []).map(c => {
+    let filtradas = (data || []).filter(c => !filtroCuentaCsv || filtroCuentaCsv(c.sender_id)).map(c => {
       const enVentana24h = c.ultimo_mensaje_usuario
         ? (Date.now() - new Date(c.ultimo_mensaje_usuario).getTime()) < VENTANA_24H_MS
         : false;
