@@ -749,6 +749,10 @@ async function procesarSeguimientosPendientesDB() {
     const { id, sender_id: senderId, paso_index: pasoIndex, tipo } = fila;
     const esEnlace = tipo === "enlace";
 
+    // Configuración por cuenta: los pasos, textos y reglas de seguimiento de
+    // esta fila son los de la cuenta de este contacto (o la general).
+    almacenConfig.enterWith({ config: await configPropiaDeContacto(senderId) });
+
     // Multi-cuenta: si el bot está apagado para la cuenta de este contacto, el
     // seguimiento se deja pendiente (se enviará cuando se vuelva a encender,
     // si todavía está dentro de la ventana de 24 h).
@@ -939,6 +943,7 @@ async function procesarSeguimientosPendientesDB() {
     }
   }
 
+  almacenConfig.enterWith({ config: null }); // se vuelve a la configuración general
   return { procesados };
 }
 
@@ -3994,7 +3999,13 @@ async function evitarRepeticion(senderId, respuesta) {
   return respuesta;
 }
 
+// Cada mensaje se procesa con la configuración de la cuenta de Instagram a la
+// que escribió ese contacto (ver conConfigDeContacto).
 async function procesarBuffer(senderId) {
+  return conConfigDeContacto(senderId, () => procesarBufferInterno(senderId));
+}
+
+async function procesarBufferInterno(senderId) {
   const buffer = buffers.get(senderId);
   if (!buffer || buffer.mensajes.length === 0) return;
 
@@ -8824,7 +8835,13 @@ app.post("/cuenta/eliminar", requireAdminKey, async (req, res) => {
 // Configuración dinámica editable desde /panel
 // ---------------------------------------------------------------
 
-let configActual = {
+// CONFIGURACIÓN POR CUENTA (multi-cuenta): "configBase" es la configuración
+// del agente ACTIVO (la general). "configActual", que es el nombre que usa todo
+// el código, es una vista: normalmente muestra configBase, pero mientras se
+// atiende a un contacto cuya cuenta de Instagram tiene asignado OTRO agente,
+// muestra la configuración de ese agente (ver conConfigDeContacto más abajo).
+// Así cada cuenta puede tener su propio prompt, etapas, seguimientos, etc.
+let configBase = {
   ai_prompt: AI_PROMPT,
   contexto_base: "",
   min_delay: MIN_DELAY_SECONDS,
@@ -8995,6 +9012,26 @@ let configActual = {
   franja_horaria_hasta: "23:00"
 };
 
+// Contexto de "qué configuración se está usando ahora mismo" (por contacto).
+const { AsyncLocalStorage } = require("async_hooks");
+const almacenConfig = new AsyncLocalStorage();
+function fuenteDeConfig() {
+  const contexto = almacenConfig.getStore();
+  return (contexto && contexto.config) || configBase;
+}
+const configActual = new Proxy({}, {
+  get(_, clave) { return fuenteDeConfig()[clave]; },
+  set(_, clave, valor) { fuenteDeConfig()[clave] = valor; return true; },
+  has(_, clave) { return clave in fuenteDeConfig(); },
+  deleteProperty(_, clave) { delete fuenteDeConfig()[clave]; return true; },
+  ownKeys() { return Reflect.ownKeys(fuenteDeConfig()); },
+  getOwnPropertyDescriptor(_, clave) {
+    const d = Object.getOwnPropertyDescriptor(fuenteDeConfig(), clave);
+    if (d) d.configurable = true;
+    return d;
+  }
+});
+
 // Cliente de OpenAI: se reconstruye cada vez que cambia configActual.openai_api_key
 // (al cargar desde Supabase al arrancar, o al guardar una nueva desde /panel).
 let openaiClient = new OpenAI({ apiKey: configActual.openai_api_key || undefined });
@@ -9116,11 +9153,11 @@ async function cargarConfigDesdeDB() {
 
       console.log(`✅ Migración automática: se creó "Agente 1" a partir de la configuración existente.`);
       agenteActivoId = nuevoAgente.id;
-      configActual = { ...CONFIG_POR_DEFECTO, ...(nuevoAgente.config || {}) };
+      configBase = { ...CONFIG_POR_DEFECTO, ...(nuevoAgente.config || {}) };
     } else {
       const activo = agentes.find(a => a.activo) || agentes[0];
       agenteActivoId = activo.id;
-      configActual = { ...CONFIG_POR_DEFECTO, ...(activo.config || {}) };
+      configBase = { ...CONFIG_POR_DEFECTO, ...(activo.config || {}) };
       console.log(`✅ Configuración cargada desde Supabase — agente activo: "${activo.nombre}" (id ${activo.id}).`);
     }
 
@@ -9200,11 +9237,75 @@ async function guardarConfigDB(nuevaConfig, agenteId) {
   }
 
   if (esElActivo) {
-    configActual = configFusionada;
+    configBase = configFusionada;
     actualizarClienteOpenAI();
   }
+  configsDeAgentesCache.clear(); // por si alguna cuenta usa el agente que se acaba de guardar
 
   return configFusionada;
+}
+
+// ---------------------------------------------------------------
+// CONFIGURACIÓN POR CUENTA: cada cuenta de Instagram conectada puede tener
+// asignado un agente ("agente_id" dentro de la cuenta). Si lo tiene, el bot
+// atiende a los contactos de esa cuenta con la configuración de ESE agente
+// (prompt, etapas, seguimientos, disparadores...). Si no, usa la del agente
+// activo (la general), como siempre.
+// ---------------------------------------------------------------
+const configsDeAgentesCache = new Map(); // id -> { config, hasta }
+const CONFIG_AGENTE_CACHE_MS = 20000;
+
+async function obtenerConfigDeAgente(agenteId) {
+  const id = Number(agenteId);
+  if (!agenteId || Number.isNaN(id) || id === agenteActivoId) return null; // el activo ya es configBase
+  const enCache = configsDeAgentesCache.get(id);
+  if (enCache && Date.now() < enCache.hasta) return enCache.config;
+
+  const { data: agente, error } = await supabase
+    .from("agentes")
+    .select("id, nombre, config")
+    .eq("id", id)
+    .maybeSingle();
+  if (error || !agente) {
+    if (error) console.error(`❌ Error leyendo el agente ${id} asignado a una cuenta (se usa la configuración general):`, error.message);
+    return enCache ? enCache.config : null; // agente borrado o error: se usa la general
+  }
+
+  // Misma preparación que al activar un agente (credenciales compartidas incluidas).
+  const config = fusionarConfigDeAgente(agente.config, configBase);
+  config.seguimientos = [...(config.seguimientos || [])].sort((a, b) => a.horas - b.horas);
+  config.seguimientos_enlace = [...(config.seguimientos_enlace || [])].sort((a, b) => a.horas - b.horas);
+  config.etapas = normalizarEtapas(Array.isArray(config.etapas) ? config.etapas : []);
+  config.disparadores = normalizarDisparadores(config.disparadores || []);
+  if (!Array.isArray(config.transiciones_generales)) config.transiciones_generales = [];
+  configsDeAgentesCache.set(id, { config, hasta: Date.now() + CONFIG_AGENTE_CACHE_MS });
+  return config;
+}
+
+// La configuración propia de la cuenta de este contacto, o null si usa la general.
+async function configPropiaDeContacto(senderId) {
+  try {
+    const cuenta = await obtenerCuentaDeContacto(senderId);
+    if (!cuenta || !cuenta.agente_id) return null;
+    return await obtenerConfigDeAgente(cuenta.agente_id);
+  } catch (err) {
+    console.error("❌ Error buscando la configuración de la cuenta de un contacto (se usa la general):", err.message);
+    return null;
+  }
+}
+
+// Ejecuta "fn" usando la configuración de la cuenta de este contacto.
+async function conConfigDeContacto(senderId, fn) {
+  const config = await configPropiaDeContacto(senderId);
+  return almacenConfig.run({ config: config || null }, fn);
+}
+
+async function asignarAgenteACuenta(igId, agenteId) {
+  const lista = await obtenerCuentasConectadas();
+  const cuenta = lista.find(x => cuentaCoincideConId(x, igId));
+  if (!cuenta) return false;
+  const valor = (agenteId === null || agenteId === undefined || agenteId === "") ? null : Number(agenteId);
+  return await guardarCuentaConectada({ ...cuenta, agente_id: Number.isNaN(valor) ? null : valor });
 }
 
 cargarConfigDesdeDB();
@@ -9533,6 +9634,28 @@ app.get("/bot/estado", requireAdminKey, async (req, res) => {
   res.json({ activo, estado: activo ? "on" : "off", cuentas });
 });
 
+// Asigna a una cuenta conectada el agente (configuración) con el que el bot la
+// atiende. body: { ig_id, agente_id } — agente_id vacío o null = usar la
+// configuración general (el agente activo).
+app.post("/cuenta/agente", requireAdminKey, async (req, res) => {
+  try {
+    const { ig_id: igId, agente_id: agenteId } = req.body || {};
+    if (!igId) return res.status(400).json({ error: "Falta ig_id." });
+    let nombreAgente = null;
+    if (agenteId !== null && agenteId !== undefined && agenteId !== "") {
+      const { data: agente } = await supabase.from("agentes").select("id, nombre").eq("id", Number(agenteId)).maybeSingle();
+      if (!agente) return res.status(404).json({ error: "Ese agente no existe." });
+      nombreAgente = agente.nombre;
+    }
+    const ok = await asignarAgenteACuenta(igId, agenteId);
+    if (!ok) return res.status(404).json({ error: "Esa cuenta no está conectada." });
+    configsDeAgentesCache.clear();
+    res.json({ ok: true, agente_id: nombreAgente ? Number(agenteId) : null, agente_nombre: nombreAgente });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Enciende/apaga el bot SOLO para una cuenta conectada (body: { ig_id, activo }).
 // El interruptor general (/bot/encender, /bot/apagar) sigue mandando sobre todas.
 app.post("/bot/cuenta", requireAdminKey, async (req, res) => {
@@ -9839,9 +9962,10 @@ app.post("/agentes/:id/activar", requireAdminKey, async (req, res) => {
     // estaba activo antes, para que activar un agente "vacío" de verdad
     // deje al bot sin prompt/etapas/disparadores — no que arrastre los del
     // agente anterior por combinar con un objeto vacío.
-    const configPrevia = configActual;
+    const configPrevia = configBase;
     agenteActivoId = id;
-    configActual = fusionarConfigDeAgente(agente.config, configPrevia);
+    configBase = fusionarConfigDeAgente(agente.config, configPrevia);
+    configsDeAgentesCache.clear();
     configActual.etapas = normalizarEtapas(configActual.etapas || []);
     configActual.disparadores = normalizarDisparadores(configActual.disparadores || []);
     actualizarClienteOpenAI();
@@ -12980,6 +13104,11 @@ ${estilosBase()}
       </div>
     </div>
 
+    <div class="agente-bar" id="cuentaConfigBar" style="display:none; margin-bottom:10px;">
+      <span class="agente-bar-label">📱 Cuenta:</span>
+      <select id="selectorCuentaConfig" title="Elige la cuenta de Instagram cuya configuración quieres ver o cambiar" style="background:var(--surface-3); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:7px 10px; font-size:14px; font-family:inherit; min-width:240px;"></select>
+      <span class="agente-bar-hint" id="cuentaConfigHint">Cada cuenta puede tener su propia configuración (prompt, etapas, seguimientos…). Lo que cambies aquí solo se aplica a la cuenta elegida.</span>
+    </div>
     <div class="agente-bar" id="agenteBar">
       <span class="agente-bar-label">🤖 Agente:</span>
       <select id="selectorAgente"></select>
@@ -14733,10 +14862,84 @@ ${estilosBase()}
   let listaAgentesCache = [];
   let agenteActivoIdCache = null;
 
+  // --- Configuración por cuenta (multi-cuenta) ---
+  // Cada cuenta de Instagram puede tener asignado un agente propio. El selector
+  // "Cuenta" cambia qué agente se está editando; si la cuenta todavía usa la
+  // configuración general, ofrece crearle una propia (copia de la general).
+  let cuentasConfigCache = [];
+
+  function cuentasQueUsanAgente(idAgente){
+    return cuentasConfigCache.filter(c => Number(c.agente_id) === Number(idAgente));
+  }
+
+  function renderSelectorCuentaConfig(){
+    const barra = document.getElementById("cuentaConfigBar");
+    const sel = document.getElementById("selectorCuentaConfig");
+    if(cuentasConfigCache.length < 2){ barra.style.display = "none"; return; }
+    barra.style.display = "flex";
+    const existeAgente = (id) => listaAgentesCache.some(x => x.id === Number(id));
+    let html = '<option value="">Configuración general (cuentas sin configuración propia)</option>';
+    cuentasConfigCache.forEach(c => {
+      const propio = c.agente_id && existeAgente(c.agente_id);
+      html += '<option value="' + String(c.ig_id).replace(/"/g, "") + '">@' + String(c.username || "cuenta").replace(/</g, "&lt;") + (propio ? " — configuración propia" : " — usa la general") + '</option>';
+    });
+    sel.innerHTML = html;
+    // Se marca la cuenta que usa el agente que se está editando (si hay exactamente una).
+    const usan = cuentasQueUsanAgente(agenteEnEdicionId);
+    sel.value = usan.length === 1 ? String(usan[0].ig_id) : "";
+  }
+
+  async function cargarCuentasConfig(){
+    const data = await llamarGET("/cuentas/lista");
+    cuentasConfigCache = (data && Array.isArray(data.cuentas)) ? data.cuentas : [];
+    renderSelectorCuentaConfig();
+    actualizarUIAgente();
+  }
+
+  document.getElementById("selectorCuentaConfig").addEventListener("change", async (e) => {
+    const igId = e.target.value;
+    if(!igId){
+      // Configuración general = el agente que está en vivo.
+      agenteEnEdicionId = agenteActivoIdCache;
+    } else {
+      const cuenta = cuentasConfigCache.find(c => String(c.ig_id) === igId);
+      const tieneAgente = cuenta && cuenta.agente_id && listaAgentesCache.some(a => a.id === Number(cuenta.agente_id));
+      if(tieneAgente){
+        agenteEnEdicionId = Number(cuenta.agente_id);
+      } else {
+        const usuario = "@" + ((cuenta && cuenta.username) || "cuenta");
+        if(!confirm("La cuenta " + usuario + " usa ahora la configuración general.\\n\\n¿Crear una configuración propia para " + usuario + "? Empieza como una copia de la general, y lo que cambies después solo se aplicará a esa cuenta.")){
+          renderSelectorCuentaConfig();
+          return;
+        }
+        const creado = await llamarPOST("/agentes", { nombre: "Cuenta " + usuario, clonar_de: agenteActivoIdCache });
+        if(!creado || !creado.agente){ alert("No se pudo crear la configuración: " + ((creado && creado.error) || "error desconocido")); renderSelectorCuentaConfig(); return; }
+        const asignado = await llamarPOST("/cuenta/agente", { ig_id: igId, agente_id: creado.agente.id });
+        if(!asignado || !asignado.ok){ alert("Se creó la configuración, pero no se pudo asignar a la cuenta: " + ((asignado && asignado.error) || "error desconocido")); }
+        const lista = await llamarGET("/agentes");
+        if(lista && Array.isArray(lista.agentes)){ listaAgentesCache = lista.agentes; agenteActivoIdCache = lista.agente_activo_id; }
+        agenteEnEdicionId = creado.agente.id;
+      }
+    }
+    renderSelectorAgentes();
+    await cargarCuentasConfig();
+    await cargarConfig(agenteEnEdicionId);
+  });
+
   function actualizarUIAgente(){
     const esElActivo = agenteEnEdicionId === agenteActivoIdCache;
+    const usan = cuentasQueUsanAgente(agenteEnEdicionId);
     document.getElementById("badgeAgenteActivo").style.display = esElActivo ? "inline-flex" : "none";
-    document.getElementById("btnActivarAgente").style.display = esElActivo ? "none" : "inline-block";
+    // Un agente asignado a una cuenta ya se aplica a esa cuenta: no hay que "activarlo".
+    document.getElementById("btnActivarAgente").style.display = (esElActivo || usan.length > 0) ? "none" : "inline-block";
+    const hint = document.getElementById("cuentaConfigHint");
+    if(hint){
+      hint.textContent = usan.length > 0
+        ? "Esta configuración se aplica a: " + usan.map(c => "@" + (c.username || "cuenta")).join(", ") + ". Al guardar, el bot la usa de inmediato en esa cuenta."
+        : (esElActivo
+            ? "Configuración general: la usan todas las cuentas que no tienen una propia."
+            : "Este agente no está asignado a ninguna cuenta ni está en vivo.");
+    }
   }
 
   function renderSelectorAgentes(){
@@ -14756,12 +14959,14 @@ ${estilosBase()}
 
     renderSelectorAgentes();
     actualizarUIAgente();
+    cargarCuentasConfig(); // selector de cuenta (configuración por cuenta)
     await cargarConfig(agenteEnEdicionId);
   }
 
   document.getElementById("selectorAgente").addEventListener("change", async (e) => {
     agenteEnEdicionId = Number(e.target.value);
     actualizarUIAgente();
+    renderSelectorCuentaConfig();
     await cargarConfig(agenteEnEdicionId);
   });
 
