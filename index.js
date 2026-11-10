@@ -876,7 +876,12 @@ async function procesarSeguimientosPendientesDB() {
     // y el paso 0 del enlace no compartan el mismo contador de rotación.
     const claveRotacion = `${tipo}_${pasoIndex}`;
     const rotacion = conv.rotacion || {};
-    const indiceActual = rotacion[claveRotacion] || 0;
+    // Variación entre leads: la PRIMERA vez que a una conversación le toca este
+    // paso, no empieza siempre por la variante 1 (así no todos reciben el mismo
+    // primer texto), sino por una que depende de su id; después rota normal.
+    const indiceActual = Number.isInteger(rotacion[claveRotacion])
+      ? rotacion[claveRotacion]
+      : (hashTexto(senderId) + pasoIndex) % pasoConfig.mensajes.length;
     let mensaje = pasoConfig.mensajes[indiceActual % pasoConfig.mensajes.length];
     rotacion[claveRotacion] = (indiceActual + 1) % pasoConfig.mensajes.length;
 
@@ -3844,6 +3849,151 @@ async function obtenerMemoriaLeadQueRegresa(senderId, conv, etapaConfig) {
   }
 }
 
+// ---------------------------------------------------------------
+// VARIACIÓN DE MENSAJES — para no mandar siempre lo mismo ni en el mismo orden
+// (Meta puede penalizar mensajes casi idénticos enviados a muchas personas).
+//
+// 1) ESTILO Y ORDEN POR CONVERSACIÓN: cada lead recibe (de forma estable, según
+//    su id) un estilo de escritura y un orden de los datos a preguntar. Se
+//    inserta en el prompt SOLO si el prompt contiene el marcador
+//    {{ESTILO_Y_ORDEN}}; sin ese marcador no cambia nada (así no choca con un
+//    prompt antiguo de orden fijo).
+// 2) CONTROL ANTI-REPETICIÓN: antes de enviar la respuesta de la IA se compara
+//    con los últimos mensajes que mandó el bot (a cualquier persona). Si es
+//    demasiado parecida, se reescribe UNA vez con otras palabras, conservando
+//    marcadores, enlaces y cifras. Se apaga con ANTI_REPETICION=0; el umbral
+//    (0 a 1) se ajusta con UMBRAL_REPETICION (por defecto 0.55).
+// ---------------------------------------------------------------
+const ANTI_REPETICION = process.env.ANTI_REPETICION !== "0";
+const UMBRAL_REPETICION = Number(process.env.UMBRAL_REPETICION) > 0 ? Number(process.env.UMBRAL_REPETICION) : 0.55;
+const MIN_PALABRAS_REPETICION = 8;      // los mensajes más cortos no se comparan (ej. "Vale perfecto")
+const MAX_MENSAJES_RECIENTES = 80;
+const mensajesRecientesBot = [];        // { senderId, huella:Set, texto, en }
+
+const ESTILOS_CONVERSACION = [
+  { nombre: "directo",  texto: "Escribe corto y al grano: una o dos frases por mensaje, sin rodeos ni adornos." },
+  { nombre: "cercano",  texto: "Escribe cálido y cercano, como hablando con un conocido: frases sencillas y, antes de preguntar, un comentario breve sobre lo que te contó." },
+  { nombre: "calmado",  texto: "Escribe tranquilo y pausado: frases algo más largas, con una breve reflexión antes de la pregunta." },
+  { nombre: "curioso",  texto: "Escribe con curiosidad genuina: muestra interés por su caso y formula las preguntas de forma abierta, como si quisieras entenderlo mejor." }
+];
+// Órdenes permitidos de los datos (A rutina o dieta, B busca ayuda, C peso,
+// D cómo le afecta). B siempre va después de A, porque se apoya en su respuesta.
+const ORDENES_DATOS = [["A", "B", "C", "D"], ["C", "A", "B", "D"], ["A", "C", "B", "D"], ["A", "B", "D", "C"]];
+const NOMBRES_DATOS = {
+  A: "si hace alguna rutina o dieta para bajar de peso (dato A)",
+  B: "confirmar que busca ayuda porque no progresa como le gustaría o porque no sabe cómo hacerlo por su cuenta (dato B)",
+  C: "peso actual y peso al que le gustaría llegar (dato C)",
+  D: "cómo le afecta estar en ese peso: salud, energía, articulaciones, ánimo (dato D)"
+};
+
+function hashTexto(t) {
+  let h = 0;
+  const s = String(t);
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h;
+}
+
+// Texto que se inserta donde el prompt tenga el marcador {{ESTILO_Y_ORDEN}}.
+function bloqueEstiloYOrden(senderId) {
+  const h = hashTexto(senderId);
+  const estilo = ESTILOS_CONVERSACION[h % ESTILOS_CONVERSACION.length];
+  const orden = ORDENES_DATOS[Math.floor(h / 7) % ORDENES_DATOS.length];
+  const pasos = orden.map((d, i) => `${i + 1}) ${NOMBRES_DATOS[d]}`).join("; ");
+  return "ORDEN Y ESTILO DE ESTA CONVERSACIÓN\n" +
+    `Después de la edad, recoge los datos en este orden: ${pasos}. Pasa al pitch solo cuando tengas los cuatro. Si el lead ya contó alguno por su cuenta, no se lo preguntes otra vez: reconócelo y pasa al siguiente.\n` +
+    `Estilo de esta conversación (${estilo.nombre}): ${estilo.texto}`;
+}
+
+function textoPlanoParaComparar(t) {
+  return String(t || "").replace(/\[\[[^\]]*\]\]/g, " ").replace(/https?:\/\/\S+/gi, " ");
+}
+// "Huella" del mensaje: conjunto de grupos de 3 palabras seguidas (sin acentos,
+// mayúsculas ni signos). Dos mensajes con la misma plantilla comparten muchos.
+function huellaDeMensaje(t) {
+  const palabras = normalizarParaComparar(textoPlanoParaComparar(t)).replace(/[^a-z0-9ñ ]/g, " ").split(/\s+/).filter(Boolean);
+  if (palabras.length < MIN_PALABRAS_REPETICION) return null;
+  const huella = new Set();
+  for (let i = 0; i + 2 < palabras.length; i++) huella.add(palabras[i] + " " + palabras[i + 1] + " " + palabras[i + 2]);
+  return huella;
+}
+function similitudHuellas(a, b) {
+  if (!a || !b || a.size === 0 || b.size === 0) return 0;
+  let comunes = 0;
+  for (const x of a) if (b.has(x)) comunes++;
+  return comunes / (a.size + b.size - comunes);
+}
+function masParecidosAMensajesRecientes(huella, limite = 3) {
+  return mensajesRecientesBot
+    .map(m => ({ m, sim: similitudHuellas(huella, m.huella) }))
+    .sort((x, y) => y.sim - x.sim)
+    .slice(0, limite);
+}
+function registrarMensajeRecienteBot(senderId, texto) {
+  const huella = huellaDeMensaje(texto);
+  if (!huella) return;
+  mensajesRecientesBot.push({ senderId, huella, texto: textoPlanoParaComparar(texto).replace(/\s+/g, " ").trim(), en: Date.now() });
+  while (mensajesRecientesBot.length > MAX_MENSAJES_RECIENTES) mensajesRecientesBot.shift();
+}
+// Una reescritura solo se acepta si conserva marcadores, enlaces, cifras y la
+// pregunta final: así nunca se rompe una etapa ni se cambia un dato.
+function reescrituraEsValida(original, nuevo) {
+  if (!nuevo || !nuevo.trim()) return false;
+  const marcadores = (t) => (String(t).match(/\[\[[^\]]*\]\]/g) || []).join("|");
+  if (marcadores(original) !== marcadores(nuevo)) return false;
+  const urls = (t) => (String(t).match(/https?:\/\/\S+/gi) || []).map(u => u.replace(/[.,;:!?)\]]+$/, "")).sort().join("|");
+  if (urls(original) !== urls(nuevo)) return false;
+  const numeros = String(original).replace(/https?:\/\/\S+/gi, " ").match(/\d+(?:[.,]\d+)?/g) || [];
+  const nuevoSinUrl = String(nuevo).replace(/https?:\/\/\S+/gi, " ");
+  if (!numeros.every(n => nuevoSinUrl.includes(n))) return false;
+  if (original.includes("?") && !nuevo.includes("?")) return false;
+  const ratio = nuevo.length / Math.max(original.length, 1);
+  if (ratio < 0.5 || ratio > 1.6) return false;
+  return true;
+}
+
+async function evitarRepeticion(senderId, respuesta) {
+  if (!ANTI_REPETICION || !respuesta) return respuesta;
+  const huella = huellaDeMensaje(respuesta);
+  if (!huella) return respuesta; // muy corto: no se compara ni se guarda
+  const parecidos = masParecidosAMensajesRecientes(huella);
+  const mejor = parecidos[0];
+  if (!mejor || mejor.sim < UMBRAL_REPETICION) {
+    registrarMensajeRecienteBot(senderId, respuesta);
+    return respuesta;
+  }
+  console.log(`♻️ Anti-repetición: la respuesta a ${senderId} se parece un ${Math.round(mejor.sim * 100)}% a un mensaje reciente — se reescribe con otras palabras.`);
+  try {
+    const lista = parecidos.filter(p => p.sim >= UMBRAL_REPETICION * 0.8).map(p => "- " + p.m.texto.slice(0, 300)).join("\n");
+    const resp = await openaiClient.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.95,
+      max_tokens: 300,
+      messages: [
+        { role: "system", content:
+          "Eres un editor de mensajes de chat. Reescribe el mensaje con OTRAS palabras y OTRA estructura de frases, manteniendo exactamente la misma intención, el mismo tono, la misma información y la misma pregunta final. " +
+          "Reglas: no uses emojis ni comillas; no cambies ninguna cifra, nombre ni dato; conserva TAL CUAL los marcadores entre dobles corchetes y los enlaces; no agregues ni quites información; " +
+          "no empieces con la misma palabra de apertura que los mensajes de ejemplo; devuelve SOLO el mensaje reescrito, sin explicaciones." },
+        { role: "user", content: `Mensaje a reescribir:\n${respuesta}\n\nMensajes recientes demasiado parecidos, que NO debes imitar:\n${lista}` }
+      ]
+    });
+    const nuevo = resp.choices[0]?.message?.content?.trim();
+    if (nuevo && reescrituraEsValida(respuesta, nuevo)) {
+      const huellaNueva = huellaDeMensaje(nuevo);
+      const simNueva = huellaNueva ? (masParecidosAMensajesRecientes(huellaNueva, 1)[0]?.sim || 0) : 0;
+      if (simNueva < mejor.sim) {
+        console.log(`♻️ Anti-repetición: reescritura aceptada (parecido ${Math.round(mejor.sim * 100)}% -> ${Math.round(simNueva * 100)}%): "${nuevo}"`);
+        registrarMensajeRecienteBot(senderId, nuevo);
+        return nuevo;
+      }
+    }
+    console.warn(`♻️ Anti-repetición: la reescritura no fue válida o no mejoró — se manda la respuesta original.`);
+  } catch (err) {
+    console.error("❌ Error en el control anti-repetición (se manda la respuesta original):", err.response?.data || err.message);
+  }
+  registrarMensajeRecienteBot(senderId, respuesta);
+  return respuesta;
+}
+
 async function procesarBuffer(senderId) {
   const buffer = buffers.get(senderId);
   if (!buffer || buffer.mensajes.length === 0) return;
@@ -4156,6 +4306,12 @@ async function procesarBuffer(senderId) {
     const reglasGenerales = configActual.contexto_base?.trim();
     let promptSistema = reglasGenerales ? `${reglasGenerales}\n\n${promptPropio}` : promptPropio;
 
+    // Variación por conversación: si el prompt trae el marcador {{ESTILO_Y_ORDEN}},
+    // se reemplaza por el estilo y el orden de datos de ESTE lead (ver arriba).
+    if (promptSistema.includes("{{ESTILO_Y_ORDEN}}")) {
+      promptSistema = promptSistema.split("{{ESTILO_Y_ORDEN}}").join(bloqueEstiloYOrden(senderId));
+    }
+
     // Si el lead dijo que ya agendó pero la verificación en vivo con
     // Calendly (arriba) NO encontró ninguna reserva a su nombre, se le
     // agrega esta nota SOLO en este turno — para que el modelo no le crea a
@@ -4302,6 +4458,10 @@ async function procesarBuffer(senderId) {
         // mejor mandar algo (aunque le falte la pregunta) que no responder.
       }
     }
+
+    // Control anti-repetición: si esta respuesta es casi igual a otras que el bot
+    // mandó hace poco (a cualquier persona), se reescribe una vez con otras palabras.
+    if (respuestaCruda) respuestaCruda = await evitarRepeticion(senderId, respuestaCruda);
 
     let partesRespuestaIA = [];
 
