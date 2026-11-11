@@ -3909,6 +3909,13 @@ function bloqueEstiloYOrden(senderId) {
     `Estilo de esta conversación (${estilo.nombre}): ${estilo.texto}`;
 }
 
+// Solo el estilo (sin orden de datos): para prompts que fijan su propio orden.
+// Se inserta donde el prompt tenga el marcador {{ESTILO}}.
+function bloqueSoloEstilo(senderId) {
+  const estilo = ESTILOS_CONVERSACION[hashTexto(senderId) % ESTILOS_CONVERSACION.length];
+  return `ESTILO DE ESTA CONVERSACIÓN (${estilo.nombre}): ${estilo.texto}`;
+}
+
 function textoPlanoParaComparar(t) {
   return String(t || "").replace(/\[\[[^\]]*\]\]/g, " ").replace(/https?:\/\/\S+/gi, " ");
 }
@@ -4321,6 +4328,10 @@ async function procesarBufferInterno(senderId) {
     // se reemplaza por el estilo y el orden de datos de ESTE lead (ver arriba).
     if (promptSistema.includes("{{ESTILO_Y_ORDEN}}")) {
       promptSistema = promptSistema.split("{{ESTILO_Y_ORDEN}}").join(bloqueEstiloYOrden(senderId));
+    }
+    // {{ESTILO}}: solo el estilo de escritura, sin cambiar el orden de los datos.
+    if (promptSistema.includes("{{ESTILO}}")) {
+      promptSistema = promptSistema.split("{{ESTILO}}").join(bloqueSoloEstilo(senderId));
     }
 
     // Si el lead dijo que ya agendó pero la verificación en vivo con
