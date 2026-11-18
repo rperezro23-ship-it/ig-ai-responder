@@ -14879,6 +14879,15 @@ ${estilosBase()}
   // configuración general, ofrece crearle una propia (copia de la general).
   let cuentasConfigCache = [];
 
+  // Recuerda en este navegador qué configuración (agente) se estaba
+  // editando, para que al volver a Configuración salga la misma cuenta.
+  function recordarAgenteEnEdicion(){
+    try { if(agenteEnEdicionId) localStorage.setItem("cfgAgenteEnEdicion", String(agenteEnEdicionId)); } catch(e) {}
+  }
+  function leerAgenteRecordado(){
+    try { return Number(localStorage.getItem("cfgAgenteEnEdicion")) || null; } catch(e) { return null; }
+  }
+
   function cuentasQueUsanAgente(idAgente){
     return cuentasConfigCache.filter(c => Number(c.agente_id) === Number(idAgente));
   }
@@ -14932,6 +14941,7 @@ ${estilosBase()}
         agenteEnEdicionId = creado.agente.id;
       }
     }
+    recordarAgenteEnEdicion();
     renderSelectorAgentes();
     await cargarCuentasConfig();
     await cargarConfig(agenteEnEdicionId);
@@ -14966,7 +14976,13 @@ ${estilosBase()}
 
     listaAgentesCache = data.agentes;
     agenteActivoIdCache = data.agente_activo_id;
-    agenteEnEdicionId = idAMostrar || agenteActivoIdCache;
+    // Se vuelve a abrir la última configuración que se estaba editando
+    // (guardada en este navegador), para no caer en la general sin darse
+    // cuenta. Si ya no existe (se borró), se muestra la general.
+    const recordado = leerAgenteRecordado();
+    const existe = (id) => id && listaAgentesCache.some(a => a.id === Number(id));
+    agenteEnEdicionId = idAMostrar || (existe(recordado) ? recordado : null) || agenteActivoIdCache;
+    recordarAgenteEnEdicion();
 
     renderSelectorAgentes();
     actualizarUIAgente();
@@ -14976,6 +14992,7 @@ ${estilosBase()}
 
   document.getElementById("selectorAgente").addEventListener("change", async (e) => {
     agenteEnEdicionId = Number(e.target.value);
+    recordarAgenteEnEdicion();
     actualizarUIAgente();
     renderSelectorCuentaConfig();
     await cargarConfig(agenteEnEdicionId);
